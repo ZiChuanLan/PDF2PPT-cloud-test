@@ -2,16 +2,19 @@
 
 """Redis service for job metadata storage."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
+import logging
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import redis
 
 from ..config import get_settings
-from ..models.job import Job, JobStage, JobStatus
+from ..models.job import Job, JobStage, JobStatus, LayoutMode
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -88,12 +91,33 @@ class RedisService:
     def __init__(self):
         settings = get_settings()
         self.ttl_seconds = settings.job_ttl_minutes * 60
-        if str(settings.redis_url).startswith("memory://"):
+        self._memory_backend = False
+        redis_url = str(settings.redis_url or "").strip()
+        if redis_url.startswith("memory://"):
             self.redis_client = _memory_redis
+            self._memory_backend = True
         else:
-            self.redis_client = redis.from_url(
-                settings.redis_url, decode_responses=True
+            candidate = redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=1,
+                socket_timeout=1,
             )
+            try:
+                candidate.ping()
+                self.redis_client = candidate
+            except Exception as e:
+                logger.warning(
+                    "Redis unavailable (%s). Falling back to in-memory job store: %s",
+                    redis_url or "<empty>",
+                    e,
+                )
+                self.redis_client = _memory_redis
+                self._memory_backend = True
+
+    def is_memory_backend(self) -> bool:
+        """Whether RedisService currently uses in-memory backend."""
+        return bool(self._memory_backend)
 
     def _job_key(self, job_id: str) -> str:
         """Generate Redis key for job metadata."""
@@ -105,7 +129,7 @@ class RedisService:
 
     def create_job(self, job_id: str) -> Job:
         """Create a new job in Redis."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expires_at = now + timedelta(seconds=self.ttl_seconds)
 
         job = Job(
@@ -116,6 +140,8 @@ class RedisService:
             created_at=now,
             expires_at=expires_at,
             message="Job created, waiting to be queued",
+            error=None,
+            layout_mode=LayoutMode.fidelity,
         )
 
         # Store job metadata with TTL
@@ -133,7 +159,10 @@ class RedisService:
         if not data:
             return None
 
-        return Job.model_validate_json(data)
+        if not isinstance(data, (str, bytes, bytearray)):
+            return None
+
+        return Job.model_validate_json(cast(str | bytes | bytearray, data))
 
     def update_job(
         self,
@@ -190,11 +219,14 @@ class RedisService:
     def get_all_job_ids(self) -> list[str]:
         """Get all job IDs from Redis."""
         keys = self.redis_client.keys("job:*")
+        if not isinstance(keys, list):
+            return []
         # Filter out cancel keys and extract job IDs
-        job_ids = []
+        job_ids: list[str] = []
         for key in keys:
-            if ":cancel" not in key:
-                job_id = key.replace("job:", "")
+            key_str = str(key)
+            if ":cancel" not in key_str:
+                job_id = key_str.replace("job:", "")
                 job_ids.append(job_id)
         return job_ids
 

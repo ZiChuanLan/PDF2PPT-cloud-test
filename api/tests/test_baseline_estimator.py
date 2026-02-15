@@ -1,15 +1,6 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-
-_API_DIR = Path(__file__).resolve().parents[1]
-if str(_API_DIR) not in sys.path:
-    sys.path.insert(0, str(_API_DIR))
-
-
-from app.convert.pptx_generator import _estimate_baseline_ocr_line_height_pt  # noqa: E402
+from app.convert.pptx_generator import _estimate_baseline_ocr_line_height_pt
 
 
 def test_estimate_baseline_prefers_wide_body_text_over_tiny_ui_text() -> None:
@@ -46,4 +37,3 @@ def test_estimate_baseline_prefers_wide_body_text_over_tiny_ui_text() -> None:
     # Expect something close to the body line height (~20pt), not the tiny UI
     # height (~6pt).
     assert baseline >= 16.0
-

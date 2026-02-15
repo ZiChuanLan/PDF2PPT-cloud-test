@@ -1,15 +1,6 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-
-_API_DIR = Path(__file__).resolve().parents[1]
-if str(_API_DIR) not in sys.path:
-    sys.path.insert(0, str(_API_DIR))
-
-
-from app.convert.ocr import _dedupe_overlapping_ocr_items  # noqa: E402
+from app.convert.ocr import _dedupe_overlapping_ocr_items
 
 
 def test_dedupe_removes_shifted_duplicate_text_in_single_provider_mode() -> None:
@@ -22,4 +13,3 @@ def test_dedupe_removes_shifted_duplicate_text_in_single_provider_mode() -> None
     out = _dedupe_overlapping_ocr_items(items)
     assert len(out) == 1
     assert out[0]["text"] == "Hello world"
-

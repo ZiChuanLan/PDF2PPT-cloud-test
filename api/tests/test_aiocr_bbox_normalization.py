@@ -1,17 +1,8 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 from PIL import Image, ImageDraw
 
-
-_API_DIR = Path(__file__).resolve().parents[1]
-if str(_API_DIR) not in sys.path:
-    sys.path.insert(0, str(_API_DIR))
-
-
-from app.convert.ocr import AiOcrClient  # noqa: E402
+from app.convert.ocr import AiOcrClient
 
 
 def test_aiocr_bbox_normalization_handles_aspect_resized_coordinate_spaces() -> None:
@@ -45,7 +36,9 @@ def test_aiocr_bbox_normalization_handles_aspect_resized_coordinate_spaces() -> 
     ]
 
     # Dummy client: we only use internal normalization helpers (no network).
-    client = AiOcrClient(api_key="dummy", provider="openai", base_url=None, model="gpt-4o-mini")
+    client = AiOcrClient(
+        api_key="dummy", provider="openai", base_url=None, model="gpt-4o-mini"
+    )
 
     normalized, debug = client._normalize_items_to_pixels(raw_items, image=image)
     assert normalized

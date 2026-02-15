@@ -29,7 +29,17 @@ class Settings(BaseSettings):
     siliconflow_api_key: str | None = None
     siliconflow_base_url: str | None = "https://api.siliconflow.cn/v1"
     siliconflow_model: str | None = "Pro/deepseek-ai/deepseek-ocr"
-    cors_allow_origins: str = "http://localhost:3000"
+    # Per-page OCR timeout in seconds.  If a single page takes longer than
+    # this the page is skipped with a warning instead of blocking the whole job.
+    ocr_page_timeout_s: int = 300
+    # Circuit-breaker for repeated page-level timeouts. When consecutive OCR
+    # pages hit timeout this many times, skip remaining OCR pages so the job
+    # can continue to PPTX generation instead of appearing stuck.
+    ocr_max_consecutive_timeouts: int = 2
+    # Overall OCR stage timeout in seconds.  When exceeded the remaining pages
+    # are skipped and the job continues to PPTX generation.
+    ocr_total_timeout_s: int = 3600
+    cors_allow_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     cors_allow_origin_regex: str | None = None
 
     class Config:
@@ -45,7 +55,7 @@ def get_settings() -> Settings:
 def parse_cors_allow_origins(raw: str | None) -> list[str]:
     value = str(raw or "").strip()
     if not value:
-        return ["http://localhost:3000"]
+        return ["http://localhost:3000", "http://127.0.0.1:3000"]
     if value == "*":
         return ["*"]
     items: list[str] = []
@@ -53,4 +63,4 @@ def parse_cors_allow_origins(raw: str | None) -> list[str]:
         origin = item.strip()
         if origin and origin not in items:
             items.append(origin)
-    return items or ["http://localhost:3000"]
+    return items or ["http://localhost:3000", "http://127.0.0.1:3000"]

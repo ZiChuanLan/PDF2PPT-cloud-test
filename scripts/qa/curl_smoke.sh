@@ -11,7 +11,9 @@ API_URL=${API_URL:-}
 
 PYTHON=${PYTHON:-}
 if [[ -z "${PYTHON}" ]]; then
-  if [[ -x ".venv/bin/python3" ]]; then
+  if [[ -x "api/.venv/bin/python3" ]]; then
+    PYTHON="api/.venv/bin/python3"
+  elif [[ -x ".venv/bin/python3" ]]; then
     PYTHON=".venv/bin/python3"
   else
     PYTHON="python3"

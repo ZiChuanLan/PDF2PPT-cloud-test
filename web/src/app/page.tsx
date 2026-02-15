@@ -4,8 +4,9 @@ import * as React from "react"
 import Link from "next/link"
 import {
   ArrowRightIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
   DownloadIcon,
-  ExternalLinkIcon,
   FileTextIcon,
   ListChecksIcon,
   Settings2Icon,
@@ -16,7 +17,7 @@ import { useDropzone } from "react-dropzone"
 import { toast } from "sonner"
 
 import { cn } from "@/lib/utils"
-import { getApiBaseUrl, normalizeFetchError } from "@/lib/api"
+import { apiFetch, normalizeFetchError } from "@/lib/api"
 import { SILICONFLOW_BASE_URL, defaultSettings, loadStoredSettings, type Settings } from "@/lib/settings"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -30,6 +31,7 @@ import {
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
+import { PdfCanvasPreview } from "@/components/pdf-canvas-preview"
 import { useUploadSession } from "@/components/upload-session-provider"
 
 type JobStatusValue = "pending" | "processing" | "completed" | "failed" | "cancelled"
@@ -83,8 +85,6 @@ type ValidationResult = {
   message?: string
 }
 
-const API_BASE_URL = getApiBaseUrl()
-
 const TERMINAL_STATUSES = new Set<JobStatusValue>(["completed", "failed", "cancelled"])
 
 const jobStatusLabels: Record<JobStatusValue, string> = {
@@ -105,6 +105,37 @@ const jobStageLabels: Record<string, string> = {
   packaging: "打包",
   cleanup: "清理",
   done: "已完成",
+}
+
+const jobStageFlow = [
+  "queued",
+  "parsing",
+  "ocr",
+  "layout_assist",
+  "pptx_generating",
+  "packaging",
+  "done",
+] as const
+
+const homeTickerItems = [
+  "结构优先：先排版，再装饰",
+  "单任务单状态：避免多重反馈噪音",
+  "高级配置全部收敛到设置页",
+  "跟踪中心负责可观测性与排障",
+]
+const HOME_ACTIVE_JOB_STORAGE_KEY = "ppt-opencode:home:active-job-id"
+
+function toJobStatusResponse(row: JobListItem): JobStatusResponse {
+  return {
+    job_id: row.job_id,
+    status: row.status,
+    stage: row.stage,
+    progress: row.progress,
+    created_at: row.created_at,
+    expires_at: row.expires_at,
+    message: row.message ?? null,
+    error: row.error ?? null,
+  }
 }
 
 function formatDateTime(iso: string) {
@@ -237,6 +268,12 @@ function toIntOrUndefined(value: string): number | undefined {
   return i
 }
 
+function clampPositiveInt(value: number, max?: number) {
+  const normalized = Number.isFinite(value) ? Math.max(1, Math.floor(value)) : 1
+  if (!max || max <= 0) return normalized
+  return Math.min(normalized, max)
+}
+
 function createFormData(
   file: File,
   settings: Settings,
@@ -281,7 +318,8 @@ function createFormData(
     const shouldAttachOcrAiParams =
       run.effectiveOcrProvider === "aiocr" ||
       run.effectiveOcrProvider === "paddle" ||
-      Boolean(settings.ocrAiLinebreakAssistMode === "on" && run.effectiveOcrAiKey)
+      Boolean(settings.ocrAiLinebreakAssistMode === "on" && run.effectiveOcrAiKey) ||
+      Boolean(settings.enableLayoutAssist && run.effectiveOcrAiKey)
     if (shouldAttachOcrAiParams) {
       if (run.effectiveOcrAiKey) form.append("ocr_ai_api_key", run.effectiveOcrAiKey)
       if (run.effectiveOcrAiBaseUrl) form.append("ocr_ai_base_url", run.effectiveOcrAiBaseUrl)
@@ -335,10 +373,17 @@ export default function Home() {
   const [activeJob, setActiveJob] = React.useState<JobStatusResponse | null>(null)
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [actionError, setActionError] = React.useState<string | null>(null)
+  const [previewPageInput, setPreviewPageInput] = React.useState("1")
+  const [previewPageCount, setPreviewPageCount] = React.useState(0)
+  const [usePageRange, setUsePageRange] = React.useState(
+    Boolean(pageStartInput.trim() || pageEndInput.trim())
+  )
 
   const [jobs, setJobs] = React.useState<JobListItem[]>([])
   const [queueSize, setQueueSize] = React.useState(0)
   const [jobsLoading, setJobsLoading] = React.useState(false)
+  const [isJobIdHydrated, setIsJobIdHydrated] = React.useState(false)
+  const jobIdRef = React.useRef<string | null>(null)
   const lastTerminalToastRef = React.useRef<{
     jobId: string | null
     status: JobStatusValue | null
@@ -369,7 +414,7 @@ export default function Home() {
   const fetchJobs = React.useCallback(async (silent = true) => {
     if (!silent) setJobsLoading(true)
     try {
-      const response = await fetch(`${API_BASE_URL}/jobs?limit=50`)
+      const response = await apiFetch("/jobs?limit=50")
       if (!response.ok) {
         throw new Error("加载任务列表失败")
       }
@@ -377,6 +422,17 @@ export default function Home() {
       const rows = Array.isArray(body?.jobs) ? body.jobs : []
       setJobs(rows)
       setQueueSize(typeof body?.queue_size === "number" ? Math.max(0, body.queue_size) : 0)
+
+      const currentJobId = jobIdRef.current
+      if (currentJobId) {
+        const matched = rows.find((row) => row.job_id === currentJobId)
+        if (matched) {
+          setActiveJob(toJobStatusResponse(matched))
+          if (TERMINAL_STATUSES.has(matched.status)) {
+            setIsSubmitting(false)
+          }
+        }
+      }
     } catch (e) {
       if (!silent) {
         setActionError(normalizeFetchError(e, "加载任务列表失败"))
@@ -387,7 +443,7 @@ export default function Home() {
   }, [])
 
   const fetchJobStatus = React.useCallback(async (targetJobId: string) => {
-    const response = await fetch(`${API_BASE_URL}/jobs/${targetJobId}`)
+    const response = await apiFetch(`/jobs/${targetJobId}`)
     if (!response.ok) {
       throw new Error("查询任务状态失败")
     }
@@ -405,8 +461,14 @@ export default function Home() {
     if (next) {
       setPageStartInput("")
       setPageEndInput("")
+      setPreviewPageInput("1")
+      setPreviewPageCount(0)
+      setUsePageRange(false)
     } else {
       clearUpload()
+      setPreviewPageInput("1")
+      setPreviewPageCount(0)
+      setUsePageRange(false)
     }
   }, [clearUpload, setFile, setPageEndInput, setPageStartInput])
 
@@ -428,13 +490,13 @@ export default function Home() {
       return
     }
 
-    const pageStart = toIntOrUndefined(pageStartInput)
-    const pageEnd = toIntOrUndefined(pageEndInput)
-    if ((pageStart && !pageEnd) || (!pageStart && pageEnd)) {
+    const pageStart = usePageRange ? toIntOrUndefined(pageStartInput) : undefined
+    const pageEnd = usePageRange ? toIntOrUndefined(pageEndInput) : undefined
+    if (usePageRange && ((pageStart && !pageEnd) || (!pageStart && pageEnd))) {
       setActionError("页码范围请同时填写起始页和结束页")
       return
     }
-    if (pageStart && pageEnd && pageStart > pageEnd) {
+    if (usePageRange && pageStart && pageEnd && pageStart > pageEnd) {
       setActionError("页码范围错误：起始页不能大于结束页")
       return
     }
@@ -445,7 +507,7 @@ export default function Home() {
 
     try {
       const formData = createFormData(file, settingsSnapshot, pageStart, pageEnd)
-      const response = await fetch(`${API_BASE_URL}/jobs`, {
+      const response = await apiFetch("/jobs", {
         method: "POST",
         body: formData,
       })
@@ -476,12 +538,12 @@ export default function Home() {
       setActionError(normalizeFetchError(e, "创建任务失败"))
       setIsSubmitting(false)
     }
-  }, [fetchJobStatus, fetchJobs, file, pageEndInput, pageStartInput, settingsSnapshot])
+  }, [fetchJobStatus, fetchJobs, file, pageEndInput, pageStartInput, settingsSnapshot, usePageRange])
 
   const handleCancelCurrentJob = React.useCallback(async () => {
     if (!jobId) return
     try {
-      await fetch(`${API_BASE_URL}/jobs/${jobId}/cancel`, { method: "POST" })
+      await apiFetch(`/jobs/${jobId}/cancel`, { method: "POST" })
       toast("已发送取消请求")
       void fetchJobs(true)
     } catch {
@@ -490,9 +552,10 @@ export default function Home() {
   }, [fetchJobs, jobId])
 
   const handleDownload = React.useCallback(async (targetJobId: string) => {
-    const response = await fetch(`${API_BASE_URL}/jobs/${targetJobId}/download`)
+    const response = await apiFetch(`/jobs/${targetJobId}/download`)
     if (!response.ok) {
-      throw new Error("下载失败")
+      const body = await response.json().catch(() => null)
+      throw new Error(body?.message || `下载失败（HTTP ${response.status}）`)
     }
     const blob = await response.blob()
     const url = window.URL.createObjectURL(blob)
@@ -508,7 +571,7 @@ export default function Home() {
   const handleCancelById = React.useCallback(
     async (targetJobId: string) => {
       try {
-        await fetch(`${API_BASE_URL}/jobs/${targetJobId}/cancel`, { method: "POST" })
+        await apiFetch(`/jobs/${targetJobId}/cancel`, { method: "POST" })
         toast("取消请求已发送")
         void fetchJobs(true)
       } catch {
@@ -517,6 +580,42 @@ export default function Home() {
     },
     [fetchJobs]
   )
+
+  const handleResetAll = React.useCallback(() => {
+    clearUpload()
+    setJobId(null)
+    setActiveJob(null)
+    setIsSubmitting(false)
+    setActionError(null)
+    setPreviewPageInput("1")
+    setPreviewPageCount(0)
+    setUsePageRange(false)
+    setPageStartInput("")
+    setPageEndInput("")
+  }, [clearUpload, setPageEndInput, setPageStartInput])
+
+  React.useEffect(() => {
+    jobIdRef.current = jobId
+  }, [jobId])
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return
+    const storedJobId = window.localStorage.getItem(HOME_ACTIVE_JOB_STORAGE_KEY)
+    if (storedJobId) {
+      setJobId((prev) => prev || storedJobId)
+    }
+    setIsJobIdHydrated(true)
+  }, [])
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return
+    if (!isJobIdHydrated) return
+    if (jobId) {
+      window.localStorage.setItem(HOME_ACTIVE_JOB_STORAGE_KEY, jobId)
+    } else {
+      window.localStorage.removeItem(HOME_ACTIVE_JOB_STORAGE_KEY)
+    }
+  }, [isJobIdHydrated, jobId])
 
   React.useEffect(() => {
     refreshSettingsSnapshot()
@@ -603,63 +702,110 @@ export default function Home() {
 
   const progressValue = Math.max(0, Math.min(100, Number(activeJob?.progress || 0)))
   const currentStatus = activeJob?.status || (isSubmitting ? "processing" : "pending")
+  const currentStageCode = activeJob?.stage || (isSubmitting ? "queued" : "")
   const currentStageLabel = activeJob?.stage
     ? (jobStageLabels[activeJob.stage] ?? activeJob.stage)
     : "等待开始"
+  const stageFlowIndex = currentStageCode
+    ? jobStageFlow.findIndex((stage) => stage === currentStageCode)
+    : -1
+  const stageLiveText = activeJob
+    ? `任务状态 ${jobStatusLabels[currentStatus as JobStatusValue] || currentStatus}，阶段 ${currentStageLabel}，进度 ${progressValue}%`
+    : "尚无进行中的任务"
   const inFlightJobs = jobs.filter((row) => row.status === "pending" || row.status === "processing").length
   const failedJobs = jobs.filter((row) => row.status === "failed").length
   const completedJobs = jobs.filter((row) => row.status === "completed").length
-  const recentJobs = jobs.slice(0, 3)
-
   const canStart = Boolean(file) && !isSubmitting
-  const filePreviewUrl = React.useMemo(() => (file ? URL.createObjectURL(file) : ""), [file])
+  const [filePreviewUrl, setFilePreviewUrl] = React.useState("")
   React.useEffect(() => {
-    return () => {
-      if (filePreviewUrl) {
-        URL.revokeObjectURL(filePreviewUrl)
-      }
+    if (!file) {
+      setFilePreviewUrl("")
+      return
     }
-  }, [filePreviewUrl])
-  const previewPage = toIntOrUndefined(pageStartInput)
-  const previewSrc = filePreviewUrl
-    ? `${filePreviewUrl}#toolbar=1&view=FitH${previewPage ? `&page=${previewPage}` : ""}`
-    : ""
+
+    const nextUrl = URL.createObjectURL(file)
+    setFilePreviewUrl(nextUrl)
+
+    return () => {
+      URL.revokeObjectURL(nextUrl)
+    }
+  }, [file])
+  const previewPage = clampPositiveInt(toIntOrUndefined(previewPageInput) || 1, previewPageCount || undefined)
+  const handlePreviewPageCommit = React.useCallback(
+    (value: string) => {
+      const raw = toIntOrUndefined(value) || 1
+      const normalized = clampPositiveInt(raw, previewPageCount || undefined)
+      setPreviewPageInput(String(normalized))
+    },
+    [previewPageCount]
+  )
+  const handlePreviewPageCountChange = React.useCallback((count: number) => {
+    setPreviewPageCount(count)
+    setPreviewPageInput((prev) =>
+      String(clampPositiveInt(toIntOrUndefined(prev) || 1, count))
+    )
+  }, [])
+  const editionDate = new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    timeZone: "Asia/Shanghai",
+  }).format(new Date())
 
   return (
     <div className="min-h-dvh bg-background">
       <div className="mx-auto w-full max-w-screen-xl px-4 py-6 md:py-10">
-        <header className="border border-border bg-background p-5 md:p-6">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <div className="font-mono text-xs uppercase tracking-[0.16em] text-muted-foreground">
-                PDF → 可编辑 PPT
+        <header className="newsprint-texture border border-border bg-background">
+          <div className="grid md:grid-cols-12">
+            <div className="border-b border-border px-4 py-5 md:col-span-8 md:border-b-0 md:border-r md:px-6 md:py-6">
+              <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                第 1 版 · {editionDate} · PDF 编排台
               </div>
-              <h1 className="mt-1 text-2xl font-semibold tracking-tight md:text-3xl">
-                首页保持简洁，设置页负责专业配置
+              <h1 className="mt-3 font-serif text-4xl leading-[0.9] tracking-tight md:text-7xl">
+                上传即转换
               </h1>
-              <p className="mt-2 text-sm text-muted-foreground">
-                上传文件后直接开始转换；参数细调在独立设置页完成。
+              <p className="mt-3 max-w-3xl text-sm leading-relaxed text-muted-foreground md:text-base">
+                首页仅保留任务启动与状态观察。复杂参数集中在设置页，追踪与排障集中在跟踪中心。
               </p>
             </div>
-            <div className="flex items-center gap-2">
-              <Button type="button" variant="outline" asChild>
-                <Link href="/tracking">
-                  <ListChecksIcon className="size-4" />
-                  跟踪中心
-                </Link>
-              </Button>
-              <Button type="button" asChild>
-                <Link href="/settings">
-                  <Settings2Icon className="size-4" />
-                  打开设置页
-                </Link>
-              </Button>
+            <div className="flex flex-col justify-between gap-3 px-4 py-5 md:col-span-4 md:px-6 md:py-6">
+              <div className="flex flex-wrap gap-2">
+                <Badge variant="outline">任务面板</Badge>
+                <Badge className="border-[#cc0000] bg-[#cc0000] text-[#f9f9f7]">稳定模式</Badge>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" variant="outline" asChild>
+                  <Link href="/tracking">
+                    <ListChecksIcon className="size-4" />
+                    跟踪中心
+                  </Link>
+                </Button>
+                <Button type="button" asChild>
+                  <Link href="/settings">
+                    <Settings2Icon className="size-4" />
+                    设置页
+                  </Link>
+                </Button>
+              </div>
+            </div>
+          </div>
+          <div className="news-ticker relative overflow-hidden border-t border-border bg-muted/40 py-2">
+            <div className="news-ticker-track flex min-w-max gap-8 px-4 font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground md:px-6">
+              {[...homeTickerItems, ...homeTickerItems].map((item, idx) => (
+                <span key={`${item}-${idx}`} className="whitespace-nowrap">
+                  {item}
+                </span>
+              ))}
             </div>
           </div>
         </header>
 
-        <main className="mt-6 grid gap-4 lg:grid-cols-12">
-          <Card className="lg:col-span-7 border-border">
+        <p className="sr-only" role="status" aria-live="polite">
+          {stageLiveText}
+        </p>
+
+        <main className="mt-6 grid gap-4 lg:grid-cols-2">
+          <Card className="hard-shadow-hover border-border">
             <CardHeader>
               <CardTitle className="text-lg">上传与执行</CardTitle>
               <CardDescription>
@@ -695,6 +841,9 @@ export default function Home() {
                     variant="ghost"
                     onClick={() => {
                       clearUpload()
+                      setPreviewPageInput("1")
+                      setPreviewPageCount(0)
+                      setUsePageRange(false)
                     }}
                   >
                     清空
@@ -702,53 +851,8 @@ export default function Home() {
                 </div>
               ) : null}
 
-              {filePreviewUrl ? (
-                <div className="grid gap-2 border border-border bg-background p-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="text-xs text-muted-foreground">
-                      PDF 预览（可配合“起始页”快速定位）
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => window.open(filePreviewUrl, "_blank", "noopener,noreferrer")}
-                    >
-                      新窗口预览
-                      <ExternalLinkIcon className="size-4" />
-                    </Button>
-                  </div>
-                  <iframe
-                    title="上传 PDF 预览"
-                    src={previewSrc}
-                    className="h-[380px] w-full border border-border bg-white"
-                  />
-                </div>
-              ) : null}
-
-              <div className="grid gap-3 md:grid-cols-2">
-                <div className="grid gap-2">
-                  <label className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground">
-                    起始页（可选）
-                  </label>
-                  <Input
-                    inputMode="numeric"
-                    placeholder="例如 1"
-                    value={pageStartInput}
-                    onChange={(e) => setPageStartInput(e.target.value)}
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <label className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground">
-                    结束页（可选）
-                  </label>
-                  <Input
-                    inputMode="numeric"
-                    placeholder="例如 5"
-                    value={pageEndInput}
-                    onChange={(e) => setPageEndInput(e.target.value)}
-                  />
-                </div>
+              <div className="border border-dashed border-border bg-muted/15 p-3 text-xs text-muted-foreground">
+                页码范围与“单页试跑/开始转换”已放到下方 PDF 预览区域，操作路径更连贯。
               </div>
 
               <div className="border border-border bg-muted/30 p-3">
@@ -770,120 +874,271 @@ export default function Home() {
                 </div>
               </div>
             </CardContent>
-            <CardFooter className="border-t border-border flex-wrap justify-between gap-2">
-              <div className="flex gap-2">
-                <Button type="button" onClick={handleConvert} disabled={!canStart}>
-                  开始转换
-                </Button>
-                <Button type="button" variant="outline" onClick={() => {
-                  clearUpload()
-                  setJobId(null)
-                  setActiveJob(null)
-                  setIsSubmitting(false)
-                  setActionError(null)
-                }}>
-                  重置
-                </Button>
-              </div>
-              {jobId && !TERMINAL_STATUSES.has(currentStatus as JobStatusValue) ? (
-                <Button type="button" variant="destructive" onClick={handleCancelCurrentJob}>
-                  <XCircleIcon className="size-4" />
-                  取消当前任务
-                </Button>
-              ) : null}
-            </CardFooter>
           </Card>
 
-          <Card className="lg:col-span-5 border-border">
-            <CardHeader>
-              <CardTitle className="text-lg">当前任务状态</CardTitle>
-              <CardDescription>实时轮询后端状态，稳定且便于排查问题。</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant={currentStatus === "failed" ? "destructive" : currentStatus === "completed" ? "secondary" : "outline"}>
-                  {jobStatusLabels[currentStatus as JobStatusValue] || currentStatus}
-                </Badge>
-                <Badge variant="outline">阶段：{currentStageLabel}</Badge>
-                {jobId ? <Badge variant="outline">任务号：{jobId}</Badge> : null}
-              </div>
-
-              <Progress value={progressValue} className="h-2" />
-
-              <div className="text-sm text-muted-foreground">
-                {activeJob?.message || (isSubmitting ? "任务已提交，正在等待状态更新…" : "尚未开始任务")}
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="border border-border bg-muted/30 p-2">队列总数：{queueSize}</div>
-                <div className="border border-border bg-muted/30 p-2">执行中：{inFlightJobs}</div>
-                <div className="border border-border bg-muted/30 p-2">已完成：{completedJobs}</div>
-                <div className="border border-border bg-muted/30 p-2">失败：{failedJobs}</div>
-              </div>
-
-              {!jobId ? (
-                <div className="border border-dashed border-border bg-muted/20 p-3 text-xs text-muted-foreground">
-                  暂无当前任务。上传 PDF 后点击“开始转换”，状态会在这里实时更新。
+          {filePreviewUrl ? (
+            <Card className="border-border">
+              <CardHeader className="pb-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <CardTitle className="text-lg">PDF 预览</CardTitle>
+                    <CardDescription>自定义预览器。当前页与“单页试跑”始终保持一致。</CardDescription>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon-xs"
+                      disabled={previewPage <= 1}
+                      onClick={() => {
+                        setPreviewPageInput(String(clampPositiveInt(previewPage - 1, previewPageCount || undefined)))
+                      }}
+                      aria-label="预览上一页"
+                    >
+                      <ChevronLeftIcon className="size-3" />
+                    </Button>
+                    <Input
+                      inputMode="numeric"
+                      value={previewPageInput}
+                      onChange={(e) => setPreviewPageInput(e.target.value)}
+                      onBlur={(e) => handlePreviewPageCommit(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault()
+                          handlePreviewPageCommit((e.target as HTMLInputElement).value)
+                        }
+                      }}
+                      className="h-8 w-20 text-center"
+                      aria-label="当前预览页"
+                    />
+                    <span className="w-14 text-right font-mono text-xs text-muted-foreground">
+                      / {previewPageCount || "?"}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon-xs"
+                      disabled={previewPageCount > 0 ? previewPage >= previewPageCount : true}
+                      onClick={() => {
+                        setPreviewPageInput(String(clampPositiveInt(previewPage + 1, previewPageCount || undefined)))
+                      }}
+                      aria-label="预览下一页"
+                    >
+                      <ChevronRightIcon className="size-3" />
+                    </Button>
+                  </div>
                 </div>
-              ) : null}
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <PdfCanvasPreview
+                  fileUrl={filePreviewUrl}
+                  page={previewPage}
+                  className="mx-auto max-w-[840px]"
+                  onPageCountChange={handlePreviewPageCountChange}
+                />
+                <div className="grid gap-3 border border-border bg-muted/20 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-[#111111]"
+                        checked={usePageRange}
+                        onChange={(e) => {
+                          const enabled = e.target.checked
+                          setUsePageRange(enabled)
+                          if (!enabled) {
+                            setPageStartInput("")
+                            setPageEndInput("")
+                          }
+                        }}
+                      />
+                      限定页码范围
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="xs"
+                        disabled={!file}
+                        onClick={() => {
+                          setUsePageRange(true)
+                          const current = String(previewPage)
+                          setPageStartInput(current)
+                          setPageEndInput(current)
+                        }}
+                      >
+                        单页试跑（当前页）
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        onClick={() => {
+                          setUsePageRange(false)
+                          setPageStartInput("")
+                          setPageEndInput("")
+                        }}
+                      >
+                        整份处理
+                      </Button>
+                    </div>
+                  </div>
 
-              {recentJobs.length ? (
-                <div className="grid gap-2 border border-border bg-muted/20 p-3">
-                  <div className="text-xs font-medium text-muted-foreground">最近任务快照</div>
-                  {recentJobs.map((row) => {
-                    const rowStageLabel = jobStageLabels[row.stage] || row.stage
-                    return (
-                      <div key={row.job_id} className="flex items-start justify-between gap-2 border-t border-border/60 pt-2 first:border-t-0 first:pt-0">
-                        <div className="min-w-0">
-                          <div className="truncate font-mono text-[11px]">{row.job_id}</div>
-                          <div className="text-[11px] text-muted-foreground">{rowStageLabel} · {formatDateTime(row.created_at)}</div>
-                        </div>
-                        <Badge variant={row.status === "failed" ? "destructive" : row.status === "completed" ? "secondary" : "outline"}>
-                          {jobStatusLabels[row.status]}
-                        </Badge>
+                  {usePageRange ? (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="grid gap-2">
+                        <label className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground">
+                          起始页
+                        </label>
+                        <Input
+                          inputMode="numeric"
+                          placeholder="例如 1"
+                          value={pageStartInput}
+                          onChange={(e) => setPageStartInput(e.target.value)}
+                        />
                       </div>
-                    )
-                  })}
-                  <Button type="button" variant="ghost" asChild className="h-auto justify-start px-0 text-xs">
-                    <Link href="/tracking">打开跟踪中心查看全部</Link>
-                  </Button>
-                </div>
-              ) : (
-                <div className="border border-dashed border-border p-3 text-xs text-muted-foreground">
-                  暂无历史任务，转换后这里会显示最近任务快照。
-                </div>
-              )}
+                      <div className="grid gap-2">
+                        <label className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground">
+                          结束页
+                        </label>
+                        <Input
+                          inputMode="numeric"
+                          placeholder="例如 5"
+                          value={pageEndInput}
+                          onChange={(e) => setPageEndInput(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      当前将处理整份文档。若只想做快速验证，点击“单页试跑（当前页）”即可。
+                    </p>
+                  )}
 
-              {activeJob?.error?.message ? (
-                <div className="border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
-                  {activeJob.error.message}
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+                    <div className="flex gap-2">
+                      <Button type="button" onClick={handleConvert} disabled={!canStart}>
+                        开始转换
+                      </Button>
+                      <Button type="button" variant="outline" onClick={handleResetAll}>
+                        重置
+                      </Button>
+                    </div>
+                    {jobId && !TERMINAL_STATUSES.has(currentStatus as JobStatusValue) ? (
+                      <Button type="button" variant="destructive" onClick={handleCancelCurrentJob}>
+                        <XCircleIcon className="size-4" />
+                        取消当前任务
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
-              ) : null}
-
-              {actionError ? (
-                <div className="border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
-                  {actionError}
+              </CardContent>
+            </Card>
+          ) : (
+            <Card className="border-border bg-muted/20">
+              <CardHeader>
+                <CardTitle className="text-lg">PDF 预览</CardTitle>
+                <CardDescription>上传 PDF 后可在此预览并执行单页试跑。</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex min-h-[320px] items-center justify-center border border-dashed border-border bg-background px-4 text-sm text-muted-foreground">
+                  暂无可预览文件
                 </div>
-              ) : null}
-
-              {jobId && currentStatus === "completed" ? (
-                <Button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      await handleDownload(jobId)
-                    } catch (e) {
-                      toast.error(normalizeFetchError(e, "下载失败"))
-                    }
-                  }}
-                >
-                  <DownloadIcon className="size-4" />
-                  下载 PPTX
-                </Button>
-              ) : null}
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+          )}
         </main>
+
+        <Card className="mt-6 hard-shadow-hover border-border">
+          <CardHeader>
+            <CardTitle className="text-lg">当前任务状态</CardTitle>
+            <CardDescription>实时轮询后端状态，稳定且便于排查问题。</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={currentStatus === "failed" ? "destructive" : currentStatus === "completed" ? "secondary" : "outline"}>
+                {jobStatusLabels[currentStatus as JobStatusValue] || currentStatus}
+              </Badge>
+              <Badge variant="outline">阶段：{currentStageLabel}</Badge>
+              {jobId ? <Badge variant="outline">任务号：{jobId}</Badge> : null}
+            </div>
+
+            <Progress value={progressValue} className="h-2" />
+
+            {(jobId || isSubmitting || activeJob) ? (
+              <div className="grid gap-1 sm:grid-cols-2">
+                {jobStageFlow.map((stage, index) => {
+                  const isDone = stageFlowIndex >= index && stageFlowIndex >= 0
+                  const isCurrent = currentStageCode === stage
+                  return (
+                    <div
+                      key={stage}
+                      className={cn(
+                        "border px-2 py-1 text-[11px] font-mono uppercase tracking-[0.12em]",
+                        isCurrent
+                          ? "border-[#cc0000] bg-[#cc0000] text-[#f9f9f7]"
+                          : isDone
+                            ? "border-border bg-muted/60 text-foreground"
+                            : "border-border/70 bg-background text-muted-foreground"
+                      )}
+                    >
+                      {jobStageLabels[stage] || stage}
+                    </div>
+                  )
+                })}
+              </div>
+            ) : null}
+
+            <div className="text-sm text-muted-foreground">
+              {activeJob?.message || (isSubmitting ? "任务已提交，正在等待状态更新…" : "尚未开始任务")}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="border border-border bg-muted/30 p-2">队列总数：{queueSize}</div>
+              <div className="border border-border bg-muted/30 p-2">执行中：{inFlightJobs}</div>
+              <div className="border border-border bg-muted/30 p-2">已完成：{completedJobs}</div>
+              <div className="border border-border bg-muted/30 p-2">失败：{failedJobs}</div>
+            </div>
+
+            {!jobId ? (
+              <div className="border border-dashed border-border bg-muted/20 p-3 text-xs text-muted-foreground">
+                暂无当前任务。上传 PDF 后点击“开始转换”，状态会在这里实时更新。
+              </div>
+            ) : null}
+
+            <div className="border border-dashed border-border p-3 text-xs text-muted-foreground">
+              历史任务请查看下方“最近任务”表格，避免信息重复。
+            </div>
+
+            {activeJob?.error?.message ? (
+              <div className="border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
+                {activeJob.error.message}
+              </div>
+            ) : null}
+
+            {actionError ? (
+              <div className="border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
+                {actionError}
+              </div>
+            ) : null}
+
+            {jobId && currentStatus === "completed" ? (
+              <Button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await handleDownload(jobId)
+                  } catch (e) {
+                    toast.error(normalizeFetchError(e, "下载失败"))
+                  }
+                }}
+              >
+                <DownloadIcon className="size-4" />
+                下载 PPTX
+              </Button>
+            ) : null}
+          </CardContent>
+        </Card>
 
         <Card className="mt-6 border-border">
           <CardHeader>
@@ -917,7 +1172,10 @@ export default function Home() {
                       const canCancel = row.status === "pending" || row.status === "processing"
                       const canDownload = row.status === "completed"
                       return (
-                        <tr key={row.job_id} className="border-t border-border">
+                        <tr
+                          key={row.job_id}
+                          className={cn("border-t border-border", row.job_id === jobId && "bg-muted/35")}
+                        >
                           <td className="px-3 py-2 font-mono text-xs">{row.job_id}</td>
                           <td className="px-3 py-2">
                             <Badge variant={row.status === "failed" ? "destructive" : row.status === "completed" ? "secondary" : "outline"}>

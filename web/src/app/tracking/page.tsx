@@ -7,9 +7,11 @@ import { useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 
 import { cn } from "@/lib/utils"
-import { getApiBaseUrl, getApiOrigin, normalizeFetchError } from "@/lib/api"
+import { apiFetch, normalizeFetchError, resolveApiOrigin } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Select } from "@/components/ui/select"
 import {
   Card,
   CardContent,
@@ -59,9 +61,6 @@ type JobArtifactsResponse = {
   available_pages: number[]
 }
 
-const API_ORIGIN = getApiOrigin()
-const API_BASE_URL = getApiBaseUrl()
-
 const jobStatusLabels: Record<string, string> = {
   pending: "排队中",
   processing: "处理中",
@@ -89,6 +88,15 @@ const queueStateLabels: Record<string, string> = {
   done: "完成",
 }
 
+const jobStatusFilterOptions: Array<{ value: "all" | JobStatusValue; label: string }> = [
+  { value: "all", label: "全部状态" },
+  { value: "pending", label: "排队中" },
+  { value: "processing", label: "处理中" },
+  { value: "completed", label: "已完成" },
+  { value: "failed", label: "失败" },
+  { value: "cancelled", label: "已取消" },
+]
+
 function formatDateTime(iso: string) {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso
@@ -103,6 +111,7 @@ function formatDateTime(iso: string) {
 }
 
 function TrackingPageContent() {
+  const [apiOrigin, setApiOrigin] = React.useState("")
   const searchParams = useSearchParams()
   const requestedJobId = (searchParams.get("job") || "").trim()
 
@@ -120,16 +129,30 @@ function TrackingPageContent() {
   const [trackingMenu, setTrackingMenu] = React.useState<"frames" | "compare">("compare")
   const [compareSplitRatio, setCompareSplitRatio] = React.useState(0.5)
   const [showInlinePdf, setShowInlinePdf] = React.useState(false)
+  const [jobKeyword, setJobKeyword] = React.useState("")
+  const [statusFilter, setStatusFilter] = React.useState<"all" | JobStatusValue>("all")
 
   const currentTrackedJob = React.useMemo(() => {
     if (!trackedArtifacts?.job_id) return null
     return jobRecords.find((r) => r.job_id === trackedArtifacts.job_id) || null
   }, [jobRecords, trackedArtifacts?.job_id])
 
+  const filteredJobRecords = React.useMemo(() => {
+    const keyword = jobKeyword.trim().toLowerCase()
+    return jobRecords.filter((record) => {
+      if (statusFilter !== "all" && record.status !== statusFilter) return false
+      if (!keyword) return true
+      return (
+        record.job_id.toLowerCase().includes(keyword) ||
+        (record.stage || "").toLowerCase().includes(keyword)
+      )
+    })
+  }, [jobKeyword, jobRecords, statusFilter])
+
   const fetchJobs = React.useCallback(async (silent = true) => {
     if (!silent) setIsJobsLoading(true)
     try {
-      const response = await fetch(`${API_BASE_URL}/jobs?limit=60`)
+      const response = await apiFetch("/jobs?limit=60")
       if (!response.ok) {
         throw new Error("加载任务记录失败")
       }
@@ -183,7 +206,7 @@ function TrackingPageContent() {
     setTrackedArtifactsError(null)
     setShowInlinePdf(false)
     try {
-      const response = await fetch(`${API_BASE_URL}/jobs/${targetJobId}/artifacts`)
+      const response = await apiFetch(`/jobs/${targetJobId}/artifacts`)
       if (!response.ok) {
         const body = await response.json().catch(() => null)
         throw new Error(body?.message || "加载任务产物失败")
@@ -225,8 +248,11 @@ function TrackingPageContent() {
   }, [])
 
   const handleDownloadByJobId = React.useCallback(async (targetJobId: string) => {
-    const response = await fetch(`${API_BASE_URL}/jobs/${targetJobId}/download`)
-    if (!response.ok) throw new Error("下载失败")
+    const response = await apiFetch(`/jobs/${targetJobId}/download`)
+    if (!response.ok) {
+      const body = await response.json().catch(() => null)
+      throw new Error(body?.message || `下载失败（HTTP ${response.status}）`)
+    }
     const blob = await response.blob()
     const url = window.URL.createObjectURL(blob)
     const a = document.createElement("a")
@@ -236,6 +262,18 @@ function TrackingPageContent() {
     a.click()
     a.remove()
     window.URL.revokeObjectURL(url)
+  }, [])
+
+  React.useEffect(() => {
+    let mounted = true
+    void resolveApiOrigin()
+      .then((origin) => {
+        if (mounted) setApiOrigin(origin)
+      })
+      .catch(() => {})
+    return () => {
+      mounted = false
+    }
   }, [])
 
   React.useEffect(() => {
@@ -270,19 +308,31 @@ function TrackingPageContent() {
     []
   )
 
+  const updateCompareSplitRatio = React.useCallback((clientX: number, rect: DOMRect) => {
+    if (rect.width <= 0) return
+    const ratio = (clientX - rect.left) / rect.width
+    setCompareSplitRatio(Math.max(0, Math.min(1, ratio)))
+  }, [])
+
   const handleComparePointerMove = React.useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      const rect = event.currentTarget.getBoundingClientRect()
-      if (rect.width <= 0) return
-      const ratio = (event.clientX - rect.left) / rect.width
-      setCompareSplitRatio(Math.max(0, Math.min(1, ratio)))
+      updateCompareSplitRatio(event.clientX, event.currentTarget.getBoundingClientRect())
     },
-    []
+    [updateCompareSplitRatio]
+  )
+
+  const handleCompareTouchMove = React.useCallback(
+    (event: React.TouchEvent<HTMLDivElement>) => {
+      const touch = event.touches[0]
+      if (!touch) return
+      updateCompareSplitRatio(touch.clientX, event.currentTarget.getBoundingClientRect())
+    },
+    [updateCompareSplitRatio]
   )
 
   const trackedPages = trackedArtifacts?.available_pages || []
   const sourcePdfAbsoluteUrl = trackedArtifacts?.source_pdf_url
-    ? `${API_ORIGIN}${trackedArtifacts.source_pdf_url}`
+    ? `${apiOrigin}${trackedArtifacts.source_pdf_url}`
     : null
   const activeTrackedPage = trackedPages.includes(trackedArtifactsPage)
     ? trackedArtifactsPage
@@ -345,18 +395,40 @@ function TrackingPageContent() {
                 <CardTitle>队列 / 历史记录</CardTitle>
                 <Badge variant="outline">排队 {queueSize}</Badge>
               </div>
-              <CardDescription>点击任务后在右侧查看跟踪画面</CardDescription>
+              <CardDescription>支持按状态和任务号筛选，点击后在右侧查看产物追踪。</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3 py-4">
+              <div className="grid gap-2 sm:grid-cols-[1fr_150px]">
+                <Input
+                  value={jobKeyword}
+                  onChange={(e) => setJobKeyword(e.target.value)}
+                  placeholder="搜索任务号 / 阶段代码"
+                />
+                <Select
+                  value={statusFilter}
+                  onChange={(e) =>
+                    setStatusFilter((e.target.value || "all") as "all" | JobStatusValue)
+                  }
+                >
+                  {jobStatusFilterOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+                当前显示 {filteredJobRecords.length} / {jobRecords.length}
+              </div>
               {jobsError && !jobRecords.length ? (
                 <div className="text-xs text-destructive">{jobsError}</div>
               ) : null}
               {isJobsLoading && !jobRecords.length ? (
                 <div className="text-xs text-muted-foreground">加载中...</div>
               ) : null}
-              {jobRecords.length ? (
+              {filteredJobRecords.length ? (
                 <div className="max-h-[70vh] overflow-y-auto border">
-                  {jobRecords.map((record) => {
+                  {filteredJobRecords.map((record) => {
                     const isCurrent = record.job_id === trackedArtifacts?.job_id
                     const statusLabel = jobStatusLabels[record.status] || record.status
                     const stageLabel = jobStageLabels[record.stage] || record.stage
@@ -440,7 +512,11 @@ function TrackingPageContent() {
                     )
                   })}
                 </div>
-              ) : null}
+              ) : (
+                <div className="border border-dashed border-border bg-muted/10 px-3 py-5 text-sm text-muted-foreground">
+                  没有匹配的任务记录，请调整筛选条件。
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -596,7 +672,7 @@ function TrackingPageContent() {
                         <div className="group relative overflow-hidden border bg-[#1e1e1e]">
                           {trackedOriginal ? (
                             <img
-                              src={`${API_ORIGIN}${trackedOriginal.url}`}
+                              src={`${apiOrigin}${trackedOriginal.url}`}
                               alt={`原始第 ${activeTrackedPage} 页`}
                               className="block h-auto w-full"
                             />
@@ -607,7 +683,7 @@ function TrackingPageContent() {
                           )}
                           {trackedBeforeOverlay ? (
                             <img
-                              src={`${API_ORIGIN}${trackedBeforeOverlay.url}`}
+                              src={`${apiOrigin}${trackedBeforeOverlay.url}`}
                               alt={`第 ${activeTrackedPage} 页识别框`}
                               className="pointer-events-none absolute inset-0 h-full w-full object-contain opacity-0 transition-opacity duration-200 group-hover:opacity-100"
                             />
@@ -622,13 +698,13 @@ function TrackingPageContent() {
                         <div className="group relative overflow-hidden border bg-[#1e1e1e]">
                           {trackedAfterOverlay ? (
                             <img
-                              src={`${API_ORIGIN}${trackedAfterOverlay.url}`}
+                              src={`${apiOrigin}${trackedAfterOverlay.url}`}
                               alt={`第 ${activeTrackedPage} 页转换对比`}
                               className="block h-auto w-full"
                             />
                           ) : trackedOriginal ? (
                             <img
-                              src={`${API_ORIGIN}${trackedOriginal.url}`}
+                              src={`${apiOrigin}${trackedOriginal.url}`}
                               alt={`第 ${activeTrackedPage} 页原图`}
                               className="block h-auto w-full"
                             />
@@ -639,7 +715,7 @@ function TrackingPageContent() {
                           )}
                           {trackedLayoutAfter ? (
                             <img
-                              src={`${API_ORIGIN}${trackedLayoutAfter.url}`}
+                              src={`${apiOrigin}${trackedLayoutAfter.url}`}
                               alt={`第 ${activeTrackedPage} 页后处理框`}
                               className="pointer-events-none absolute inset-0 h-full w-full object-contain opacity-0 transition-opacity duration-200 group-hover:opacity-100"
                             />
@@ -660,10 +736,12 @@ function TrackingPageContent() {
                       <div
                         className="group relative overflow-hidden border bg-[#101010]"
                         onMouseMove={handleComparePointerMove}
+                        onTouchStart={handleCompareTouchMove}
+                        onTouchMove={handleCompareTouchMove}
                       >
                         {trackedCompareBase ? (
                           <img
-                            src={`${API_ORIGIN}${trackedCompareBase.url}`}
+                            src={`${apiOrigin}${trackedCompareBase.url}`}
                             alt={`第 ${activeTrackedPage} 页对比底图`}
                             className="block h-auto w-full"
                           />
@@ -675,7 +753,7 @@ function TrackingPageContent() {
 
                         {trackedCompareAfter ? (
                           <img
-                            src={`${API_ORIGIN}${trackedCompareAfter.url}`}
+                            src={`${apiOrigin}${trackedCompareAfter.url}`}
                             alt={`第 ${activeTrackedPage} 页转换后`}
                             className="pointer-events-none absolute inset-0 h-full w-full object-contain transition-[clip-path] duration-75"
                             style={{ clipPath: `inset(0 0 0 ${compareSplitPercent}%)` }}
@@ -684,7 +762,7 @@ function TrackingPageContent() {
 
                         {trackedBeforeOverlay ? (
                           <img
-                            src={`${API_ORIGIN}${trackedBeforeOverlay.url}`}
+                            src={`${apiOrigin}${trackedBeforeOverlay.url}`}
                             alt={`第 ${activeTrackedPage} 页转换前高亮`}
                             className="pointer-events-none absolute inset-0 h-full w-full object-contain opacity-45"
                             style={{ clipPath: `inset(0 ${100 - compareSplitPercent}% 0 0)` }}
@@ -693,7 +771,7 @@ function TrackingPageContent() {
 
                         {trackedLayoutAfter && trackedCompareAfter?.path !== trackedLayoutAfter.path ? (
                           <img
-                            src={`${API_ORIGIN}${trackedLayoutAfter.url}`}
+                            src={`${apiOrigin}${trackedLayoutAfter.url}`}
                             alt={`第 ${activeTrackedPage} 页转换后高亮`}
                             className="pointer-events-none absolute inset-0 h-full w-full object-contain opacity-60"
                             style={{ clipPath: `inset(0 0 0 ${compareSplitPercent}%)` }}
@@ -711,8 +789,33 @@ function TrackingPageContent() {
                           转换后
                         </div>
                       </div>
+                      <div className="grid gap-2 border border-border bg-muted/20 p-3 sm:grid-cols-[1fr_auto] sm:items-center">
+                        <label
+                          htmlFor="compare-split"
+                          className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground"
+                        >
+                          分割线位置
+                        </label>
+                        <Badge variant="outline">{compareSplitPercent}%</Badge>
+                        <input
+                          id="compare-split"
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={compareSplitPercent}
+                          onChange={(e) => {
+                            const next = Number(e.target.value)
+                            if (Number.isFinite(next)) {
+                              setCompareSplitRatio(Math.max(0, Math.min(1, next / 100)))
+                            }
+                          }}
+                          className="col-span-full h-2 w-full accent-[#111111]"
+                          aria-label="调整前后对比滑杆位置"
+                        />
+                      </div>
                       <div className="text-xs text-muted-foreground">
-                        把鼠标移动到图片上即可滑动查看前后差异，高亮框会随左右区域同步显示。
+                        桌面端可移动鼠标调整分割线，移动端可拖动图片或使用滑杆精确控制对比位置。
                       </div>
                     </div>
                   ) : null}

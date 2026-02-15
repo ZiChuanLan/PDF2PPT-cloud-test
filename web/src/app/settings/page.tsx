@@ -26,7 +26,14 @@ import {
   type OcrAiProvider,
   type Settings,
 } from "@/lib/settings"
-import { getApiBaseUrl, getApiOrigin, normalizeFetchError } from "@/lib/api"
+import {
+  apiFetch,
+  clearStoredApiOrigin,
+  getStoredApiOrigin,
+  normalizeFetchError,
+  resolveApiOrigin,
+  setStoredApiOrigin,
+} from "@/lib/api"
 
 type ParseEngineMode = "local_ocr" | "remote_ocr" | "mineru_cloud"
 
@@ -66,9 +73,6 @@ const ocrProviderLabels: Record<Settings["ocrProvider"], string> = {
   tesseract: "Tesseract（本地）",
 }
 
-const API_ORIGIN = getApiOrigin()
-const API_BASE_URL = getApiBaseUrl()
-
 type LocalOcrCheckResult = {
   provider: string
   requested_language: string
@@ -88,6 +92,30 @@ type LocalOcrCheckResponse = {
   check: LocalOcrCheckResult
 }
 
+type AiOcrCheckSampleItem = {
+  text: string
+  bbox: number[]
+  confidence: number | null
+}
+
+type AiOcrCheckResult = {
+  provider: string
+  model: string
+  base_url: string | null
+  elapsed_ms: number
+  items_count: number
+  valid_bbox_items: number
+  ready: boolean
+  message: string
+  error: string | null
+  sample_items: AiOcrCheckSampleItem[]
+}
+
+type AiOcrCheckResponse = {
+  ok: boolean
+  check: AiOcrCheckResult
+}
+
 function isOpenAiCompatibleEndpoint(baseUrl: string): boolean {
   const normalized = baseUrl.trim().toLowerCase()
   if (!normalized) return false
@@ -96,8 +124,14 @@ function isOpenAiCompatibleEndpoint(baseUrl: string): boolean {
 
 export default function SettingsPage() {
   const [settings, setSettings] = React.useState<Settings>(defaultSettings)
+  const [settingsHydrated, setSettingsHydrated] = React.useState(false)
   const [lastSavedAt, setLastSavedAt] = React.useState<number | null>(null)
   const [showAdvanced, setShowAdvanced] = React.useState(false)
+  const [apiOrigin, setApiOrigin] = React.useState("")
+  const [apiOriginInput, setApiOriginInput] = React.useState("")
+  const [apiOriginOverrideEnabled, setApiOriginOverrideEnabled] = React.useState(false)
+  const [apiOriginResolving, setApiOriginResolving] = React.useState(false)
+  const [apiOriginError, setApiOriginError] = React.useState<string | null>(null)
   const [modelOptions, setModelOptions] = React.useState<string[]>([])
   const [modelLoading, setModelLoading] = React.useState(false)
   const [modelError, setModelError] = React.useState<string | null>(null)
@@ -109,9 +143,44 @@ export default function SettingsPage() {
     null
   )
   const [localOcrCheckError, setLocalOcrCheckError] = React.useState<string | null>(null)
+  const [aiOcrChecking, setAiOcrChecking] = React.useState(false)
+  const [aiOcrCheck, setAiOcrCheck] = React.useState<AiOcrCheckResponse | null>(null)
+  const [aiOcrCheckError, setAiOcrCheckError] = React.useState<string | null>(null)
+  const skipNextAutoSaveRef = React.useRef(false)
 
   React.useEffect(() => {
     setSettings(loadStoredSettings())
+    const storedOrigin = getStoredApiOrigin() || ""
+    setApiOriginInput(storedOrigin)
+    setApiOriginOverrideEnabled(Boolean(storedOrigin))
+    setSettingsHydrated(true)
+  }, [])
+
+  React.useEffect(() => {
+    let mounted = true
+    const hasManualOverride = Boolean(getStoredApiOrigin())
+    setApiOriginResolving(true)
+    setApiOriginError(null)
+
+    void resolveApiOrigin()
+      .then((origin) => {
+        if (!mounted) return
+        setApiOrigin(origin)
+        if (!hasManualOverride) {
+          setApiOriginInput(origin)
+        }
+      })
+      .catch((e) => {
+        if (!mounted) return
+        setApiOriginError(normalizeFetchError(e, "API 地址自动探测失败"))
+      })
+      .finally(() => {
+        if (mounted) setApiOriginResolving(false)
+      })
+
+    return () => {
+      mounted = false
+    }
   }, [])
 
   const isMineruProvider = settings.provider === "mineru"
@@ -234,7 +303,7 @@ export default function SettingsPage() {
           payload.base_url = modelsBaseUrl
         }
 
-        const response = await fetch(`${API_BASE_URL}/models`, {
+        const response = await apiFetch("/models", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -313,7 +382,7 @@ export default function SettingsPage() {
           payload.base_url = ocrModelsBaseUrl
         }
 
-        const response = await fetch(`${API_BASE_URL}/models`, {
+        const response = await apiFetch("/models", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -358,6 +427,21 @@ export default function SettingsPage() {
     isOcrEnabledForCurrentEngine,
   ])
 
+  React.useEffect(() => {
+    if (!settingsHydrated) return
+    if (skipNextAutoSaveRef.current) {
+      skipNextAutoSaveRef.current = false
+      return
+    }
+    const timer = window.setTimeout(() => {
+      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings))
+      setLastSavedAt(Date.now())
+    }, 350)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [settings, settingsHydrated])
+
   const onSave = React.useCallback(() => {
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings))
     setLastSavedAt(Date.now())
@@ -366,11 +450,60 @@ export default function SettingsPage() {
 
   const onClear = React.useCallback(() => {
     localStorage.removeItem(SETTINGS_STORAGE_KEY)
+    skipNextAutoSaveRef.current = true
     setSettings(defaultSettings)
     setLastSavedAt(null)
     setLocalOcrCheck(null)
     setLocalOcrCheckError(null)
+    setAiOcrCheck(null)
+    setAiOcrCheckError(null)
     toast("已清空本地设置")
+  }, [])
+
+  const onSaveApiOrigin = React.useCallback(async () => {
+    setApiOriginError(null)
+    setApiOriginResolving(true)
+    try {
+      if (apiOriginInput.trim()) {
+        const normalized = setStoredApiOrigin(apiOriginInput)
+        setApiOriginInput(normalized)
+        setApiOriginOverrideEnabled(true)
+      } else {
+        clearStoredApiOrigin()
+        setApiOriginOverrideEnabled(false)
+      }
+      const resolved = await resolveApiOrigin({ force: true })
+      setApiOrigin(resolved)
+      if (!apiOriginInput.trim()) {
+        setApiOriginInput(resolved)
+      }
+      toast.success("API 地址已更新")
+    } catch (e) {
+      const message = normalizeFetchError(e, "API 地址更新失败")
+      setApiOriginError(message)
+      toast.error(message)
+    } finally {
+      setApiOriginResolving(false)
+    }
+  }, [apiOriginInput])
+
+  const onAutoDetectApiOrigin = React.useCallback(async () => {
+    setApiOriginError(null)
+    setApiOriginResolving(true)
+    try {
+      clearStoredApiOrigin()
+      setApiOriginOverrideEnabled(false)
+      const resolved = await resolveApiOrigin({ force: true })
+      setApiOrigin(resolved)
+      setApiOriginInput(resolved)
+      toast.success("已切换为自动探测 API 地址")
+    } catch (e) {
+      const message = normalizeFetchError(e, "自动探测失败")
+      setApiOriginError(message)
+      toast.error(message)
+    } finally {
+      setApiOriginResolving(false)
+    }
   }, [])
 
   const onCheckLocalOcr = React.useCallback(
@@ -384,7 +517,7 @@ export default function SettingsPage() {
           provider === "paddle"
             ? "ch"
             : settings.ocrTesseractLanguage.trim() || "chi_sim+eng"
-        const response = await fetch(`${API_BASE_URL}/jobs/ocr/local/check`, {
+        const response = await apiFetch("/jobs/ocr/local/check", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ provider, language }),
@@ -420,6 +553,75 @@ export default function SettingsPage() {
     [settings.ocrTesseractLanguage]
   )
 
+  const onCheckAiOcrModel = React.useCallback(async () => {
+    const apiKey = ocrPrimaryApiKey || mainModelsApiKeyRaw.trim()
+    const baseUrl = ocrPrimaryBaseUrl || mainModelsBaseUrlRaw.trim()
+    const model = settings.ocrAiModel.trim()
+    const provider = (settings.ocrAiProvider || "auto").trim() || "auto"
+
+    if (!apiKey) {
+      const message = "请先填写 OCR API Key"
+      setAiOcrCheck(null)
+      setAiOcrCheckError(message)
+      toast.error(message)
+      return
+    }
+    if (!model) {
+      const message = "请先选择 OCR 模型"
+      setAiOcrCheck(null)
+      setAiOcrCheckError(message)
+      toast.error(message)
+      return
+    }
+
+    setAiOcrChecking(true)
+    setAiOcrCheckError(null)
+    try {
+      const payload: Record<string, string> = {
+        provider,
+        api_key: apiKey,
+        model,
+      }
+      if (baseUrl) payload.base_url = baseUrl
+
+      const response = await apiFetch("/jobs/ocr/ai/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+      const body = (await response.json().catch(() => null)) as
+        | AiOcrCheckResponse
+        | { message?: string }
+        | null
+
+      if (!response.ok) {
+        throw new Error((body as { message?: string } | null)?.message || "OCR 能力验证失败")
+      }
+
+      const result = body as AiOcrCheckResponse
+      setAiOcrCheck(result)
+      if (result.ok) {
+        toast.success("OCR 能力验证通过")
+      } else {
+        toast.error("OCR 能力验证未通过")
+      }
+    } catch (e) {
+      const message = normalizeFetchError(e, "OCR 能力验证失败")
+      setAiOcrCheck(null)
+      setAiOcrCheckError(message)
+      toast.error(message)
+    } finally {
+      setAiOcrChecking(false)
+    }
+  }, [
+    mainModelsApiKeyRaw,
+    mainModelsBaseUrlRaw,
+    ocrPrimaryApiKey,
+    ocrPrimaryBaseUrl,
+    settings.ocrAiModel,
+    settings.ocrAiProvider,
+  ])
+
   const [editionDate, setEditionDate] = React.useState("----/--/--")
 
   React.useEffect(() => {
@@ -446,8 +648,7 @@ export default function SettingsPage() {
                 设置中心
               </h1>
               <p className="drop-cap mt-4 max-w-3xl text-sm leading-relaxed text-justify md:text-base">
-                你在这里配置模型提供方、接口密钥和 OCR 策略。所有设置仅保存在当前浏览器的
-                localStorage，不会自动同步到其他设备。
+                配置模型提供方、接口密钥与 OCR 策略。设置仅保存在当前浏览器 localStorage。
               </p>
             </div>
 
@@ -473,7 +674,7 @@ export default function SettingsPage() {
           <CardHeader className="border-b border-border py-5">
             <CardTitle>接口与处理配置</CardTitle>
             <CardDescription>
-              先选择处理模式（本地 OCR / 远程 OCR / 云端 MinerU），再按需开启 AI 辅助。所有配置仅保存在本地浏览器。
+              先选择处理模式，再配置 OCR 与 AI 参数。配置仅保存在本地浏览器。
             </CardDescription>
           </CardHeader>
 
@@ -585,11 +786,44 @@ export default function SettingsPage() {
               </div>
 
               <div className="grid gap-2 border border-border bg-muted/30 p-3">
-                <label className="text-muted-foreground text-xs">后端 API 地址（当前）</label>
-                <div className="font-mono break-all text-xs">{API_ORIGIN}</div>
-                <div className="text-muted-foreground text-xs">
-                  公开部署时，请在前端环境变量设置 `NEXT_PUBLIC_API_URL` 为后端公网地址。
+                <label className="text-muted-foreground text-xs">后端 API 地址（当前生效）</label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="font-mono break-all text-xs">{apiOrigin}</div>
+                  <Badge variant="outline">
+                    {apiOriginOverrideEnabled ? "手动覆盖" : "自动探测"}
+                  </Badge>
                 </div>
+                <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                  <Input
+                    type="text"
+                    autoComplete="off"
+                    value={apiOriginInput}
+                    onChange={(e) => setApiOriginInput(e.target.value)}
+                    placeholder="留空=自动探测，或输入 http://127.0.0.1:8001"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void onSaveApiOrigin()}
+                    disabled={apiOriginResolving}
+                  >
+                    {apiOriginResolving ? "应用中..." : "应用地址"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => void onAutoDetectApiOrigin()}
+                    disabled={apiOriginResolving}
+                  >
+                    自动探测
+                  </Button>
+                </div>
+                <div className="text-muted-foreground text-xs">
+                  自动模式会探测 `:8000` 与 `:8001`；公开部署可用 `NEXT_PUBLIC_API_URL` 固定地址。
+                </div>
+                {apiOriginError ? (
+                  <div className="text-xs text-destructive">{apiOriginError}</div>
+                ) : null}
               </div>
 
               {isMineruProvider ? (
@@ -722,7 +956,7 @@ export default function SettingsPage() {
               ) : (
                 <>
                   <div className="text-muted-foreground text-sm">
-                    当前为本地/远程 OCR 模式，接口参数将按所选 OCR 提供方在下方「OCR 配置」中展示。
+                    当前模式将使用下方 OCR 配置中的参数。
                   </div>
                 </>
               )}
@@ -782,14 +1016,13 @@ export default function SettingsPage() {
                     启用混合 OCR 定位（实验）
                   </label>
                   <div className="text-muted-foreground text-sm">
-                    仅在 MinerU 模式下使用本地 OCR 辅助文本框位置，不启用 AI 文本辅助，优先保留 MinerU 的文本与图片内容。OCR
-                    提供方可在下方单独选择。
+                    仅在 MinerU 模式使用本地 OCR 辅助定位，OCR 提供方可在下方单独选择。
                   </div>
                 </>
               ) : (
                 <>
                   <div className="text-muted-foreground text-sm">
-                    本地/远程 OCR 模式默认启用 OCR 定位。
+                    本地/远程 OCR 模式默认启用 OCR。
                   </div>
                 </>
               )}
@@ -885,17 +1118,15 @@ export default function SettingsPage() {
                 </Select>
                 <div className="text-muted-foreground text-xs">
                   当前模式：{ocrProviderLabels[selectedOcrProvider]}。
-                  {isOcrProviderAuto
-                    ? " 自动模式用于 MinerU 混合 OCR：优先本地 Tesseract，配置百度凭证后会优先百度。"
-                    : isOcrProviderAi
-                      ? " 仅使用 OpenAI 兼容视觉 OCR，需要填写 OCR API 参数。"
-                      : isOcrProviderPaddleRemote
-                        ? " 仅使用 PaddleOCR-VL（远程），需要填写 OCR API 参数。"
+                  {isOcrProviderAi || isOcrProviderPaddleRemote
+                    ? " 显式远程 OCR 为严格执行：失败即报错，不自动回退。"
+                    : isOcrProviderAuto
+                      ? " 自动模式优先本地 OCR，可选百度。"
                       : isOcrProviderPaddleLocal
-                          ? " 仅使用本地 PaddleOCR，可通过下方环境检测确认运行时是否可用。"
-                          : isOcrProviderBaidu
-                            ? " 仅使用百度 OCR，仅需填写百度三元组。"
-                            : " 仅使用本地 Tesseract，可选调整语言和置信度。"}
+                        ? " 使用本地 PaddleOCR。"
+                        : isOcrProviderBaidu
+                          ? " 使用百度 OCR。"
+                          : " 使用本地 Tesseract。"}
                 </div>
               {isMineruProvider && selectedOcrProvider === "auto" && hasBaiduCredentials ? (
                   <div className="text-muted-foreground text-xs">
@@ -921,7 +1152,7 @@ export default function SettingsPage() {
                     OCR 严格模式（失败即报错，不自动降级/回退）
                   </label>
                   <div className="text-muted-foreground text-xs">
-                    关闭严格模式会尽量保证“可生成”：OCR 失败时退化为图片页，并允许引擎自动降级（例如 PaddleOCR-VL 版本回退）。对外开放部署通常建议关闭。
+                    关闭后会启用最佳努力策略：失败时允许降级或以图片页继续。
                   </div>
                 </>
               ) : null}
@@ -952,7 +1183,7 @@ export default function SettingsPage() {
                       ))}
                     </Select>
                     <div className="text-muted-foreground text-xs">
-                      不同厂商会自动应用参数上限与默认 Base URL/模型兜底。
+                      厂商适配会自动处理常见参数差异。
                     </div>
 
                   </div>
@@ -1045,9 +1276,50 @@ export default function SettingsPage() {
                     ) : null}
                   </div>
 
+                  <div className="grid gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void onCheckAiOcrModel()}
+                        disabled={aiOcrChecking}
+                      >
+                        {aiOcrChecking ? "验证中..." : "验证 OCR 能力"}
+                      </Button>
+                      <span className="text-muted-foreground text-xs">
+                        检查模型是否返回有效 bbox
+                      </span>
+                    </div>
+                    {aiOcrCheckError ? (
+                      <div className="text-xs text-destructive">{aiOcrCheckError}</div>
+                    ) : null}
+                    {aiOcrCheck ? (
+                      <div
+                        className={
+                          aiOcrCheck.ok
+                            ? "border border-emerald-500/40 bg-emerald-50 px-3 py-2 text-xs text-emerald-900"
+                            : "border border-amber-500/40 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+                        }
+                      >
+                        <div>
+                          状态：{aiOcrCheck.check.ready ? "通过" : "未通过"} ·
+                          耗时：{aiOcrCheck.check.elapsed_ms}ms
+                        </div>
+                        <div>模型：{aiOcrCheck.check.model}</div>
+                        <div>
+                          结果：{aiOcrCheck.check.valid_bbox_items}/{aiOcrCheck.check.items_count} 条有效
+                          bbox
+                        </div>
+                        <div>{aiOcrCheck.check.message}</div>
+                        {aiOcrCheck.check.error ? <div>错误：{aiOcrCheck.check.error}</div> : null}
+                      </div>
+                    ) : null}
+                  </div>
+
                   {isMainUsingOcrKeyFallback ? (
                     <div className="text-muted-foreground text-xs">
-                      当前未填写主 AI Key，将优先复用 OCR 主 Key 用于模型拉取与可选 AI 辅助。
+                      主 AI Key 为空：主模型拉取与可选 AI 辅助会复用 OCR 主 Key（不影响 OCR Key 生效）。
                     </div>
                   ) : null}
 
@@ -1056,13 +1328,13 @@ export default function SettingsPage() {
 
               {supportsOptionalOcrAiConfig && !shouldExpandOptionalOcrAiConfig ? (
                 <div className="text-muted-foreground text-xs">
-                  自动模式下 OCR AI 接口参数为可选，未填写时将仅使用百度/Tesseract。
+                  自动模式下 OCR AI 参数可留空。
                 </div>
               ) : null}
 
               {!canUseAiOcr ? null : !isAiOcrProviderSelected ? (
                 <div className="text-muted-foreground text-xs">
-                  当前 OCR 提供方为纯本地模式，已折叠 AI OCR 厂商适配配置。
+                  当前为纯本地 OCR，AI OCR 厂商配置已折叠。
                 </div>
               ) : null}
 
@@ -1530,11 +1802,11 @@ export default function SettingsPage() {
             <div className="flex items-center gap-3">
               {lastSavedAt ? (
                 <div className="hidden font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground sm:block">
-                  已保存
+                  自动保存已开启
                 </div>
               ) : null}
               <Button type="button" onClick={onSave}>
-                保存配置
+                立即保存
               </Button>
             </div>
           </CardFooter>

@@ -6,14 +6,17 @@ import asyncio
 import os
 import re
 import shutil
+import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
+from PIL import Image, ImageDraw
 from rq import Queue
 
 from ..config import get_settings
@@ -25,11 +28,16 @@ from ..job_paths import (
 from ..logging_config import get_logger
 from ..models.error import AppException, ErrorCode
 from ..models.job import (
+    AiOcrCheckRequest,
+    AiOcrCheckResponse,
+    AiOcrCheckResult,
+    AiOcrCheckSampleItem,
     JobCreateResponse,
     JobEvent,
     JobArtifactImage,
     JobArtifactsResponse,
     LocalOcrCheckRequest,
+    LocalOcrCheckResult,
     LocalOcrCheckResponse,
     JobListItem,
     JobListResponse,
@@ -37,7 +45,12 @@ from ..models.job import (
     JobStatus,
     JobStatusResponse,
 )
-from ..convert.ocr import probe_local_paddleocr, probe_local_tesseract
+from ..convert.ocr import (
+    AiOcrClient,
+    _coerce_bbox_xyxy,
+    probe_local_paddleocr,
+    probe_local_tesseract,
+)
 from ..services.redis_service import get_redis_service
 from ..worker import get_redis_connection, process_pdf_job
 
@@ -64,7 +77,10 @@ async def check_local_ocr(payload: LocalOcrCheckRequest):
             )
 
         ready = bool(probe.get("ready"))
-        return LocalOcrCheckResponse(ok=ready, check=probe)
+        return LocalOcrCheckResponse(
+            ok=ready,
+            check=LocalOcrCheckResult.model_validate(probe),
+        )
     except AppException:
         raise
     except Exception as e:
@@ -73,6 +89,168 @@ async def check_local_ocr(payload: LocalOcrCheckRequest):
             code=ErrorCode.INTERNAL_ERROR,
             message="Failed to check local OCR runtime",
             details={"error": str(e), "provider": provider_id},
+            status_code=500,
+        )
+
+
+def _create_ai_ocr_probe_image() -> Path:
+    """Create a lightweight synthetic image for OCR capability checks."""
+    fd, raw_path = tempfile.mkstemp(prefix="ai-ocr-probe-", suffix=".png")
+    os.close(fd)
+    out = Path(raw_path)
+
+    # Keep probe image compact to reduce remote OCR long-tail latency while
+    # still containing enough text blocks to validate bbox capability.
+    image = Image.new("RGB", (640, 360), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    lines = [
+        "PPT OpenCode OCR Check",
+        "Slide 02 - Vision OCR",
+        "Total: 3 sections / Score: 97",
+        "Email: hello@example.com",
+    ]
+    y = 40
+    for line in lines:
+        draw.text((40, y), line, fill=(18, 18, 18))
+        y += 70
+    image.save(out, format="PNG")
+    return out
+
+
+def _truncate_error(value: Exception | str, *, limit: int = 400) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()}..."
+
+
+def _run_ai_ocr_capability_check(
+    *,
+    provider: str | None,
+    api_key: str,
+    base_url: str | None,
+    model: str,
+) -> AiOcrCheckResponse:
+    """Run AI OCR capability check and validate whether bbox items are returned."""
+    start = time.perf_counter()
+    image_path = _create_ai_ocr_probe_image()
+    normalized_provider = (provider or "auto").strip() or "auto"
+    normalized_base_url = (base_url or "").strip() or None
+    normalized_model = model.strip()
+
+    try:
+        client = AiOcrClient(
+            api_key=api_key.strip(),
+            provider=normalized_provider,
+            base_url=normalized_base_url,
+            model=normalized_model,
+        )
+        raw_items: list[dict[str, Any]] = client.ocr_image(str(image_path))
+
+        valid_bbox_items = 0
+        sample_items: list[AiOcrCheckSampleItem] = []
+        for item in raw_items or []:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()
+            bbox = _coerce_bbox_xyxy(item.get("bbox"))
+            if not text or not bbox:
+                continue
+            if float(bbox[2]) <= float(bbox[0]) or float(bbox[3]) <= float(bbox[1]):
+                continue
+            valid_bbox_items += 1
+            if len(sample_items) >= 3:
+                continue
+            confidence: float | None = None
+            try:
+                conf_raw = item.get("confidence")
+                if conf_raw is not None:
+                    confidence = float(conf_raw)
+            except Exception:
+                confidence = None
+            sample_items.append(
+                AiOcrCheckSampleItem(
+                    text=text[:120],
+                    bbox=[float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+                    confidence=confidence,
+                )
+            )
+
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        ready = valid_bbox_items > 0
+        message = (
+            "模型可返回有效 bbox OCR 结果"
+            if ready
+            else "模型未返回有效 bbox OCR 结果"
+        )
+        check = AiOcrCheckResult(
+            provider=normalized_provider,
+            model=normalized_model,
+            base_url=normalized_base_url,
+            elapsed_ms=elapsed_ms,
+            items_count=len(raw_items or []),
+            valid_bbox_items=valid_bbox_items,
+            ready=ready,
+            message=message,
+            sample_items=sample_items,
+        )
+        return AiOcrCheckResponse(ok=ready, check=check)
+    except Exception as e:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        check = AiOcrCheckResult(
+            provider=normalized_provider,
+            model=normalized_model,
+            base_url=normalized_base_url,
+            elapsed_ms=elapsed_ms,
+            items_count=0,
+            valid_bbox_items=0,
+            ready=False,
+            message="模型调用失败",
+            error=_truncate_error(e),
+            sample_items=[],
+        )
+        return AiOcrCheckResponse(ok=False, check=check)
+    finally:
+        try:
+            image_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+@router.post("/ocr/ai/check", response_model=AiOcrCheckResponse)
+async def check_ai_ocr(payload: AiOcrCheckRequest):
+    """Check whether the selected AI OCR model can return usable bbox items."""
+    api_key = (payload.api_key or "").strip()
+    model = (payload.model or "").strip()
+    if not api_key:
+        raise AppException(
+            code=ErrorCode.VALIDATION_ERROR,
+            message="api_key is required",
+            status_code=400,
+        )
+    if not model:
+        raise AppException(
+            code=ErrorCode.VALIDATION_ERROR,
+            message="model is required",
+            status_code=400,
+        )
+
+    try:
+        return await asyncio.to_thread(
+            _run_ai_ocr_capability_check,
+            provider=payload.provider,
+            api_key=api_key,
+            base_url=payload.base_url,
+            model=model,
+        )
+    except AppException:
+        raise
+    except Exception as e:
+        logger.exception("AI OCR capability check failed: %s", e)
+        raise AppException(
+            code=ErrorCode.INTERNAL_ERROR,
+            message="Failed to check AI OCR capability",
+            details={"error": _truncate_error(e)},
             status_code=500,
         )
 
@@ -131,12 +309,13 @@ async def list_jobs(
     queue_job_ids: list[str] = []
     started_job_ids: set[str] = set()
 
-    settings = get_settings()
-    if not str(settings.redis_url).startswith("memory://"):
+    if not redis_service.is_memory_backend():
         try:
             redis_conn = get_redis_connection()
             raw_queue_ids = redis_conn.lrange("rq:queue:default", 0, -1) or []
-            raw_started_ids = redis_conn.zrange("rq:registry:started:default", 0, -1) or []
+            raw_started_ids = (
+                redis_conn.zrange("rq:registry:started:default", 0, -1) or []
+            )
 
             def _to_str(value: object) -> str:
                 if isinstance(value, (bytes, bytearray)):
@@ -152,9 +331,7 @@ async def list_jobs(
                     continue
                 if queued_job.status in {JobStatus.pending, JobStatus.processing}:
                     queue_job_ids.append(queued_id)
-            started_job_ids = {
-                _to_str(v) for v in raw_started_ids if v is not None
-            }
+            started_job_ids = {_to_str(v) for v in raw_started_ids if v is not None}
         except Exception as e:
             logger.warning("Failed to load RQ queue metadata: %s", e)
 
@@ -234,7 +411,8 @@ async def create_job(
         None, description="Optional 1-based end page for conversion"
     ),
     mineru_api_token: str | None = Form(
-        None, description="Optional MinerU API token (required when parse_provider=mineru)"
+        None,
+        description="Optional MinerU API token (required when parse_provider=mineru)",
     ),
     mineru_base_url: str | None = Form(
         None, description="Optional MinerU API base URL"
@@ -259,11 +437,10 @@ async def create_job(
         description="Enable local hybrid OCR alignment in MinerU mode (no AI text refiner)",
     ),
     ocr_provider: str | None = Form(
-        "auto", description="OCR provider (auto, aiocr, baidu, tesseract, paddle, paddle_local); legacy ai/remote are accepted"
+        "auto",
+        description="OCR provider (auto, aiocr, baidu, tesseract, paddle, paddle_local); legacy ai/remote are accepted",
     ),
-    ocr_baidu_app_id: str | None = Form(
-        None, description="Optional Baidu OCR App ID"
-    ),
+    ocr_baidu_app_id: str | None = Form(None, description="Optional Baidu OCR App ID"),
     ocr_baidu_api_key: str | None = Form(
         None, description="Optional Baidu OCR API key"
     ),
@@ -286,9 +463,7 @@ async def create_job(
     ocr_ai_base_url: str | None = Form(
         None, description="Optional AI OCR base URL (OpenAI-compatible)"
     ),
-    ocr_ai_model: str | None = Form(
-        None, description="Optional AI OCR model name"
-    ),
+    ocr_ai_model: str | None = Form(None, description="Optional AI OCR model name"),
     scanned_page_mode: str | None = Form(
         "segmented",
         description="Scanned page rendering mode (segmented, fullpage). Controls whether scanned pages are split into editable image blocks.",
@@ -345,7 +520,8 @@ async def create_job(
             )
 
     # Validate file type
-    if not file.filename.lower().endswith(".pdf"):
+    filename = file.filename or ""
+    if not filename.lower().endswith(".pdf"):
         raise AppException(
             code=ErrorCode.INVALID_PDF,
             message="Only PDF files are supported",
@@ -380,7 +556,7 @@ async def create_job(
         job = redis_service.create_job(job_id)
 
         # Queue job for processing
-        if str(settings.redis_url).startswith("memory://"):
+        if redis_service.is_memory_backend():
             threading.Thread(
                 target=process_pdf_job,
                 kwargs={
@@ -667,6 +843,14 @@ async def download_result(job_id: str):
     """
     redis_service = get_redis_service()
 
+    output_path = get_job_dir(job_id) / "output.pptx"
+    if output_path.exists():
+        return FileResponse(
+            path=output_path,
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            filename=f"converted_{job_id}.pptx",
+        )
+
     job = redis_service.get_job(job_id)
     if not job:
         raise AppException(
@@ -682,20 +866,13 @@ async def download_result(job_id: str):
             details={"status": job.status},
         )
 
-    # Check if output file exists
-    output_path = get_job_dir(job_id) / "output.pptx"
+    # Job metadata exists and indicates completion, but output is missing.
     if not output_path.exists():
         raise AppException(
             code=ErrorCode.INTERNAL_ERROR,
             message="Output file not found",
             status_code=500,
         )
-
-    return FileResponse(
-        path=output_path,
-        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        filename=f"converted_{job_id}.pptx",
-    )
 
 
 @router.get("/{job_id}/artifacts", response_model=JobArtifactsResponse)
@@ -783,7 +960,9 @@ async def get_job_artifacts(job_id: str):
 
 
 @router.get("/{job_id}/artifacts/file")
-async def get_job_artifact_file(job_id: str, path: str = Query(..., description="Artifact path relative to job dir")):
+async def get_job_artifact_file(
+    job_id: str, path: str = Query(..., description="Artifact path relative to job dir")
+):
     """Read a single artifact file by relative path."""
     target = _safe_artifact_path(job_id, path)
     return FileResponse(path=target)

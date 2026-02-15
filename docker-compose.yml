@@ -33,6 +33,12 @@ services:
       - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
     depends_on:
       - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     networks:
       - app-network
 
@@ -51,10 +57,14 @@ services:
       - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
     depends_on:
       - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis; r=redis.from_url('redis://redis:6379/0'); r.ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     networks:
       - app-network
-    # TTL cleanup strategy: worker can run periodic cleanup tasks
-    # Add cron job or scheduled task here for job TTL enforcement
 
   redis:
     image: redis:7-alpine

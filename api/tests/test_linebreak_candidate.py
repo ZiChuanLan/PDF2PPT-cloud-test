@@ -1,16 +1,6 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-
-# Ensure `import app.*` works when tests run from repo root.
-_API_DIR = Path(__file__).resolve().parents[1]
-if str(_API_DIR) not in sys.path:
-    sys.path.insert(0, str(_API_DIR))
-
-
-from app.convert.ocr import _is_multiline_candidate_for_linebreak_assist  # noqa: E402
+from app.convert.ocr import _is_multiline_candidate_for_linebreak_assist
 
 
 def test_linebreak_candidate_flags_paragraph_like_bbox() -> None:

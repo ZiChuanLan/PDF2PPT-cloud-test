@@ -9,9 +9,9 @@
   "venv": ".venv",
   "extraPaths": ["api"],
   "pythonVersion": "3.12",
-  "typeCheckingMode": "off",
-  "reportMissingImports": "none",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "error",
   "reportImplicitRelativeImport": "none",
   "reportUnusedCallResult": "none",
-  "reportDeprecated": "none"
+  "reportDeprecated": "warning"
 }

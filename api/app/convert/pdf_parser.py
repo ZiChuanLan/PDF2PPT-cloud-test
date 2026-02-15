@@ -147,7 +147,7 @@ def _extract_table_elements(
     elements: list[dict[str, Any]] = []
 
     try:
-        finder = page.find_tables()
+        finder = page.find_tables()  # type: ignore[attr-defined]
     except Exception as e:
         warnings.append(f"table_detection_failed: error={e!s}")
         return elements, warnings
@@ -271,13 +271,13 @@ def parse_pdf_to_ir(
 
             # Detect text layer without forcing any reading-order assumptions.
             try:
-                has_text_layer = bool((page.get_text("text") or "").strip())
+                has_text_layer = bool((page.get_text("text") or "").strip())  # type: ignore[attr-defined]
             except Exception as e:
                 has_text_layer = False
                 page_warnings.append(f"text_layer_check_failed: error={e!s}")
 
             try:
-                page_dict = page.get_text("dict")
+                page_dict = page.get_text("dict")  # type: ignore[attr-defined]
             except Exception as e:
                 pages.append(
                     {

@@ -111,14 +111,19 @@ def _run_single_page_job(
         output_pptx=job_dir / "output.pptx",
         ir_ocr=job_dir / "ir.ocr.json",
         ocr_debug=job_dir / "artifacts" / "ocr" / "ocr_debug.json",
-        final_png=job_dir / "artifacts" / "final_preview" / f"page-{page_no - 1:04d}.final.png",
+        final_png=job_dir
+        / "artifacts"
+        / "final_preview"
+        / f"page-{page_no - 1:04d}.final.png",
     )
 
 
-def _render_source_page(pdf_path: Path, *, page_no: int, dpi: int, out_path: Path) -> Path:
+def _render_source_page(
+    pdf_path: Path, *, page_no: int, dpi: int, out_path: Path
+) -> Path:
     with pymupdf.open(str(pdf_path)) as doc:
         page = doc.load_page(page_no - 1)
-        pix = page.get_pixmap(dpi=int(dpi), alpha=False)
+        pix = page.get_pixmap(dpi=int(dpi), alpha=False)  # type: ignore[attr-defined]
         pix.save(str(out_path))
     return out_path
 
@@ -139,7 +144,10 @@ def _image_metrics(a: np.ndarray, b: np.ndarray) -> dict[str, float]:
     diff = cv2.absdiff(a, b)
     gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
     mae = float(np.mean(diff)) / 255.0
-    rmse = float(np.sqrt(np.mean((a.astype(np.float32) - b.astype(np.float32)) ** 2))) / 255.0
+    rmse = (
+        float(np.sqrt(np.mean((a.astype(np.float32) - b.astype(np.float32)) ** 2)))
+        / 255.0
+    )
     high_diff_ratio = float(np.mean((gray > 32).astype(np.float32)))
     return {
         "mae": mae,
@@ -193,7 +201,7 @@ def _build_text_region_mask(
         Y0 = max(0, min(h - 1, int(round(y0 / page_h_pt * h))))
         Y1 = max(0, min(h - 1, int(round(y1 / page_h_pt * h))))
         if X1 > X0 and Y1 > Y0:
-            cv2.rectangle(mask, (X0, Y0), (X1, Y1), 255, thickness=-1)
+            cv2.rectangle(mask, (X0, Y0), (X1, Y1), (255,), thickness=-1)  # type: ignore[call-overload]
 
     kernel = np.ones((5, 5), np.uint8)
     return cv2.dilate(mask, kernel, iterations=1)
@@ -217,8 +225,26 @@ def _save_side_by_side(
 ) -> None:
     h, w = left.shape[:2]
     bar = np.full((48, w * 2, 3), 255, dtype=np.uint8)
-    cv2.putText(bar, left_label, (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA)
-    cv2.putText(bar, right_label, (w + 20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.putText(
+        bar,
+        left_label,
+        (20, 32),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        bar,
+        right_label,
+        (w + 20, 32),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
+    )
     canvas = np.hstack([left, right])
     cv2.imwrite(str(out_path), np.vstack([bar, canvas]))
 
@@ -235,8 +261,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark OCR AI linebreak assist")
     parser.add_argument("--pdf", required=True, help="Input PDF path")
     parser.add_argument("--pages", default="1-10", help="Page spec, e.g. 1-10 or 1,3,5")
-    parser.add_argument("--dpi", type=int, default=200, help="Render DPI for comparison")
-    parser.add_argument("--out-dir", default="../test/benchmark-linebreak", help="Output directory")
+    parser.add_argument(
+        "--dpi", type=int, default=200, help="Render DPI for comparison"
+    )
+    parser.add_argument(
+        "--out-dir", default="../test/benchmark-linebreak", help="Output directory"
+    )
     parser.add_argument("--jobs-root", default="data/jobs", help="Jobs directory")
 
     parser.add_argument("--ocr-provider", default="paddle")
@@ -251,7 +281,9 @@ def main() -> int:
         help="Enable strict OCR mode (disable implicit fallbacks/downgrades)",
     )
 
-    parser.add_argument("--keep-job-artifacts", action="store_true", help="Keep full job dirs")
+    parser.add_argument(
+        "--keep-job-artifacts", action="store_true", help="Keep full job dirs"
+    )
     args = parser.parse_args()
 
     pdf_path = Path(args.pdf).resolve()
@@ -260,11 +292,16 @@ def main() -> int:
         return 2
 
     if not args.ocr_ai_key:
-        print("ERROR: --ocr-ai-key missing and SILICONFLOW_API_KEY not set", file=sys.stderr)
+        print(
+            "ERROR: --ocr-ai-key missing and SILICONFLOW_API_KEY not set",
+            file=sys.stderr,
+        )
         return 2
 
     out_dir = _ensure_dir(Path(args.out_dir).resolve())
-    jobs_root = _ensure_dir((Path(__file__).resolve().parents[1] / args.jobs_root).resolve())
+    jobs_root = _ensure_dir(
+        (Path(__file__).resolve().parents[1] / args.jobs_root).resolve()
+    )
 
     with pymupdf.open(str(pdf_path)) as doc:
         page_numbers = _parse_pages_spec(str(args.pages), max_pages=int(doc.page_count))
@@ -378,8 +415,12 @@ def main() -> int:
             out_path=page_dir / "compare-off-vs-on.png",
         )
 
-        _save_heat_overlay(base=src_img, other=off_img, out_path=page_dir / "heat-source-vs-off.png")
-        _save_heat_overlay(base=src_img, other=on_img, out_path=page_dir / "heat-source-vs-on.png")
+        _save_heat_overlay(
+            base=src_img, other=off_img, out_path=page_dir / "heat-source-vs-off.png"
+        )
+        _save_heat_overlay(
+            base=src_img, other=on_img, out_path=page_dir / "heat-source-vs-on.png"
+        )
 
         page_report = {
             "page_no": page_no,
@@ -402,7 +443,9 @@ def main() -> int:
                 "mae_drop": float(source_vs_off["mae"] - source_vs_on["mae"]),
                 "rmse_drop": float(source_vs_off["rmse"] - source_vs_on["rmse"]),
                 "text_mae_drop": float(region["off_text_mae"] - region["on_text_mae"]),
-                "non_text_mae_drop": float(region["off_non_text_mae"] - region["on_non_text_mae"]),
+                "non_text_mae_drop": float(
+                    region["off_non_text_mae"] - region["on_non_text_mae"]
+                ),
             },
             "artifacts": {
                 "dir": str(page_dir),
@@ -420,16 +463,26 @@ def main() -> int:
                     shutil.rmtree(job_dir, ignore_errors=True)
 
     improved_pages = [p for p in report_pages if p["improvement"]["mae_drop"] > 0]
-    text_improved_pages = [p for p in report_pages if p["improvement"]["text_mae_drop"] > 0]
+    text_improved_pages = [
+        p for p in report_pages if p["improvement"]["text_mae_drop"] > 0
+    ]
 
     overall = {
         "pages_total": len(report_pages),
         "pages_improved_by_mae": len(improved_pages),
         "pages_improved_text_mae": len(text_improved_pages),
-        "avg_mae_drop": float(np.mean([p["improvement"]["mae_drop"] for p in report_pages])),
-        "avg_rmse_drop": float(np.mean([p["improvement"]["rmse_drop"] for p in report_pages])),
-        "avg_text_mae_drop": float(np.mean([p["improvement"]["text_mae_drop"] for p in report_pages])),
-        "avg_non_text_mae_drop": float(np.mean([p["improvement"]["non_text_mae_drop"] for p in report_pages])),
+        "avg_mae_drop": float(
+            np.mean([p["improvement"]["mae_drop"] for p in report_pages])
+        ),
+        "avg_rmse_drop": float(
+            np.mean([p["improvement"]["rmse_drop"] for p in report_pages])
+        ),
+        "avg_text_mae_drop": float(
+            np.mean([p["improvement"]["text_mae_drop"] for p in report_pages])
+        ),
+        "avg_non_text_mae_drop": float(
+            np.mean([p["improvement"]["non_text_mae_drop"] for p in report_pages])
+        ),
     }
 
     ranking = sorted(
@@ -463,9 +516,17 @@ def main() -> int:
     }
 
     report_path = out_dir / "report.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
-    print(json.dumps({"report": str(report_path), "overall": overall, "top3": ranking[:3]}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {"report": str(report_path), "overall": overall, "top3": ranking[:3]},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

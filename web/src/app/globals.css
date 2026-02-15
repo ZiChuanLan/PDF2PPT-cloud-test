@@ -165,8 +165,13 @@
 }
 
 .news-ticker-track {
+  width: max-content;
   animation: ticker-scroll 24s linear infinite;
   will-change: transform;
+}
+
+.news-ticker {
+  overflow: hidden;
 }
 
 .news-ticker:hover .news-ticker-track {

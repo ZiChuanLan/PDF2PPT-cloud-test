@@ -8,12 +8,13 @@ import json
 import time
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, cast
 
 import httpx
 import pymupdf
 
 from app.models.error import AppException, ErrorCode
+from app.utils.text import clean_str as _clean_str
 
 
 _DEFAULT_BASE_URL = "https://mineru.net"
@@ -31,13 +32,6 @@ _IMAGE_KIND_TOKENS = (
     "graphic",
     "illustration",
 )
-
-
-def _clean_str(value: str | None) -> str | None:
-    if value is None:
-        return None
-    cleaned = str(value).strip()
-    return cleaned if cleaned else None
 
 
 def _normalize_hex_color(value: Any) -> str | None:
@@ -156,7 +150,9 @@ def _extract_text_style(item: dict[str, Any]) -> dict[str, Any]:
         style["font_name"] = font_name
 
     bold = _coerce_optional_bool(
-        _extract_style_value(item, "bold", "is_bold", "font_bold", "font_weight", "weight")
+        _extract_style_value(
+            item, "bold", "is_bold", "font_bold", "font_weight", "weight"
+        )
     )
     if bold is not None:
         style["bold"] = bool(bold)
@@ -388,7 +384,11 @@ def _extract_layout_line_items(
     if not isinstance(lines, list):
         return out_items
 
-    fallback_bbox = list(block_bbox) if isinstance(block_bbox, list) and len(block_bbox) == 4 else None
+    fallback_bbox = (
+        list(block_bbox)
+        if isinstance(block_bbox, list) and len(block_bbox) == 4
+        else None
+    )
 
     for line in lines:
         if not isinstance(line, dict):
@@ -398,7 +398,11 @@ def _extract_layout_line_items(
             continue
 
         line_bbox_raw = line.get("bbox")
-        line_bbox = list(line_bbox_raw) if isinstance(line_bbox_raw, list) and len(line_bbox_raw) == 4 else fallback_bbox
+        line_bbox = (
+            list(line_bbox_raw)
+            if isinstance(line_bbox_raw, list) and len(line_bbox_raw) == 4
+            else fallback_bbox
+        )
 
         text_parts: list[str] = []
         has_formula_span = False
@@ -544,7 +548,11 @@ def _extract_content_items_from_layout(layout_payload: Any) -> list[dict[str, An
             continue
         raw_page_idx = page.get("page_idx")
         try:
-            page_idx = int(raw_page_idx) if raw_page_idx is not None else int(fallback_page_idx)
+            page_idx = (
+                int(raw_page_idx)
+                if raw_page_idx is not None
+                else int(fallback_page_idx)
+            )
         except Exception:
             page_idx = int(fallback_page_idx)
         para_blocks = page.get("para_blocks")
@@ -762,7 +770,7 @@ def _crop_pdf_region_png(
         return False
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    pix = page.get_pixmap(
+    pix = page.get_pixmap(  # type: ignore[attr-defined]
         matrix=pymupdf.Matrix(float(zoom), float(zoom)),
         clip=clip,
         alpha=False,
@@ -892,7 +900,9 @@ def _build_ir_from_mineru_outputs(
     if page_start is not None and page_end is not None:
         start_idx = int(page_start) - 1
         end_idx = int(page_end) - 1
-        ordered_indices = [idx for idx in ordered_indices if start_idx <= idx <= end_idx]
+        ordered_indices = [
+            idx for idx in ordered_indices if start_idx <= idx <= end_idx
+        ]
         if not ordered_indices:
             ordered_indices = [idx for idx in range(start_idx, end_idx + 1) if idx >= 0]
 
@@ -960,25 +970,35 @@ def _build_ir_from_mineru_outputs(
                     if text_style:
                         text_element.update(text_style)
                     text_level_raw = item.get("text_level")
-                    try:
-                        text_level = int(text_level_raw)
-                        if text_level > 0:
-                            text_element["mineru_text_level"] = text_level
-                    except Exception:
-                        pass
+                    if text_level_raw is not None:
+                        try:
+                            text_level = int(text_level_raw)
+                            if text_level > 0:
+                                text_element["mineru_text_level"] = text_level
+                        except Exception:
+                            pass
                     elements.append(text_element)
                     continue
 
                 if _is_image_like_kind(kind):
                     rel_image_path = _extract_image_rel_path(item)
-                    if rel_image_path and mineru_result_dir is not None and result_prefix:
+                    if (
+                        rel_image_path
+                        and mineru_result_dir is not None
+                        and result_prefix
+                    ):
                         image_added = False
                         candidate_paths: list[Path] = []
                         rel_path_obj = Path(rel_image_path)
-                        if not rel_path_obj.is_absolute() and ".." not in rel_path_obj.parts:
+                        if (
+                            not rel_path_obj.is_absolute()
+                            and ".." not in rel_path_obj.parts
+                        ):
                             candidate_paths.append(rel_path_obj)
                             if len(rel_path_obj.parts) <= 1:
-                                candidate_paths.append(Path("images") / rel_path_obj.name)
+                                candidate_paths.append(
+                                    Path("images") / rel_path_obj.name
+                                )
 
                         if rel_image_path.startswith(("http://", "https://")):
                             file_name = rel_image_path.rsplit("/", 1)[-1].strip()
@@ -1015,9 +1035,15 @@ def _build_ir_from_mineru_outputs(
                         if image_added:
                             continue
 
-                if _is_image_like_kind(kind) and image_output_dir is not None and pdf_doc is not None:
+                if (
+                    _is_image_like_kind(kind)
+                    and image_output_dir is not None
+                    and pdf_doc is not None
+                ):
                     image_counter += 1
-                    image_name = f"page-{int(page_idx):04d}-img-{int(image_counter):04d}.png"
+                    image_name = (
+                        f"page-{int(page_idx):04d}-img-{int(image_counter):04d}.png"
+                    )
                     image_abs_path = image_output_dir / image_name
                     try:
                         saved = _crop_pdf_region_png(
@@ -1077,11 +1103,15 @@ def _build_ir_from_mineru_outputs(
         ir_warnings.append(f"mineru_page_index_shift={page_index_shift}")
 
     source_page_count = len(page_sizes) if page_sizes else len(pages)
-    selected_start = int(page_start) if page_start is not None else (
-        pages[0]["page_index"] + 1 if pages else 1
+    selected_start = (
+        int(page_start)
+        if page_start is not None
+        else (pages[0]["page_index"] + 1 if pages else 1)
     )
-    selected_end = int(page_end) if page_end is not None else (
-        pages[-1]["page_index"] + 1 if pages else selected_start
+    selected_end = (
+        int(page_end)
+        if page_end is not None
+        else (pages[-1]["page_index"] + 1 if pages else selected_start)
     )
 
     return {
@@ -1193,9 +1223,8 @@ def _should_prefer_layout_candidate(
     content_p90 = max(1.0, float(content_stats["p90_h"]))
     layout_p90 = max(1.0, float(layout_stats["p90_h"]))
 
-    return (
-        layout_median <= (0.82 * content_median)
-        and layout_p90 <= (0.88 * content_p90)
+    return layout_median <= (0.82 * content_median) and layout_p90 <= (
+        0.88 * content_p90
     )
 
 
@@ -1253,12 +1282,18 @@ class MineruClient:
             raise AppException(
                 code=ErrorCode.CONVERSION_FAILED,
                 message="MinerU returned invalid JSON",
-                details={"path": path, "status_code": response.status_code, "error": str(e)},
+                details={
+                    "path": path,
+                    "status_code": response.status_code,
+                    "error": str(e),
+                },
                 status_code=502,
             )
 
         if response.status_code >= 400:
-            msg_code = str(payload.get("msgCode") or payload.get("code") or "").strip().upper()
+            msg_code = (
+                str(payload.get("msgCode") or payload.get("code") or "").strip().upper()
+            )
             if msg_code in {"A0202", "A0211"} or response.status_code == 401:
                 raise AppException(
                     code=ErrorCode.CONVERSION_FAILED,
@@ -1351,7 +1386,11 @@ class MineruClient:
     def upload_file(self, *, upload_url: str, file_path: Path) -> None:
         try:
             with file_path.open("rb") as f:
-                response = httpx.put(upload_url, data=f, timeout=max(self._timeout, 120.0))
+                response = httpx.put(
+                    upload_url,
+                    data=cast(Any, f),
+                    timeout=max(self._timeout, 120.0),
+                )
         except Exception as e:
             raise AppException(
                 code=ErrorCode.CONVERSION_FAILED,
@@ -1374,15 +1413,31 @@ class MineruClient:
         batch_id: str,
         poll_interval_s: float = 2.0,
         timeout_s: float = 1200.0,
+        cancel_check: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
+        """Poll MinerU for batch results.
+
+        Parameters
+        ----------
+        cancel_check:
+            Optional callable invoked every poll iteration.  If it raises an
+            exception (e.g. ``JobCancelledError``) the polling loop is aborted
+            immediately, preventing the 20-minute blocking window.
+        """
         deadline = time.monotonic() + float(timeout_s)
 
         while True:
+            # Allow the caller to abort the poll early (e.g. job cancelled).
+            if cancel_check is not None:
+                cancel_check()
+
             payload = self._request_json(
                 "GET", f"/api/v4/extract-results/batch/{batch_id}"
             )
             data = payload.get("data") or {}
-            extract_result = data.get("extract_result") if isinstance(data, dict) else None
+            extract_result = (
+                data.get("extract_result") if isinstance(data, dict) else None
+            )
 
             first_item: dict[str, Any] | None = None
             if isinstance(extract_result, list) and extract_result:
@@ -1421,7 +1476,9 @@ class MineruClient:
     def download_result_zip(self, *, zip_url: str, output_zip: Path) -> None:
         output_zip.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with httpx.stream("GET", zip_url, timeout=max(self._timeout, 120.0)) as response:
+            with httpx.stream(
+                "GET", zip_url, timeout=max(self._timeout, 120.0)
+            ) as response:
                 response.raise_for_status()
                 with output_zip.open("wb") as f:
                     for chunk in response.iter_bytes():
@@ -1485,7 +1542,11 @@ def parse_pdf_to_ir_with_mineru(
     )
 
     (out_dir / "create_batch.json").write_text(
-        json.dumps({"batch_id": batch_id, "upload_url": upload_url}, ensure_ascii=True, indent=2)
+        json.dumps(
+            {"batch_id": batch_id, "upload_url": upload_url},
+            ensure_ascii=True,
+            indent=2,
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -1580,7 +1641,11 @@ def parse_pdf_to_ir_with_mineru(
     if content_json is None:
         content_json = content_candidates[0]
         content_items = _extract_content_items(_load_json(content_json))
-    selected_source = f"content:{content_json.name}" if content_json is not None else "content:unknown"
+    selected_source = (
+        f"content:{content_json.name}"
+        if content_json is not None
+        else "content:unknown"
+    )
 
     layout_json = _find_json_file(
         extracted_dir,

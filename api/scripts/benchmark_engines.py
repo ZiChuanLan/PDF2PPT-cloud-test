@@ -57,10 +57,8 @@ def _ensure_api_on_path() -> Path:
 
 
 def _ensure_v3_on_path(api_dir: Path) -> None:
-    repo_root = api_dir.parent
-    v3_src = repo_root / "ocr_pdf2ppt_v3" / "src"
-    if str(v3_src) not in sys.path:
-        sys.path.insert(0, str(v3_src))
+    # Removed: v2/v3 packages deleted
+    pass
 
 
 def _clear_proxy_env() -> None:
@@ -93,7 +91,9 @@ def _patch_dns(host: str | None, ip: str | None) -> Callable[[], None]:
     return restore
 
 
-def _parse_pages_spec(spec: str, *, max_pages: int, seed: int | None = None) -> list[int]:
+def _parse_pages_spec(
+    spec: str, *, max_pages: int, seed: int | None = None
+) -> list[int]:
     out: set[int] = set()
     tokens = [t.strip() for t in (spec or "").split(",") if t.strip()]
     for token in tokens:
@@ -169,7 +169,7 @@ def _render_source_page(
 ) -> Path:
     with pymupdf.open(str(pdf_path)) as doc:
         page = doc.load_page(page_no - 1)
-        pix = page.get_pixmap(dpi=int(dpi), alpha=False)
+        pix = page.get_pixmap(dpi=int(dpi), alpha=False)  # type: ignore[attr-defined]
         pix.save(str(out_path))
     return out_path
 
@@ -190,7 +190,10 @@ def _image_metrics(a: np.ndarray, b: np.ndarray) -> dict[str, float]:
     diff = cv2.absdiff(a, b)
     gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
     mae = float(np.mean(diff)) / 255.0
-    rmse = float(np.sqrt(np.mean((a.astype(np.float32) - b.astype(np.float32)) ** 2))) / 255.0
+    rmse = (
+        float(np.sqrt(np.mean((a.astype(np.float32) - b.astype(np.float32)) ** 2)))
+        / 255.0
+    )
     high_diff_ratio = float(np.mean((gray > 32).astype(np.float32)))
     return {
         "mae": mae,
@@ -209,8 +212,26 @@ def _save_side_by_side(
 ) -> None:
     h, w = left.shape[:2]
     bar = np.full((48, w * 2, 3), 255, dtype=np.uint8)
-    cv2.putText(bar, left_label, (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA)
-    cv2.putText(bar, right_label, (w + 20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.putText(
+        bar,
+        left_label,
+        (20, 32),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        bar,
+        right_label,
+        (w + 20, 32),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
+    )
     canvas = np.hstack([left, right])
     cv2.imwrite(str(out_path), np.vstack([bar, canvas]))
 
@@ -295,11 +316,13 @@ def _load_local_lines_px(
     page_no: int,
     clean_image: Path,
 ) -> list[dict[str, Any]]:
-    ir_path = _find_first_existing([
-        job_dir / "ir.ocr.json",
-        job_dir / "ir.json",
-        job_dir / "ir.parsed.json",
-    ])
+    ir_path = _find_first_existing(
+        [
+            job_dir / "ir.ocr.json",
+            job_dir / "ir.json",
+            job_dir / "ir.parsed.json",
+        ]
+    )
     if ir_path is None:
         return []
 
@@ -319,7 +342,7 @@ def _load_local_lines_px(
             continue
         idx = item.get("page_index")
         try:
-            idx_int = int(idx)
+            idx_int = int(idx) if idx is not None else None
         except Exception:
             idx_int = None
         if idx_int == target_index or idx_int == page_no:
@@ -420,6 +443,7 @@ def _run_local_engine(
     api_key: str,
     base_url: str,
     model: str,
+    ocr_strict_mode: bool,
 ) -> EngineResult:
     from app.job_paths import ensure_job_dir
     from app.worker import process_pdf_job
@@ -453,7 +477,7 @@ def _run_local_engine(
             ocr_ai_api_key=api_key,
             ocr_ai_base_url=base_url,
             ocr_ai_model=model,
-            ocr_strict_mode=True,
+            ocr_strict_mode=bool(ocr_strict_mode),
         )
         elapsed = time.time() - started
         total_elapsed += float(elapsed)
@@ -589,44 +613,8 @@ def _run_v3_engine(
     model: str,
     out_dir: Path,
 ) -> EngineResult:
-    from ocr_pdf2ppt_v3.pipeline import convert_pdf_to_ppt
-
-    engine_dir = _ensure_dir(out_dir / name)
-    work_dir = _ensure_dir(engine_dir / "work")
-    output_pptx = engine_dir / "output.pptx"
-
-    started = time.time()
-    result = convert_pdf_to_ppt(
-        input_pdf=pdf_path,
-        output_pptx=output_pptx,
-        api_key=api_key,
-        base_url=base_url,
-        model=model,
-        ocr_backend=backend,
-        render_dpi=200,
-        max_pages=max_pages,
-        work_dir=work_dir,
-    )
-    elapsed = time.time() - started
-
-    text_shapes, text_chars = _count_ppt_text_items(output_pptx)
-
-    ok = output_pptx.exists()
-    return EngineResult(
-        name=name,
-        status="ok" if ok else "failed",
-        elapsed_sec=elapsed,
-        info={
-            "work_dir": str(work_dir),
-            "output_pptx": str(output_pptx),
-            "debug_json": str(result.debug_json),
-            "fallback_pages": int(result.fallback_pages),
-            "empty_pages": int(result.empty_pages),
-            "ppt_text_shapes": int(text_shapes),
-            "ppt_text_chars": int(text_chars),
-        },
-        error=None if ok else "output.pptx not found",
-    )
+    # Removed: v2/v3 packages deleted
+    raise RuntimeError("v3 engine support removed (ocr_pdf2ppt_v3 package deleted)")
 
 
 def _safe_run(name: str, fn: Callable[[], EngineResult]) -> EngineResult:
@@ -671,24 +659,62 @@ def _resolve_engine_page_artifacts(
 
     if name.startswith("local_"):
         job_dir, idx = _resolve_chunk("local")
-        clean = _find_first_existing([
-            job_dir / "artifacts" / "page_renders" / f"page-{idx:04d}.clean.png",
-            job_dir / "artifacts" / "page_renders" / f"page-{idx:04d}.mineru.clean.png",
-        ])
+        if job_dir is None:
+            return None, []
+        clean = _find_first_existing(
+            [
+                job_dir / "artifacts" / "page_renders" / f"page-{idx:04d}.clean.png",
+                job_dir
+                / "artifacts"
+                / "page_renders"
+                / f"page-{idx:04d}.mineru.clean.png",
+            ]
+        )
         if clean is None:
             return None, []
-        lines = _load_local_lines_px(job_dir=job_dir, page_no=page_no, clean_image=clean)
+        lines = _load_local_lines_px(
+            job_dir=job_dir, page_no=page_no, clean_image=clean
+        )
         return clean, lines
 
     if name == "v2":
         job_dir, idx = _resolve_chunk("v2")
-        clean = _find_first_existing([
-            job_dir / "artifacts" / "page_renders" / f"page-{idx:04d}.clean.png",
-            job_dir / "artifacts" / "page_renders" / f"page-{idx:04d}.mineru.clean.png",
-        ])
+        if job_dir is None:
+            return None, []
+        clean = _find_first_existing(
+            [
+                job_dir / "artifacts" / "page_renders" / f"page-{idx:04d}.clean.png",
+                job_dir
+                / "artifacts"
+                / "page_renders"
+                / f"page-{idx:04d}.mineru.clean.png",
+            ]
+        )
         if clean is None:
             return None, []
-        lines = _load_local_lines_px(job_dir=job_dir, page_no=page_no, clean_image=clean)
+        lines = _load_local_lines_px(
+            job_dir=job_dir, page_no=page_no, clean_image=clean
+        )
+        return clean, lines
+
+    if name == "v2":
+        job_dir, idx = _resolve_chunk("v2")
+        if job_dir is None:
+            return None, []
+        clean = _find_first_existing(
+            [
+                job_dir / "artifacts" / "page_renders" / f"page-{idx:04d}.clean.png",
+                job_dir
+                / "artifacts"
+                / "page_renders"
+                / f"page-{idx:04d}.mineru.clean.png",
+            ]
+        )
+        if clean is None:
+            return None, []
+        lines = _load_local_lines_px(
+            job_dir=job_dir, page_no=page_no, clean_image=clean
+        )
         return clean, lines
 
     if name in {"v3_openai_chat", "v3_paddle_doc"}:
@@ -714,8 +740,12 @@ def main() -> int:
         default=int(os.getenv("BENCH_SEED", "0") or "0"),
         help="Random seed for pages=random:N (0=use time-based seed)",
     )
-    parser.add_argument("--out-dir", default="../test/benchmark-engines", help="Output directory")
-    parser.add_argument("--dpi", type=int, default=200, help="Render DPI for source image")
+    parser.add_argument(
+        "--out-dir", default="../test/benchmark-engines", help="Output directory"
+    )
+    parser.add_argument(
+        "--dpi", type=int, default=200, help="Render DPI for source image"
+    )
     parser.add_argument(
         "--keep-out-dir",
         action="store_true",
@@ -727,8 +757,19 @@ def main() -> int:
         default=os.getenv("SILICONFLOW_API_KEY", ""),
         help="API key for remote OCR engines (AI OCR / PaddleOCR-VL / legacy v2 / v3). Optional for local-only runs.",
     )
-    parser.add_argument("--base-url", default=os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"))
-    parser.add_argument("--model", default=os.getenv("SILICONFLOW_MODEL", "PaddlePaddle/PaddleOCR-VL-1.5"))
+    parser.add_argument(
+        "--base-url",
+        default=os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
+    )
+    parser.add_argument(
+        "--model",
+        default=os.getenv("SILICONFLOW_MODEL", "PaddlePaddle/PaddleOCR-VL-1.5"),
+    )
+    parser.add_argument(
+        "--ocr-strict-mode",
+        action="store_true",
+        help="Enable strict OCR mode (disable implicit fallback providers).",
+    )
 
     parser.add_argument(
         "--dns-host",
@@ -743,12 +784,17 @@ def main() -> int:
 
     parser.add_argument("--no-local", action="store_true", help="Skip local engine")
     parser.add_argument("--no-v2", action="store_true", help="Skip v2 engine")
-    parser.add_argument("--no-v3-chat", action="store_true", help="Skip v3 openai_chat engine")
-    parser.add_argument("--no-v3-paddle-doc", action="store_true", help="Skip v3 paddle_doc_parser engine")
+    parser.add_argument(
+        "--no-v3-chat", action="store_true", help="Skip v3 openai_chat engine"
+    )
+    parser.add_argument(
+        "--no-v3-paddle-doc",
+        action="store_true",
+        help="Skip v3 paddle_doc_parser engine",
+    )
     args = parser.parse_args()
 
     api_dir = _ensure_api_on_path()
-    _ensure_v3_on_path(api_dir)
 
     pdf_path = Path(args.pdf).resolve()
     if not pdf_path.exists():
@@ -802,6 +848,7 @@ def main() -> int:
                         api_key=str(args.api_key or ""),
                         base_url=args.base_url,
                         model=args.model,
+                        ocr_strict_mode=bool(args.ocr_strict_mode),
                     ),
                 )
             )
@@ -817,6 +864,7 @@ def main() -> int:
                         api_key=str(args.api_key or ""),
                         base_url=args.base_url,
                         model=args.model,
+                        ocr_strict_mode=bool(args.ocr_strict_mode),
                     ),
                 )
             )
@@ -833,6 +881,7 @@ def main() -> int:
                             api_key=args.api_key,
                             base_url=args.base_url,
                             model=args.model,
+                            ocr_strict_mode=bool(args.ocr_strict_mode),
                         ),
                     )
                 )
@@ -848,66 +897,25 @@ def main() -> int:
                             api_key=args.api_key,
                             base_url=args.base_url,
                             model=args.model,
+                            ocr_strict_mode=bool(args.ocr_strict_mode),
                         ),
                     )
                 )
 
-        if not args.no_v2 and args.api_key:
-            print("[bench] running v2 engine...", flush=True)
-            engines.append(
-                _safe_run(
-                    "v2",
-                    lambda: _run_v2_engine(
-                        pdf_path=pdf_path,
-                        page_spans=page_spans,
-                        api_key=args.api_key,
-                        base_url=args.base_url,
-                        model=args.model,
-                    ),
-                )
-            )
-        elif not args.no_v2 and not args.api_key:
-            print("[bench] skip v2 engine (missing --api-key)", flush=True)
+        if not args.no_v2:
+            print("[bench] skip v2 engine (ocr_pdf2ppt_v2 package deleted)", flush=True)
 
-        if not args.no_v3_chat and args.api_key:
-            print("[bench] running v3 openai_chat engine...", flush=True)
-            engines.append(
-                _safe_run(
-                    "v3_openai_chat",
-                    lambda: _run_v3_engine(
-                        name="v3_openai_chat",
-                        backend="openai_chat",
-                        pdf_path=pdf_path,
-                        max_pages=page_end,
-                        api_key=args.api_key,
-                        base_url=args.base_url,
-                        model=args.model,
-                        out_dir=out_dir,
-                    ),
-                )
+        if not args.no_v3_chat:
+            print(
+                "[bench] skip v3 openai_chat engine (ocr_pdf2ppt_v3 package deleted)",
+                flush=True,
             )
-        elif not args.no_v3_chat and not args.api_key:
-            print("[bench] skip v3 openai_chat engine (missing --api-key)", flush=True)
 
-        if not args.no_v3_paddle_doc and args.api_key:
-            print("[bench] running v3 paddle_doc_parser engine...", flush=True)
-            engines.append(
-                _safe_run(
-                    "v3_paddle_doc",
-                    lambda: _run_v3_engine(
-                        name="v3_paddle_doc",
-                        backend="paddle_doc_parser",
-                        pdf_path=pdf_path,
-                        max_pages=page_end,
-                        api_key=args.api_key,
-                        base_url=args.base_url,
-                        model=args.model,
-                        out_dir=out_dir,
-                    ),
-                )
+        if not args.no_v3_paddle_doc:
+            print(
+                "[bench] skip v3 paddle_doc_parser engine (ocr_pdf2ppt_v3 package deleted)",
+                flush=True,
             )
-        elif not args.no_v3_paddle_doc and not args.api_key:
-            print("[bench] skip v3 paddle_doc_parser engine (missing --api-key)", flush=True)
 
         page_reports: list[dict[str, Any]] = []
         metrics_by_engine: dict[str, list[dict[str, float]]] = {
@@ -927,7 +935,9 @@ def main() -> int:
             per_engine: dict[str, Any] = {}
 
             for engine in engines:
-                clean_path, lines = _resolve_engine_page_artifacts(engine=engine, page_no=page_no)
+                clean_path, lines = _resolve_engine_page_artifacts(
+                    engine=engine, page_no=page_no
+                )
                 if engine.status != "ok":
                     per_engine[engine.name] = {
                         "status": "failed",
@@ -944,7 +954,9 @@ def main() -> int:
                     continue
 
                 final_path = page_dir / f"{engine.name}.final.sim.png"
-                _synthesize_from_clean(clean_image=clean_path, lines=lines, out_path=final_path)
+                _synthesize_from_clean(
+                    clean_image=clean_path, lines=lines, out_path=final_path
+                )
 
                 final_img = _align_image_like(source_img, _read_color_image(final_path))
                 metrics = _image_metrics(source_img, final_img)
@@ -991,9 +1003,15 @@ def main() -> int:
                 row["pages_scored"] = len(series)
                 row["avg_mae"] = float(np.mean([m["mae"] for m in series]))
                 row["avg_rmse"] = float(np.mean([m["rmse"] for m in series]))
-                row["avg_high_diff_ratio"] = float(np.mean([m["high_diff_ratio"] for m in series]))
-                row["editability_bonus"] = float(min(1.0, text_shapes / max(1, len(page_numbers) * 40)))
-                text_density = float(text_chars) / float(max(1, len(page_numbers) * 300))
+                row["avg_high_diff_ratio"] = float(
+                    np.mean([m["high_diff_ratio"] for m in series])
+                )
+                row["editability_bonus"] = float(
+                    min(1.0, text_shapes / max(1, len(page_numbers) * 40))
+                )
+                text_density = float(text_chars) / float(
+                    max(1, len(page_numbers) * 300)
+                )
                 text_quality_bonus = float(min(0.25, text_density * 0.25))
                 empty_text_penalty = 0.25 if int(text_chars) <= 0 else 0.0
                 row["text_density"] = text_density
@@ -1009,8 +1027,14 @@ def main() -> int:
                 row["pages_scored"] = 0
             summary_rows.append(row)
 
-        rankable = [r for r in summary_rows if r.get("pages_scored", 0) > 0 and r.get("status") == "ok"]
-        rankable.sort(key=lambda r: (float(r["score"]), float(r["avg_mae"]), float(r["avg_rmse"])))
+        rankable = [
+            r
+            for r in summary_rows
+            if r.get("pages_scored", 0) > 0 and r.get("status") == "ok"
+        ]
+        rankable.sort(
+            key=lambda r: (float(r["score"]), float(r["avg_mae"]), float(r["avg_rmse"]))
+        )
 
         report = {
             "input": {
@@ -1019,10 +1043,13 @@ def main() -> int:
                 "dpi": int(args.dpi),
                 "base_url": args.base_url,
                 "model": args.model,
+                "ocr_strict_mode": bool(args.ocr_strict_mode),
             },
             "environment": {
                 "redis_url": os.getenv("REDIS_URL"),
-                "paddle_disable_source_check": os.getenv("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"),
+                "paddle_disable_source_check": os.getenv(
+                    "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"
+                ),
                 "dns_override": {"host": args.dns_host, "ip": args.dns_ip or None},
             },
             "summary": summary_rows,
@@ -1032,7 +1059,9 @@ def main() -> int:
         }
 
         report_path = out_dir / "report.json"
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
 
         print(
             json.dumps(

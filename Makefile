@@ -67,3 +67,30 @@ ps:
 # Validate compose file
 validate:
 	docker compose config
+
+# Local QA
+#
+# Keep these targets lightweight and dependency-free:
+# - `test` runs the Python unit tests (backend).
+# - `lint` runs a cheap backend sanity check + frontend eslint.
+
+test:
+	@set -eu; \
+	if [ -x "api/.venv/bin/python" ]; then PYTHON="api/.venv/bin/python"; \
+	elif [ -x ".venv/bin/python" ]; then PYTHON=".venv/bin/python"; \
+	else PYTHON="python3"; fi; \
+	"$${PYTHON}" -m pytest -q
+
+lint: lint-api lint-web
+
+lint-api:
+	@set -eu; \
+	if [ -x "api/.venv/bin/python" ]; then PYTHON="api/.venv/bin/python"; \
+	elif [ -x ".venv/bin/python" ]; then PYTHON=".venv/bin/python"; \
+	else PYTHON="python3"; fi; \
+	"$${PYTHON}" -m compileall -q api
+
+lint-web:
+	@set -eu; \
+	cd web; \
+	npm run lint

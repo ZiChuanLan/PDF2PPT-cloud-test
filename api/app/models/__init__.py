@@ -3,7 +3,6 @@
 from app.models.error import AppException, ErrorCode, ErrorResponse
 from app.models.job import (
     Job,
-    JobCreateRequest,
     JobCreateResponse,
     JobEvent,
     JobListItem,
@@ -18,7 +17,6 @@ __all__ = [
     "ErrorCode",
     "ErrorResponse",
     "Job",
-    "JobCreateRequest",
     "JobCreateResponse",
     "JobEvent",
     "JobListItem",

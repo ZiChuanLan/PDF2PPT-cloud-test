@@ -1,4 +1,4 @@
-# pyright: reportMissingImports=false, reportImplicitRelativeImport=false, reportMissingTypeArgument=false
+# pyright: reportMissingImports=false, reportMissingTypeArgument=false
 
 """LLM-powered layout assist (optional).
 
@@ -21,6 +21,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Optional
 
+from .geometry import bbox_px_to_pt
 from ..logging_config import get_logger
 
 
@@ -201,7 +202,12 @@ def _validate_image_regions_px(
             or not all(isinstance(x, (int, float)) for x in bbox)
         ):
             continue
-        x0, y0, x1, y1 = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+        x0, y0, x1, y1 = (
+            float(bbox[0]),
+            float(bbox[1]),
+            float(bbox[2]),
+            float(bbox[3]),
+        )
         x0, x1 = (min(x0, x1), max(x0, x1))
         y0, y1 = (min(y0, y1), max(y0, y1))
 
@@ -225,14 +231,40 @@ def _validate_image_regions_px(
             continue
 
         # Avoid card-size panel regions that usually represent text containers
-        # rather than real image assets on slide-like pages.
-        if page_ratio >= 0.12 and max(w, h) >= 0.55 * float(max(W, H)):
+        # rather than real image assets on slide-like pages.  Use relaxed
+        # thresholds so that large screenshots / charts are preserved.
+        if page_ratio >= 0.25 and max(w, h) >= 0.70 * float(max(W, H)):
             continue
 
         out.append([x0, y0, x1, y1])
         if len(out) >= max_regions:
             break
 
+    return out
+
+
+def _image_regions_px_to_pt(
+    regions_px: list[list[float]],
+    *,
+    image_width_px: int,
+    image_height_px: int,
+    page_width_pt: float,
+    page_height_pt: float,
+) -> list[list[float]]:
+    """Convert validated image-region bboxes from pixel space to page points."""
+
+    out: list[list[float]] = []
+    for bbox in regions_px:
+        converted = bbox_px_to_pt(
+            bbox,
+            img_w_px=int(image_width_px),
+            img_h_px=int(image_height_px),
+            page_w_pt=float(page_width_pt),
+            page_h_pt=float(page_height_pt),
+        )
+        if converted is None:
+            continue
+        out.append(converted)
     return out
 
 
@@ -277,8 +309,12 @@ def _build_prompt(
     payload = {
         "page_width_pt": w,
         "page_height_pt": h,
-        "image_width_px": int(image_width_px) if isinstance(image_width_px, int) else None,
-        "image_height_px": int(image_height_px) if isinstance(image_height_px, int) else None,
+        "image_width_px": int(image_width_px)
+        if isinstance(image_width_px, int)
+        else None,
+        "image_height_px": int(image_height_px)
+        if isinstance(image_height_px, int)
+        else None,
         "image_dpi": int(image_dpi) if isinstance(image_dpi, int) else None,
         "elements": simplified,
     }
@@ -492,8 +528,8 @@ class OpenAiProvider(LlmProvider):
                 timeout=_PAGE_TIMEOUT_S
             ).responses.create(
                 model=self.model,
-                input=[
-                    {
+                input=[  # type: ignore[arg-type]
+                    {  # pyright: ignore[reportArgumentType]
                         "role": "user",
                         "content": [
                             {"type": "input_text", "text": prompt},
@@ -504,7 +540,11 @@ class OpenAiProvider(LlmProvider):
             )
 
             parsed = _extract_json_object(getattr(response, "output_text", "") or "")
-            return parsed or {"reading_order": [], "table_grids": [], "image_regions": []}
+            return parsed or {
+                "reading_order": [],
+                "table_grids": [],
+                "image_regions": [],
+            }
 
         # OpenAI-compatible fallback: use chat.completions for broader support.
         completion = self.client.with_options(
@@ -513,7 +553,7 @@ class OpenAiProvider(LlmProvider):
             model=self.model,
             temperature=0,
             max_tokens=1024,
-            messages=[
+            messages=[  # type: ignore[arg-type]
                 {
                     "role": "system",
                     "content": "You are a layout analysis assistant. Output JSON only.",
@@ -590,7 +630,7 @@ class AnthropicProvider(LlmProvider):
                 {
                     "role": "user",
                     "content": [
-                        {
+                        {  # pyright: ignore[reportArgumentType]
                             "type": "image",
                             "source": {
                                 "type": "base64",
@@ -610,87 +650,6 @@ class AnthropicProvider(LlmProvider):
             if getattr(block, "type", None) == "text" and getattr(block, "text", None):
                 text_parts.append(str(block.text))
         parsed = _extract_json_object("\n".join(text_parts))
-        return parsed or {"reading_order": [], "table_grids": [], "image_regions": []}
-
-
-class QwenProvider(LlmProvider):
-    def __init__(
-        self,
-        api_key: str,
-        base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        *,
-        model: str = "qwen-vl-max",
-    ):
-        import openai
-
-        self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
-        self.model = model
-
-    def analyze_layout(
-        self, page_image_bytes: bytes, elements: list[dict[str, Any]]
-    ) -> dict[str, Any]:
-        page_w_pt: float | None = None
-        page_h_pt: float | None = None
-        for el in elements:
-            if not isinstance(el, dict):
-                continue
-            w = el.get("_page_width_pt")
-            h = el.get("_page_height_pt")
-            if page_w_pt is None and isinstance(w, (int, float)):
-                page_w_pt = float(w)
-            if page_h_pt is None and isinstance(h, (int, float)):
-                page_h_pt = float(h)
-            if page_w_pt is not None and page_h_pt is not None:
-                break
-
-        image_w_px: int | None = None
-        image_h_px: int | None = None
-        try:
-            import io
-            from PIL import Image
-
-            im = Image.open(io.BytesIO(page_image_bytes))
-            image_w_px, image_h_px = im.size
-        except Exception:
-            image_w_px, image_h_px = None, None
-
-        prompt = _build_prompt(
-            page_w_pt=page_w_pt,
-            page_h_pt=page_h_pt,
-            image_width_px=image_w_px,
-            image_height_px=image_h_px,
-            image_dpi=_DEFAULT_RENDER_DPI,
-            elements=[dict(e) for e in elements if isinstance(e, dict)],
-        )
-        image_uri = _data_uri(page_image_bytes)
-
-        completion = self.client.with_options(
-            timeout=_PAGE_TIMEOUT_S
-        ).chat.completions.create(
-            model=self.model,
-            temperature=0,
-            max_tokens=1024,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a layout analysis assistant. Output JSON only.",
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": image_uri}},
-                    ],
-                },
-            ],
-        )
-
-        content = (
-            completion.choices[0].message.content
-            if getattr(completion, "choices", None)
-            else ""
-        )
-        parsed = _extract_json_object(content or "")
         return parsed or {"reading_order": [], "table_grids": [], "image_regions": []}
 
 
@@ -792,11 +751,18 @@ class LlmLayoutService:
                         height_px=int(img_h_px),
                     )
                     if regions_px is not None:
-                        scale = 72.0 / float(_DEFAULT_RENDER_DPI)
-                        ir_image_regions = [
-                            [x0 * scale, y0 * scale, x1 * scale, y1 * scale]
-                            for (x0, y0, x1, y1) in regions_px
-                        ]
+                        page_w_pt = page.get("page_width_pt")
+                        page_h_pt = page.get("page_height_pt")
+                        if isinstance(page_w_pt, (int, float)) and isinstance(
+                            page_h_pt, (int, float)
+                        ):
+                            ir_image_regions = _image_regions_px_to_pt(
+                                regions_px,
+                                image_width_px=int(img_w_px),
+                                image_height_px=int(img_h_px),
+                                page_width_pt=float(page_w_pt),
+                                page_height_pt=float(page_h_pt),
+                            )
 
                 if ro is not None:
                     if page.get("reading_order") != ro:

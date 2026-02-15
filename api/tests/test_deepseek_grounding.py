@@ -1,16 +1,6 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-
-# Ensure `import app.*` works when tests run from repo root.
-_API_DIR = Path(__file__).resolve().parents[1]
-if str(_API_DIR) not in sys.path:
-    sys.path.insert(0, str(_API_DIR))
-
-
-from app.convert.ocr import _extract_deepseek_tagged_items  # noqa: E402
+from app.convert.ocr import _extract_deepseek_tagged_items
 
 
 def _as_xyxy(item: dict) -> tuple[float, float, float, float]:
@@ -67,12 +57,9 @@ def test_deepseek_prefers_inline_text_when_ref_is_generic_label() -> None:
 
 
 def test_deepseek_supports_html_escaped_tags() -> None:
-    content = (
-        "&lt;|ref|&gt;A&lt;|/ref|&gt;&lt;|det|&gt;[[10,20,30,40]]&lt;|/det|&gt;\n"
-    )
+    content = "&lt;|ref|&gt;A&lt;|/ref|&gt;&lt;|det|&gt;[[10,20,30,40]]&lt;|/det|&gt;\n"
     items = _extract_deepseek_tagged_items(content)
     assert items is not None
     assert len(items) == 1
     assert items[0]["text"] == "A"
     assert _as_xyxy(items[0]) == (10.0, 20.0, 30.0, 40.0)
-

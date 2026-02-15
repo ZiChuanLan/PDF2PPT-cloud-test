@@ -16,6 +16,4 @@ _REPO_ROOT = Path(__file__).resolve().parent
 
 # Make workspace packages importable when running `pytest` from repo root.
 _add_path(_REPO_ROOT / "api")
-_add_path(_REPO_ROOT / "ocr_pdf2ppt_v2" / "src")
-_add_path(_REPO_ROOT / "ocr_pdf2ppt_v3" / "src")
 

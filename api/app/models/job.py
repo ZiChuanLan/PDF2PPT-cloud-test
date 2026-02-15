@@ -57,127 +57,6 @@ class Job(BaseModel):
     )
 
 
-class JobCreateRequest(BaseModel):
-    """Request model for job creation."""
-
-    enable_ocr: bool = Field(False, description="Enable OCR for scanned PDFs")
-    text_erase_mode: Optional[str] = Field(
-        "fill",
-        description="Text erase mode for scanned/mineru pages (smart, fill)",
-    )
-    scanned_page_mode: Optional[str] = Field(
-        "segmented",
-        description=(
-            "Scanned page rendering mode (segmented, fullpage). "
-            "Controls whether scanned pages are split into editable image blocks."
-        ),
-    )
-    enable_layout_assist: bool = Field(True, description="Enable AI layout assistance")
-    layout_assist_apply_image_regions: bool = Field(
-        False,
-        description="Apply AI-suggested image regions in layout assist (experimental)",
-    )
-    layout_mode: LayoutMode = Field(
-        LayoutMode.fidelity,
-        description="Layout mode: fidelity (no AI) or assist (LLM-assisted)",
-    )
-    provider: Optional[str] = Field(
-        "openai", description="LLM provider identifier (openai, claude, domestic)"
-    )
-    api_key: Optional[str] = Field(None, description="Optional API key for AI services")
-    base_url: Optional[str] = Field(
-        None, description="Optional OpenAI-compatible base URL"
-    )
-    model: Optional[str] = Field(
-        None, description="Optional OpenAI-compatible model identifier"
-    )
-    page_start: Optional[int] = Field(
-        None, description="Optional 1-based start page for conversion"
-    )
-    page_end: Optional[int] = Field(
-        None, description="Optional 1-based end page for conversion"
-    )
-    parse_provider: Optional[str] = Field(
-        "local",
-        description=(
-            "Parser provider (local, mineru). Legacy `v2` is accepted for backward compatibility "
-            "and maps to local+fullpage+AI OCR."
-        ),
-    )
-    mineru_api_token: Optional[str] = Field(
-        None, description="Optional MinerU API token"
-    )
-    mineru_base_url: Optional[str] = Field(
-        None, description="Optional MinerU API base URL"
-    )
-    mineru_model_version: Optional[str] = Field(
-        "vlm", description="MinerU model version (pipeline, vlm, MinerU-HTML)"
-    )
-    mineru_enable_formula: Optional[bool] = Field(
-        True, description="Enable formula recognition in MinerU"
-    )
-    mineru_enable_table: Optional[bool] = Field(
-        True, description="Enable table recognition in MinerU"
-    )
-    mineru_language: Optional[str] = Field(
-        None, description="Optional MinerU language hint (e.g. ch, en)"
-    )
-    mineru_is_ocr: Optional[bool] = Field(
-        None, description="Optional MinerU per-file OCR switch"
-    )
-    mineru_hybrid_ocr: Optional[bool] = Field(
-        False,
-        description="Enable local hybrid OCR alignment in MinerU mode (no AI text refiner)",
-    )
-    ocr_provider: Optional[str] = Field(
-        "auto",
-        description="OCR provider (auto, aiocr, baidu, tesseract, paddle, paddle_local); legacy ai/remote are accepted",
-    )
-    ocr_baidu_app_id: Optional[str] = Field(
-        None, description="Optional Baidu OCR App ID"
-    )
-    ocr_baidu_api_key: Optional[str] = Field(
-        None, description="Optional Baidu OCR API key"
-    )
-    ocr_baidu_secret_key: Optional[str] = Field(
-        None, description="Optional Baidu OCR secret key"
-    )
-    ocr_tesseract_min_confidence: Optional[float] = Field(
-        None, description="Optional Tesseract min confidence (0-100)"
-    )
-    ocr_tesseract_language: Optional[str] = Field(
-        None, description="Optional Tesseract language code (e.g. eng, chi_sim)"
-    )
-    ocr_ai_api_key: Optional[str] = Field(
-        None, description="Optional AI OCR API key (OpenAI-compatible)"
-    )
-    ocr_ai_provider: Optional[str] = Field(
-        "auto",
-        description=(
-            "Optional AI OCR vendor adapter (auto, openai, siliconflow, deepseek, ppio, novita)"
-        ),
-    )
-    ocr_ai_base_url: Optional[str] = Field(
-        None, description="Optional AI OCR base URL (OpenAI-compatible)"
-    )
-    ocr_ai_model: Optional[str] = Field(
-        None, description="Optional AI OCR model name"
-    )
-    ocr_ai_linebreak_assist: Optional[bool] = Field(
-        None,
-        description=(
-            "Optional AI visual line-break assist for OCR blocks (split coarse boxes into line-level boxes). "
-            "When omitted (null), the backend may auto-enable this for some OCR providers/models."
-        ),
-    )
-    ocr_strict_mode: Optional[bool] = Field(
-        False,
-        description=(
-            "Strict OCR quality mode: disable implicit OCR fallbacks/downgrades and fail fast on OCR errors"
-        ),
-    )
-
-
 class JobCreateResponse(BaseModel):
     """Response model for job creation."""
 
@@ -223,6 +102,52 @@ class LocalOcrCheckResponse(BaseModel):
 
     ok: bool = Field(..., description="Whether local OCR is ready")
     check: LocalOcrCheckResult
+
+
+class AiOcrCheckRequest(BaseModel):
+    """Request model for remote AI OCR capability checks."""
+
+    provider: Optional[str] = Field(
+        "auto",
+        description=(
+            "AI OCR vendor adapter (auto, openai, siliconflow, deepseek, ppio, novita)"
+        ),
+    )
+    api_key: str = Field(..., description="API key for AI OCR provider")
+    base_url: Optional[str] = Field(
+        None, description="Optional OpenAI-compatible base URL"
+    )
+    model: str = Field(..., description="Target AI OCR model identifier")
+
+
+class AiOcrCheckSampleItem(BaseModel):
+    """Sample OCR item returned by capability check."""
+
+    text: str
+    bbox: list[float] = Field(default_factory=list)
+    confidence: Optional[float] = None
+
+
+class AiOcrCheckResult(BaseModel):
+    """Detailed AI OCR capability check result."""
+
+    provider: str
+    model: str
+    base_url: Optional[str] = None
+    elapsed_ms: int
+    items_count: int
+    valid_bbox_items: int
+    ready: bool
+    message: str
+    error: Optional[str] = None
+    sample_items: list[AiOcrCheckSampleItem] = Field(default_factory=list)
+
+
+class AiOcrCheckResponse(BaseModel):
+    """Response model for AI OCR capability checks."""
+
+    ok: bool = Field(..., description="Whether the model can return OCR with bbox")
+    check: AiOcrCheckResult
 
 
 class JobStatusResponse(BaseModel):

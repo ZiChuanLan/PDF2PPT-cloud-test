@@ -58,7 +58,7 @@ API_URL="http://${API_HOST}:${API_PORT}"
 
 export PYTHONPATH="${ROOT_DIR}/api"
 export REDIS_URL="${REDIS_URL:-memory://}"
-export CORS_ALLOW_ORIGINS="${CORS_ALLOW_ORIGINS:-http://localhost:${WEB_PORT}}"
+export CORS_ALLOW_ORIGINS="${CORS_ALLOW_ORIGINS:-http://localhost:${WEB_PORT},http://127.0.0.1:${WEB_PORT}}"
 
 API_PID=""
 cleanup() {

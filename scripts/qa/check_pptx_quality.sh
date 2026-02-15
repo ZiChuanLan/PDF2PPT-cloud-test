@@ -14,9 +14,15 @@ if [[ ! -f "$PPTX_PATH" ]]; then
   exit 2
 fi
 
-PYTHON=${PYTHON:-.venv/bin/python3}
-if [[ ! -x "$PYTHON" ]]; then
-  PYTHON=python3
+PYTHON=${PYTHON:-}
+if [[ -z "$PYTHON" ]]; then
+  if [[ -x "api/.venv/bin/python3" ]]; then
+    PYTHON="api/.venv/bin/python3"
+  elif [[ -x ".venv/bin/python3" ]]; then
+    PYTHON=".venv/bin/python3"
+  else
+    PYTHON="python3"
+  fi
 fi
 
 if [[ "$#" -eq 0 ]]; then

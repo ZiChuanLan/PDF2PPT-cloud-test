@@ -23,6 +23,23 @@ make dev-local
 bash scripts/dev/local_dev.sh
 ```
 
+## Windows 可下载版（EXE + Release 包）
+
+如果你希望用户在 GitHub 上下载后直接运行，请使用 Windows 打包流程：
+
+- 文档：`packaging/windows/README.md`
+- 构建脚本：`packaging/windows/build_exe.ps1` / `packaging/windows/build_exe.bat`
+- 自动化工作流：`.github/workflows/windows-release.yml`
+
+构建后会得到：
+
+- `release/windows/PPT-OpenCode-Launcher.exe`
+- `release/windows/ppt-opencode-win-x64.zip`
+
+说明：
+- `PPT-OpenCode-Launcher.exe` 是启动器
+- 对最终用户分发，优先使用 `ppt-opencode-win-x64.zip`（包含 EXE + 运行所需目录）
+
 ## 远程 OCR（推荐）
 
 远程 OCR 走 OpenAI-Compatible 接口（例如 SiliconFlow / PPIO / Novita / OpenAI / DeepSeek 网关）。
@@ -51,7 +68,7 @@ bash scripts/dev/local_dev.sh
 仓库内置基准脚本，会生成“原图 vs 合成预览图”的对比图和热力图，便于快速定位错位/换行/重影：
 
 ```bash
-api/.venv/bin/python api/scripts/benchmark_engines.py \
+python api/scripts/benchmark_engines.py \
   --pdf ./your.pdf \
   --pages random:10 \
   --out-dir ./test/benchmark-engines
@@ -63,7 +80,7 @@ api/.venv/bin/python api/scripts/benchmark_engines.py \
 SILICONFLOW_API_KEY=... \
 SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1 \
 SILICONFLOW_MODEL=PaddlePaddle/PaddleOCR-VL-1.5 \
-api/.venv/bin/python api/scripts/benchmark_engines.py \
+python api/scripts/benchmark_engines.py \
   --pdf ./your.pdf \
   --pages random:10 \
   --out-dir ./test/benchmark-engines
@@ -73,4 +90,3 @@ api/.venv/bin/python api/scripts/benchmark_engines.py \
 - `page-XXX/compare-source-vs-ENGINE.png`
 - `page-XXX/heat-source-vs-ENGINE.png`
 - `report.json`
-
