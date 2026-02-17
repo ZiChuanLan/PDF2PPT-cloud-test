@@ -2,7 +2,6 @@ export type Provider = "openai" | "claude" | "siliconflow" | "mineru"
 export type OcrProvider =
   | "auto"
   | "aiocr"
-  | "paddle"
   | "baidu"
   | "tesseract"
   | "paddle_local"
@@ -95,7 +94,7 @@ export const defaultSettings: Settings = {
   ocrAiBaseUrl: "",
   ocrAiModel: "",
   // Optional OCR visual line-break split for coarse block boxes.
-  // auto: backend decides (for example auto-enable for paddle OCR-VL).
+  // auto: backend decides based on OCR provider capabilities.
   ocrAiLinebreakAssistMode: "auto",
 }
 
@@ -171,7 +170,7 @@ export function loadStoredSettings(): Settings {
   // Backward compatibility: migrate legacy values to the new canonical id.
   const legacyProvider = (parsed as { ocrProvider?: string } | null)?.ocrProvider
   if (legacyProvider === "ai" || legacyProvider === "remote" || legacyProvider === "paddle") {
-    merged.ocrProvider = legacyProvider === "paddle" ? "paddle" : "aiocr"
+    merged.ocrProvider = "aiocr"
   }
   if (legacyProvider === "paddle-local" || legacyProvider === "local_paddle") {
     merged.ocrProvider = "paddle_local"
@@ -179,7 +178,6 @@ export function loadStoredSettings(): Settings {
   const validOcrProviders: OcrProvider[] = [
     "auto",
     "aiocr",
-    "paddle",
     "baidu",
     "tesseract",
     "paddle_local",

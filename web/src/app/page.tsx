@@ -193,10 +193,8 @@ function resolveRunConfig(settings: Settings): RunConfig {
   const rawOcrProvider = (settings.ocrProvider || "auto").trim().toLowerCase()
   const effectiveOcrProvider =
     parseProvider === "mineru"
-        ? (rawOcrProvider === "aiocr" || rawOcrProvider === "paddle"
-            ? "auto"
-            : rawOcrProvider)
-        : rawOcrProvider
+      ? (rawOcrProvider === "aiocr" ? "auto" : rawOcrProvider)
+      : rawOcrProvider
 
   const effectiveOcrAiKey =
     settings.ocrAiApiKey.trim() || (canReuseMainForOcr ? main.apiKey : "")
@@ -243,12 +241,6 @@ function validateBeforeRun(settings: Settings): ValidationResult {
     }
 
     if (run.effectiveOcrProvider === "aiocr") {
-      if (!run.effectiveOcrAiKey) {
-        return { ok: false, message: "当前 OCR 需要 AI Key，请在设置页补充 OCR API Key。" }
-      }
-    }
-
-    if (run.effectiveOcrProvider === "paddle") {
       if (!run.effectiveOcrAiKey) {
         return { ok: false, message: "当前 OCR 需要 AI Key，请在设置页补充 OCR API Key。" }
       }
@@ -317,7 +309,6 @@ function createFormData(
 
     const shouldAttachOcrAiParams =
       run.effectiveOcrProvider === "aiocr" ||
-      run.effectiveOcrProvider === "paddle" ||
       Boolean(settings.ocrAiLinebreakAssistMode === "on" && run.effectiveOcrAiKey) ||
       Boolean(settings.enableLayoutAssist && run.effectiveOcrAiKey)
     if (shouldAttachOcrAiParams) {
@@ -394,11 +385,7 @@ export default function Home() {
 
   const runConfig = React.useMemo(() => resolveRunConfig(settingsSnapshot), [settingsSnapshot])
   const runModelLabel = React.useMemo(() => {
-    if (
-      runConfig.parseProvider === "local" &&
-      runConfig.effectiveOcrProvider !== "aiocr" &&
-      runConfig.effectiveOcrProvider !== "paddle"
-    ) {
+    if (runConfig.parseProvider === "local" && runConfig.effectiveOcrProvider !== "aiocr") {
       if (settingsSnapshot.ocrAiLinebreakAssistMode === "on" && runConfig.effectiveOcrAiModel) {
         return `${runConfig.effectiveOcrAiModel}（仅用于行级拆分辅助）`
       }

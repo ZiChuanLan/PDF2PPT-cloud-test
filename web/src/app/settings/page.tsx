@@ -67,7 +67,6 @@ const ocrAiProviderOptions: Array<{ id: OcrAiProvider; label: string }> = [
 const ocrProviderLabels: Record<Settings["ocrProvider"], string> = {
   auto: "自动（混合）",
   aiocr: "AI OCR（OpenAI 兼容）",
-  paddle: "PaddleOCR-VL（远程）",
   paddle_local: "PaddleOCR（本地）",
   baidu: "百度 OCR",
   tesseract: "Tesseract（本地）",
@@ -82,6 +81,11 @@ type LocalOcrCheckResult = {
   version: string | null
   available_languages: string[]
   missing_languages: string[]
+  model_root_dir?: string | null
+  required_models?: string[]
+  found_models?: string[]
+  missing_models?: string[]
+  model_files?: string[]
   issues: string[]
   ready: boolean
   message: string
@@ -90,6 +94,18 @@ type LocalOcrCheckResult = {
 type LocalOcrCheckResponse = {
   ok: boolean
   check: LocalOcrCheckResult
+}
+
+type LocalOcrCheckSuiteEntry = {
+  runtime: LocalOcrCheckResponse | null
+  runtimeError: string | null
+  models: LocalOcrCheckResponse | null
+  modelsError: string | null
+}
+
+type LocalOcrCheckSuiteResult = {
+  tesseract: LocalOcrCheckSuiteEntry
+  paddle: LocalOcrCheckSuiteEntry
 }
 
 type AiOcrCheckSampleItem = {
@@ -138,11 +154,11 @@ export default function SettingsPage() {
   const [ocrModelOptions, setOcrModelOptions] = React.useState<string[]>([])
   const [ocrModelLoading, setOcrModelLoading] = React.useState(false)
   const [ocrModelError, setOcrModelError] = React.useState<string | null>(null)
-  const [localOcrChecking, setLocalOcrChecking] = React.useState(false)
-  const [localOcrCheck, setLocalOcrCheck] = React.useState<LocalOcrCheckResponse | null>(
+  const [localOcrSuiteChecking, setLocalOcrSuiteChecking] = React.useState(false)
+  const [localOcrSuite, setLocalOcrSuite] = React.useState<LocalOcrCheckSuiteResult | null>(
     null
   )
-  const [localOcrCheckError, setLocalOcrCheckError] = React.useState<string | null>(null)
+  const [localOcrSuiteError, setLocalOcrSuiteError] = React.useState<string | null>(null)
   const [aiOcrChecking, setAiOcrChecking] = React.useState(false)
   const [aiOcrCheck, setAiOcrCheck] = React.useState<AiOcrCheckResponse | null>(null)
   const [aiOcrCheckError, setAiOcrCheckError] = React.useState<string | null>(null)
@@ -195,7 +211,6 @@ export default function SettingsPage() {
   const selectedOcrProvider: Settings["ocrProvider"] =
     isMineruProvider
       ? settings.ocrProvider === "aiocr" ||
-          settings.ocrProvider === "paddle" ||
           settings.ocrProvider === "paddle_local"
         ? "auto"
         : settings.ocrProvider
@@ -205,21 +220,17 @@ export default function SettingsPage() {
   const parseEngineMode: ParseEngineMode = isMineruProvider
     ? "mineru_cloud"
     : (selectedOcrProvider === "aiocr" ||
-        selectedOcrProvider === "paddle" ||
         selectedOcrProvider === "baidu")
       ? "remote_ocr"
       : "local_ocr"
   const isRemoteOcrMode = parseEngineMode === "remote_ocr"
   const isOcrProviderAuto = selectedOcrProvider === "auto"
   const isOcrProviderAi = selectedOcrProvider === "aiocr"
-  const isOcrProviderPaddleRemote = selectedOcrProvider === "paddle"
   const isOcrProviderPaddleLocal = selectedOcrProvider === "paddle_local"
   const isOcrProviderBaidu = selectedOcrProvider === "baidu"
   const isOcrProviderTesseract = selectedOcrProvider === "tesseract"
-  const isAiOcrProviderSelected =
-    isOcrProviderAi || isOcrProviderPaddleRemote || isOcrProviderAuto
-  const needsRequiredOcrAiConfig =
-    !isMineruProvider && (isOcrProviderAi || isOcrProviderPaddleRemote)
+  const isAiOcrProviderSelected = isOcrProviderAi || isOcrProviderAuto
+  const needsRequiredOcrAiConfig = !isMineruProvider && isOcrProviderAi
   const supportsOptionalOcrAiConfig = !isMineruProvider && isOcrProviderAuto
   const hasAnyOcrAiConfigValue =
     Boolean(settings.ocrAiApiKey.trim()) ||
@@ -230,12 +241,27 @@ export default function SettingsPage() {
   const shouldShowLocalOcrCheck =
     !isMineruProvider &&
     (isOcrProviderAuto || isOcrProviderTesseract || isOcrProviderPaddleLocal)
+  const tesseractSuite = localOcrSuite?.tesseract ?? null
+  const paddleSuite = localOcrSuite?.paddle ?? null
+  const hasTesseractSuite = Boolean(
+    tesseractSuite?.runtime ||
+      tesseractSuite?.runtimeError ||
+      tesseractSuite?.models ||
+      tesseractSuite?.modelsError
+  )
+  const hasPaddleSuite = Boolean(
+    paddleSuite?.runtime ||
+      paddleSuite?.runtimeError ||
+      paddleSuite?.models ||
+      paddleSuite?.modelsError
+  )
+  const tesseractSuiteReady = Boolean(tesseractSuite?.runtime?.ok && tesseractSuite?.models?.ok)
+  const paddleSuiteReady = Boolean(paddleSuite?.runtime?.ok && paddleSuite?.models?.ok)
   const shouldShowBaiduConfig = isOcrProviderBaidu || isOcrProviderAuto
   const shouldShowTesseractConfig = isOcrProviderTesseract || isOcrProviderAuto
   const shouldShowAiVendorAdapter =
     canUseAiOcr &&
     (isOcrProviderAi ||
-      isOcrProviderPaddleRemote ||
       (isOcrProviderAuto && hasAnyOcrAiConfigValue))
   const aiProvider =
     settings.provider === "claude"
@@ -453,8 +479,8 @@ export default function SettingsPage() {
     skipNextAutoSaveRef.current = true
     setSettings(defaultSettings)
     setLastSavedAt(null)
-    setLocalOcrCheck(null)
-    setLocalOcrCheckError(null)
+    setLocalOcrSuite(null)
+    setLocalOcrSuiteError(null)
     setAiOcrCheck(null)
     setAiOcrCheckError(null)
     toast("已清空本地设置")
@@ -506,52 +532,89 @@ export default function SettingsPage() {
     }
   }, [])
 
-  const onCheckLocalOcr = React.useCallback(
-    async (provider: "tesseract" | "paddle") => {
-      setLocalOcrChecking(true)
-      setLocalOcrCheckError(null)
-
-      try {
-        const providerLabel = provider === "paddle" ? "PaddleOCR" : "Tesseract OCR"
-        const language =
-          provider === "paddle"
-            ? "ch"
-            : settings.ocrTesseractLanguage.trim() || "chi_sim+eng"
-        const response = await apiFetch("/jobs/ocr/local/check", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider, language }),
-        })
-
-        const body = (await response.json().catch(() => null)) as
-          | LocalOcrCheckResponse
-          | { message?: string }
-          | null
-
-        if (!response.ok) {
-          throw new Error(
-            (body as { message?: string } | null)?.message || `${providerLabel} 检测失败`
-          )
-        }
-
-        const result = body as LocalOcrCheckResponse
-        setLocalOcrCheck(result)
-        if (result.ok) {
-          toast.success(`${providerLabel} 环境可用`)
-        } else {
-          toast(`${providerLabel} 未就绪，请按提示处理`)
-        }
-      } catch (e) {
-        const message = normalizeFetchError(e, "本地 OCR 检测失败")
-        setLocalOcrCheck(null)
-        setLocalOcrCheckError(message)
-        toast(message)
-      } finally {
-        setLocalOcrChecking(false)
+  const requestLocalOcrCheck = React.useCallback(
+    async (provider: string, language: string, fallbackError: string) => {
+      const response = await apiFetch("/jobs/ocr/local/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, language }),
+      })
+      const body = (await response.json().catch(() => null)) as
+        | LocalOcrCheckResponse
+        | { message?: string }
+        | null
+      if (!response.ok) {
+        throw new Error((body as { message?: string } | null)?.message || fallbackError)
       }
+      return body as LocalOcrCheckResponse
     },
-    [settings.ocrTesseractLanguage]
+    []
   )
+
+  const runSingleLocalOcrSuite = React.useCallback(
+    async (provider: "tesseract" | "paddle"): Promise<LocalOcrCheckSuiteEntry> => {
+      const providerLabel = provider === "paddle" ? "PaddleOCR" : "Tesseract"
+      const language =
+        provider === "paddle"
+          ? "ch"
+          : settings.ocrTesseractLanguage.trim() || "chi_sim+eng"
+      const modelProvider = provider === "paddle" ? "paddle_models" : "tesseract_models"
+
+      const [runtimeResult, modelResult] = await Promise.allSettled([
+        requestLocalOcrCheck(provider, language, `${providerLabel} 运行环境检测失败`),
+        requestLocalOcrCheck(modelProvider, language, `${providerLabel} 模型检测失败`),
+      ])
+
+      const runtime = runtimeResult.status === "fulfilled" ? runtimeResult.value : null
+      const runtimeError =
+        runtimeResult.status === "rejected"
+          ? normalizeFetchError(runtimeResult.reason, `${providerLabel} 运行环境检测失败`)
+          : null
+      const models = modelResult.status === "fulfilled" ? modelResult.value : null
+      const modelsError =
+        modelResult.status === "rejected"
+          ? normalizeFetchError(modelResult.reason, `${providerLabel} 模型检测失败`)
+          : null
+
+      return { runtime, runtimeError, models, modelsError }
+    },
+    [requestLocalOcrCheck, settings.ocrTesseractLanguage]
+  )
+
+  const onRunLocalOcrSuite = React.useCallback(async () => {
+    setLocalOcrSuiteChecking(true)
+    setLocalOcrSuiteError(null)
+
+    try {
+      const [tesseract, paddle] = await Promise.all([
+        runSingleLocalOcrSuite("tesseract"),
+        runSingleLocalOcrSuite("paddle"),
+      ])
+
+      setLocalOcrSuite({ tesseract, paddle })
+
+      const tesseractReady = Boolean(tesseract.runtime?.ok && tesseract.models?.ok)
+      const paddleReady = Boolean(paddle.runtime?.ok && paddle.models?.ok)
+      const hasAnyHardError = Boolean(
+        tesseract.runtimeError || tesseract.modelsError || paddle.runtimeError || paddle.modelsError
+      )
+
+      if (tesseractReady && paddleReady) {
+        toast.success("本地 OCR 运行环境与模型均已就绪")
+      } else if (hasAnyHardError) {
+        setLocalOcrSuiteError("综合检测部分失败，请查看各卡片错误详情。")
+        toast.error("本地 OCR 综合检测部分失败")
+      } else {
+        toast("综合检测完成，请根据结果补齐缺失项")
+      }
+    } catch (e) {
+      const message = normalizeFetchError(e, "本地 OCR 综合检测失败")
+      setLocalOcrSuiteError(message)
+      toast.error(message)
+    } finally {
+      setLocalOcrSuiteChecking(false)
+    }
+  }, [runSingleLocalOcrSuite])
 
   const onCheckAiOcrModel = React.useCallback(async () => {
     const apiKey = ocrPrimaryApiKey || mainModelsApiKeyRaw.trim()
@@ -705,7 +768,6 @@ export default function SettingsPage() {
                         if (p.id === "mineru_cloud") {
                           const nextOcrProvider: Settings["ocrProvider"] =
                             s.ocrProvider === "aiocr" ||
-                              s.ocrProvider === "paddle" ||
                               s.ocrProvider === "paddle_local"
                               ? hasBaiduCredsInState
                                 ? "baidu"
@@ -723,7 +785,6 @@ export default function SettingsPage() {
                         if (p.id === "remote_ocr") {
                           const nextOcrProvider: Settings["ocrProvider"] =
                             s.ocrProvider === "aiocr" ||
-                              s.ocrProvider === "paddle" ||
                               s.ocrProvider === "baidu"
                               ? s.ocrProvider
                               : hasBaiduCredsInState
@@ -1100,7 +1161,6 @@ export default function SettingsPage() {
                   {isRemoteOcrMode ? (
                     <>
                       <option value="aiocr">AI OCR（OpenAI 兼容）</option>
-                      <option value="paddle">PaddleOCR-VL（远程）</option>
                       <option value="baidu">百度 OCR</option>
                     </>
                   ) : parseEngineMode === "local_ocr" ? (
@@ -1118,8 +1178,8 @@ export default function SettingsPage() {
                 </Select>
                 <div className="text-muted-foreground text-xs">
                   当前模式：{ocrProviderLabels[selectedOcrProvider]}。
-                  {isOcrProviderAi || isOcrProviderPaddleRemote
-                    ? " 显式远程 OCR 为严格执行：失败即报错，不自动回退。"
+                  {isOcrProviderAi
+                    ? " 显式 AI OCR 为严格执行：失败即报错，不自动回退。"
                     : isOcrProviderAuto
                       ? " 自动模式优先本地 OCR，可选百度。"
                       : isOcrProviderPaddleLocal
@@ -1455,63 +1515,119 @@ export default function SettingsPage() {
                 </div>
               ) : null}
 
-              {showAdvanced && shouldShowLocalOcrCheck ? (
-                <div className="grid gap-2">
-                <div className="flex items-center justify-between gap-2">
-                  <label className="text-muted-foreground text-xs">
-                    本地 OCR 环境检测
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => onCheckLocalOcr("tesseract")}
-                      disabled={localOcrChecking}
-                    >
-                      {localOcrChecking ? "检测中..." : "检测 Tesseract"}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => onCheckLocalOcr("paddle")}
-                      disabled={localOcrChecking}
-                    >
-                      {localOcrChecking ? "检测中..." : "检测 PaddleOCR"}
-                    </Button>
-                  </div>
-                </div>
-                {localOcrCheckError ? (
-                  <div className="text-xs text-destructive">{localOcrCheckError}</div>
-                ) : null}
-                {localOcrCheck ? (
-                  <div
-                    className={
-                      localOcrCheck.ok
-                        ? "border border-emerald-500/40 bg-emerald-50 px-3 py-2 text-xs text-emerald-900"
-                        : "border border-amber-500/40 bg-amber-50 px-3 py-2 text-xs text-amber-900"
-                    }
-                  >
-                    <div>引擎：{localOcrCheck.check.provider}</div>
-                    <div>{localOcrCheck.check.message}</div>
-                    <div>
-                      状态：
-                      {localOcrCheck.check.ready ? "就绪" : "未就绪"} · 版本：
-                      {localOcrCheck.check.version || "未知"}
+              {shouldShowLocalOcrCheck ? (
+                <div className="grid gap-3 border border-border bg-muted/20 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-sans text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                      本地 OCR 综合检测
                     </div>
-                    <div>
-                      请求语言：{localOcrCheck.check.requested_language}
-                      {localOcrCheck.check.missing_languages.length
-                        ? ` · 缺失/不支持语言：${localOcrCheck.check.missing_languages.join(", ")}`
-                        : " · 语言配置正常"}
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={onRunLocalOcrSuite}
+                        disabled={localOcrSuiteChecking}
+                      >
+                        {localOcrSuiteChecking ? "检测中..." : "检测本地 OCR（Tesseract + PaddleOCR）"}
+                      </Button>
                     </div>
                   </div>
-                ) : (
                   <div className="text-muted-foreground text-xs">
-                    用于检查当前 worker 容器是否具备 Tesseract / PaddleOCR 运行环境。
+                    一次检测同时验证运行环境与模型文件，不会触发自动下载。
                   </div>
-                )}
+                  {localOcrSuiteError ? (
+                    <div className="text-xs text-destructive">{localOcrSuiteError}</div>
+                  ) : null}
+
+                  <div className="grid gap-2 md:grid-cols-2">
+                    <div
+                      className={
+                        !hasTesseractSuite
+                          ? "border border-border bg-background px-3 py-2 text-xs text-muted-foreground"
+                          : tesseractSuiteReady
+                            ? "border border-emerald-500/40 bg-emerald-50 px-3 py-2 text-xs text-emerald-900"
+                            : "border border-amber-500/40 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+                      }
+                    >
+                      <div className="font-medium">Tesseract</div>
+                      <div>
+                        运行环境：
+                        {tesseractSuite?.runtime
+                          ? tesseractSuite.runtime.check.ready
+                            ? "就绪"
+                            : "未就绪"
+                          : "未检测"}
+                        {tesseractSuite?.runtime
+                          ? ` · ${tesseractSuite.runtime.check.message}`
+                          : ""}
+                      </div>
+                      {tesseractSuite?.runtimeError ? (
+                        <div>运行环境错误：{tesseractSuite.runtimeError}</div>
+                      ) : null}
+                      <div>
+                        模型文件：
+                        {tesseractSuite?.models
+                          ? tesseractSuite.models.check.ready
+                            ? "齐全"
+                            : "缺失"
+                          : "未检测"}
+                        {tesseractSuite?.models
+                          ? ` · ${tesseractSuite.models.check.message}`
+                          : ""}
+                      </div>
+                      {tesseractSuite?.models?.check.missing_models?.length ? (
+                        <div>
+                          缺失：{tesseractSuite.models.check.missing_models.join(", ")}
+                        </div>
+                      ) : null}
+                      {tesseractSuite?.modelsError ? (
+                        <div>模型错误：{tesseractSuite.modelsError}</div>
+                      ) : null}
+                    </div>
+
+                    <div
+                      className={
+                        !hasPaddleSuite
+                          ? "border border-border bg-background px-3 py-2 text-xs text-muted-foreground"
+                          : paddleSuiteReady
+                            ? "border border-emerald-500/40 bg-emerald-50 px-3 py-2 text-xs text-emerald-900"
+                            : "border border-amber-500/40 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+                      }
+                    >
+                      <div className="font-medium">PaddleOCR</div>
+                      <div>
+                        运行环境：
+                        {paddleSuite?.runtime
+                          ? paddleSuite.runtime.check.ready
+                            ? "就绪"
+                            : "未就绪"
+                          : "未检测"}
+                        {paddleSuite?.runtime ? ` · ${paddleSuite.runtime.check.message}` : ""}
+                      </div>
+                      {paddleSuite?.runtimeError ? (
+                        <div>运行环境错误：{paddleSuite.runtimeError}</div>
+                      ) : null}
+                      <div>
+                        模型文件：
+                        {paddleSuite?.models
+                          ? paddleSuite.models.check.ready
+                            ? "齐全"
+                            : "缺失"
+                          : "未检测"}
+                        {paddleSuite?.models ? ` · ${paddleSuite.models.check.message}` : ""}
+                      </div>
+                      {paddleSuite?.models?.check.missing_models?.length ? (
+                        <div>缺失：{paddleSuite.models.check.missing_models.join(", ")}</div>
+                      ) : null}
+                      {paddleSuite?.models?.check.model_root_dir ? (
+                        <div>目录：{paddleSuite.models.check.model_root_dir}</div>
+                      ) : null}
+                      {paddleSuite?.modelsError ? (
+                        <div>模型错误：{paddleSuite.modelsError}</div>
+                      ) : null}
+                    </div>
+                  </div>
                 </div>
               ) : null}
               </section>
@@ -1582,7 +1698,7 @@ export default function SettingsPage() {
                     <option value="off">强制关闭</option>
                   </Select>
                   <div className="text-muted-foreground text-xs">
-                    使用视觉模型辅助判断块内换行，把粗粒度文本框拆为行级文本框，可改善字号、颜色和段落对齐稳定性。自动模式下后端会按 OCR 引擎能力自行决定（例如 PaddleOCR-VL 会自动启用）。
+                    使用视觉模型辅助判断块内换行，把粗粒度文本框拆为行级文本框，可改善字号、颜色和段落对齐稳定性。自动模式下后端会按 OCR 引擎能力自行决定（例如 AI OCR 场景可自动启用）。
                   </div>
                 </div>
 

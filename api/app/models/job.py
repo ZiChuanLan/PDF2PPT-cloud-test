@@ -70,7 +70,11 @@ class LocalOcrCheckRequest(BaseModel):
     """Request model for local OCR runtime checks."""
 
     provider: Optional[str] = Field(
-        "tesseract", description="Local OCR provider to check (tesseract, paddle)"
+        "tesseract",
+        description=(
+            "Local OCR probe target "
+            "(tesseract, paddle, tesseract_models, paddle_models)"
+        ),
     )
     language: Optional[str] = Field(
         None,
@@ -92,6 +96,11 @@ class LocalOcrCheckResult(BaseModel):
     version: Optional[str] = None
     available_languages: list[str] = Field(default_factory=list)
     missing_languages: list[str] = Field(default_factory=list)
+    model_root_dir: Optional[str] = None
+    required_models: list[str] = Field(default_factory=list)
+    found_models: list[str] = Field(default_factory=list)
+    missing_models: list[str] = Field(default_factory=list)
+    model_files: list[str] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
     ready: bool
     message: str

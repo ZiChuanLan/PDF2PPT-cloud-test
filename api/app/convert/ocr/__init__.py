@@ -15,7 +15,9 @@ from .local_providers import (
     _dedupe_overlapping_ocr_items,
     create_ocr_manager,
     ocr_image_to_elements,
+    probe_local_paddle_models,
     probe_local_paddleocr,
+    probe_local_tesseract_models,
     probe_local_tesseract,
 )
 from .utils import _coerce_bbox_xyxy
@@ -50,6 +52,8 @@ __all__ = [
     "_is_multiline_candidate_for_linebreak_assist",
     "create_ocr_manager",
     "ocr_image_to_elements",
+    "probe_local_paddle_models",
     "probe_local_paddleocr",
+    "probe_local_tesseract_models",
     "probe_local_tesseract",
 ]

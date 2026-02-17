@@ -48,7 +48,9 @@ from ..models.job import (
 from ..convert.ocr import (
     AiOcrClient,
     _coerce_bbox_xyxy,
+    probe_local_paddle_models,
     probe_local_paddleocr,
+    probe_local_tesseract_models,
     probe_local_tesseract,
 )
 from ..services.redis_service import get_redis_service
@@ -68,6 +70,10 @@ async def check_local_ocr(payload: LocalOcrCheckRequest):
             probe = probe_local_tesseract(language=payload.language)
         elif provider_id in {"paddle", "paddleocr", "paddle_ocr"}:
             probe = probe_local_paddleocr(language=payload.language)
+        elif provider_id in {"tesseract_models", "tesseract-models", "tess_models"}:
+            probe = probe_local_tesseract_models(language=payload.language)
+        elif provider_id in {"paddle_models", "paddle-models", "paddleocr_models"}:
+            probe = probe_local_paddle_models(language=payload.language)
         else:
             raise AppException(
                 code=ErrorCode.VALIDATION_ERROR,
