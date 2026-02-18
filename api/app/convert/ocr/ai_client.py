@@ -1490,9 +1490,9 @@ class AiOcrTextRefiner:
     ) -> list[dict]:
         """Split coarse OCR boxes into line-level boxes with visual guidance.
 
-        The method keeps horizontal geometry and only splits bbox vertically.
-        It is designed for cases where OCR returns paragraph/block boxes and
-        downstream PPT rendering needs line-level text boxes.
+        Primarily split vertically, and then opportunistically tighten each
+        line's horizontal bounds by local ink projection. This improves layout
+        fidelity for downstream PPT text placement/color sampling.
         """
 
         image = Image.open(image_path).convert("RGB")
@@ -1877,6 +1877,103 @@ class AiOcrTextRefiner:
 
             return ranges
 
+        def _tighten_line_bbox_x_by_ink(
+            row: dict[str, Any],
+            *,
+            ly0: float,
+            ly1: float,
+            fallback_x0: float,
+            fallback_x1: float,
+        ) -> tuple[float, float]:
+            """Best-effort horizontal tightening for a single split line bbox."""
+
+            try:
+                import numpy as np
+            except Exception:
+                return (float(fallback_x0), float(fallback_x1))
+
+            bbox_n = row.get("bbox_n")
+            if not isinstance(bbox_n, tuple) or len(bbox_n) != 4:
+                return (float(fallback_x0), float(fallback_x1))
+            x0, y0, x1, y1 = bbox_n
+            base_x0 = float(min(x0, x1))
+            base_x1 = float(max(x0, x1))
+            if base_x1 - base_x0 < 6.0:
+                return (float(fallback_x0), float(fallback_x1))
+
+            seg_y0 = max(float(y0), min(float(y1) - 1.0, float(ly0)))
+            seg_y1 = max(seg_y0 + 1.0, min(float(y1), float(ly1)))
+            if seg_y1 - seg_y0 < 2.0:
+                return (float(fallback_x0), float(fallback_x1))
+
+            xi0 = max(0, min(width - 1, int(math.floor(base_x0))))
+            xi1 = max(0, min(width, int(math.ceil(base_x1))))
+            yi0 = max(0, min(height - 1, int(math.floor(seg_y0))))
+            yi1 = max(0, min(height, int(math.ceil(seg_y1))))
+            if (xi1 - xi0) < 6 or (yi1 - yi0) < 2:
+                return (float(fallback_x0), float(fallback_x1))
+
+            try:
+                gray = image.crop((xi0, yi0, xi1, yi1)).convert("L")
+                arr = np.asarray(gray, dtype=np.float32)
+            except Exception:
+                return (float(fallback_x0), float(fallback_x1))
+
+            if arr.ndim != 2 or arr.size <= 0:
+                return (float(fallback_x0), float(fallback_x1))
+            h_px, w_px = arr.shape
+            if w_px < 6 or h_px < 2:
+                return (float(fallback_x0), float(fallback_x1))
+
+            p95 = float(np.percentile(arr, 95.0))
+            p10 = float(np.percentile(arr, 10.0))
+            contrast = max(1.0, p95 - p10)
+            if contrast < 8.0:
+                return (float(fallback_x0), float(fallback_x1))
+
+            ink = np.clip((p95 - arr) / contrast, 0.0, 1.0)
+            ink_mask = (ink >= 0.16).astype(np.float32)
+            col_profile = ink_mask.mean(axis=0)
+            if float(np.sum(col_profile)) <= max(0.015 * w_px, 1.0):
+                return (float(fallback_x0), float(fallback_x1))
+
+            # Prefer robust, not over-tight, trimming.
+            th = float(np.percentile(col_profile, 65.0))
+            th = max(0.04, min(0.22, th))
+            active = np.where(col_profile >= th)[0]
+            if active.size == 0:
+                return (float(fallback_x0), float(fallback_x1))
+
+            left_idx = int(active[0])
+            right_idx = int(active[-1]) + 1
+            if right_idx - left_idx < 3:
+                return (float(fallback_x0), float(fallback_x1))
+
+            base_w = max(1.0, base_x1 - base_x0)
+            margin_px = max(1, int(round(0.025 * float(base_w))))
+            left_idx = max(0, left_idx - margin_px)
+            right_idx = min(w_px, right_idx + margin_px)
+            if right_idx - left_idx < 3:
+                return (float(fallback_x0), float(fallback_x1))
+
+            tx0 = float(xi0 + left_idx)
+            tx1 = float(xi0 + right_idx)
+            tightened_w = max(1.0, tx1 - tx0)
+
+            # Guard against unstable over-shrink, especially for short lines.
+            line_text = str(row.get("text") or "")
+            compact_len = len(_compact_text(line_text))
+            min_ratio = 0.28 if compact_len <= 8 else 0.22
+            if tightened_w < (min_ratio * base_w):
+                return (float(fallback_x0), float(fallback_x1))
+
+            # Never expand beyond original fallback bounds.
+            tx0 = max(float(fallback_x0), min(float(fallback_x1) - 1.0, tx0))
+            tx1 = min(float(fallback_x1), max(float(fallback_x0) + 1.0, tx1))
+            if tx1 <= tx0:
+                return (float(fallback_x0), float(fallback_x1))
+            return (float(tx0), float(tx1))
+
         def _estimate_target_lines(row: dict[str, Any]) -> int:
             bbox_n = row.get("bbox_n")
             if not isinstance(bbox_n, tuple) or len(bbox_n) != 4:
@@ -2073,6 +2170,7 @@ class AiOcrTextRefiner:
 
         split_count = 0
         fallback_split_count = 0
+        x_tighten_count = 0
         out_items: list[dict] = []
         for idx, original in enumerate(items):
             if not isinstance(original, dict):
@@ -2139,19 +2237,34 @@ class AiOcrTextRefiner:
                 if ly1 - ly0 < 1.0:
                     continue
 
+                tx0, tx1 = _tighten_line_bbox_x_by_ink(
+                    row,
+                    ly0=float(ly0),
+                    ly1=float(ly1),
+                    fallback_x0=float(x0),
+                    fallback_x1=float(x1),
+                )
+                if (tx1 - tx0) < (x1 - x0):
+                    x_tighten_count += 1
+
                 new_item = dict(original)
                 new_item["text"] = text_line
-                new_item["bbox"] = [float(x0), float(ly0), float(x1), float(ly1)]
+                new_item["bbox"] = [float(tx0), float(ly0), float(tx1), float(ly1)]
+                new_item["linebreak_assisted"] = True
+                new_item["linebreak_assist_source"] = (
+                    "ai" if idx in split_map else "heuristic_fallback"
+                )
                 out_items.append(new_item)
 
             split_count += 1
 
         if split_count > 0:
             logger.info(
-                "AI OCR line-break assist applied: split_boxes=%s/%s (fallback=%s)",
+                "AI OCR line-break assist applied: split_boxes=%s/%s (fallback=%s, x_tightened=%s)",
                 split_count,
                 len(items),
                 fallback_split_count,
+                x_tighten_count,
             )
 
         return out_items

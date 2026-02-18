@@ -1314,6 +1314,7 @@ class _ScannedImageRegionInfo:
     suppress_bbox_pt: list[float]
     crop_path: Path
     shape_confirmed: bool
+    ai_hint: bool = False
     background_removed: bool = False
 
 
@@ -2433,7 +2434,11 @@ def _try_merge_fragmented_scanned_image_regions(
             return False
 
     def _build_union_info(
-        bbox_pt: list[float], *, crop_path: Path, shape_confirmed: bool
+        bbox_pt: list[float],
+        *,
+        crop_path: Path,
+        shape_confirmed: bool,
+        ai_hint: bool,
     ) -> _ScannedImageRegionInfo:
         x0, y0, x1, y1 = _coerce_bbox_pt(bbox_pt)
         w_pt = float(x1 - x0)
@@ -2455,6 +2460,7 @@ def _try_merge_fragmented_scanned_image_regions(
             suppress_bbox_pt=[float(v) for v in _coerce_bbox_pt(suppress_bbox)],
             crop_path=crop_path,
             shape_confirmed=bool(shape_confirmed),
+            ai_hint=bool(ai_hint),
             background_removed=False,
         )
 
@@ -2559,6 +2565,9 @@ def _try_merge_fragmented_scanned_image_regions(
                     union_bbox,
                     crop_path=union_crop_path,
                     shape_confirmed=bool(union_stats.get("confirmed")),
+                    ai_hint=bool(
+                        getattr(a, "ai_hint", False) or getattr(b, "ai_hint", False)
+                    ),
                 )
 
                 # Replace (a,b) with their union.
@@ -2652,6 +2661,52 @@ def _build_scanned_image_region_infos(
     crops_dir = artifacts_dir / "image_crops"
     crops_dir.mkdir(parents=True, exist_ok=True)
     page_area = max(1.0, float(page_w_pt) * float(page_h_pt))
+    ai_hint_regions_pt: list[list[float]] = []
+    raw_ai_regions = page.get("image_regions")
+    if isinstance(raw_ai_regions, list):
+        for raw_bbox in raw_ai_regions:
+            if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+                continue
+            try:
+                hx0, hy0, hx1, hy1 = _coerce_bbox_pt(raw_bbox)
+            except Exception:
+                continue
+            h_area = max(0.0, float(hx1 - hx0) * float(hy1 - hy0))
+            h_area_ratio = float(h_area) / float(page_area)
+            if h_area_ratio < 0.0012 or h_area_ratio > 0.90:
+                continue
+            ai_hint_regions_pt.append([hx0, hy0, hx1, hy1])
+
+    def _is_ai_hint_candidate(cand_bbox: list[float]) -> bool:
+        c_area = max(
+            1.0,
+            float(
+                max(
+                    0.0,
+                    float(cand_bbox[2] - cand_bbox[0]) * float(cand_bbox[3] - cand_bbox[1]),
+                )
+            ),
+        )
+        for hint_bbox in ai_hint_regions_pt:
+            h_area = max(
+                1.0,
+                float(
+                    max(
+                        0.0,
+                        float(hint_bbox[2] - hint_bbox[0])
+                        * float(hint_bbox[3] - hint_bbox[1]),
+                    )
+                ),
+            )
+            inter = _bbox_intersection_area_pt(cand_bbox, hint_bbox)
+            if inter <= 0.0:
+                continue
+            if _bbox_iou_pt(cand_bbox, hint_bbox) >= 0.52:
+                return True
+            if (inter / c_area) >= 0.72 or (inter / h_area) >= 0.72:
+                return True
+        return False
+
     infos: list[_ScannedImageRegionInfo] = []
 
     for ri, bbox in enumerate(regions_pt):
@@ -2667,24 +2722,23 @@ def _build_scanned_image_region_infos(
         if w_pt <= 0.0 or h_pt <= 0.0:
             continue
 
-        if _is_card_like_region(
-            [x0, y0, x1, y1],
-            page_w_pt=page_w_pt,
-            page_h_pt=page_h_pt,
-            baseline_ocr_h_pt=float(baseline_ocr_h_pt),
-            ocr_text_elements=ocr_text_elements,
-        ):
-            continue
-
+        cand_bbox = [float(x0), float(y0), float(x1), float(y1)]
+        is_ai_hint = _is_ai_hint_candidate(cand_bbox)
         area_pt = max(0.0, w_pt * h_pt)
         area_ratio = area_pt / page_area
-        if area_ratio < min_area_ratio_id or area_ratio > max_area_ratio_id:
-            continue
+        if is_ai_hint:
+            ai_min_area_ratio = max(0.0012, 0.45 * float(min_area_ratio_id))
+            ai_max_area_ratio = min(0.85, float(max_area_ratio_id) + 0.12)
+            if area_ratio < ai_min_area_ratio or area_ratio > ai_max_area_ratio:
+                continue
+        else:
+            if area_ratio < min_area_ratio_id or area_ratio > max_area_ratio_id:
+                continue
         if min(w_pt, h_pt) < 12.0:
             continue
 
         aspect = max(w_pt / max(1.0, h_pt), h_pt / max(1.0, w_pt))
-        if aspect >= max_aspect_ratio_id and area_ratio < 0.08:
+        if aspect >= max_aspect_ratio_id and area_ratio < (0.05 if is_ai_hint else 0.08):
             continue
 
         min_dim_pt = max(18.0, 1.8 * float(baseline_ocr_h_pt))
@@ -2695,6 +2749,15 @@ def _build_scanned_image_region_infos(
 
         cov, n = text_coverage_ratio_fn([x0, y0, x1, y1])
         n_inside, n_cjk_inside = text_inside_counts_fn([x0, y0, x1, y1])
+
+        if (not is_ai_hint) and _is_card_like_region(
+            [x0, y0, x1, y1],
+            page_w_pt=page_w_pt,
+            page_h_pt=page_h_pt,
+            baseline_ocr_h_pt=float(baseline_ocr_h_pt),
+            ocr_text_elements=ocr_text_elements,
+        ):
+            continue
 
         large_line_inside = 0
         wide_large_line_inside = 0
@@ -2733,31 +2796,52 @@ def _build_scanned_image_region_infos(
 
         large_line_cov = min(1.0, large_line_overlap / max(1.0, area_pt))
 
-        # Strong text-block candidates should not become image crops.
-        if (
-            (n >= 4 and cov >= 0.10)
-            or (n >= 3 and cov >= 0.16)
-            or (n >= 2 and cov >= 0.24)
-        ):
-            continue
-        # Single OCR block with high coverage is often a false-positive card crop
-        # (e.g. CJK title/body region) rather than a real screenshot/diagram.
-        if n_inside >= 1 and cov >= 0.42 and area_ratio >= 0.012:
-            continue
-        if n_cjk_inside >= 1 and cov >= 0.30 and area_ratio >= 0.020:
-            continue
-        # Large text overlap can indicate mixed text panels, but screenshots may
-        # legitimately contain some embedded text. Keep this gate conservative.
-        if area_ratio >= 0.020 and large_line_inside >= 2 and large_line_cov >= 0.10:
-            continue
-        if large_line_inside >= 4 and (cov >= 0.08 or large_line_cov >= 0.10):
-            continue
-        if (
-            wide_large_line_inside >= 2
-            and large_line_cov >= 0.08
-            and area_ratio >= 0.030
-        ):
-            continue
+        if is_ai_hint:
+            # Explicit AI image-region mode is opt-in and high-risk. Keep guardrails
+            # for obvious text-panels, but tolerate moderate embedded text in real
+            # screenshots/diagrams.
+            if (n >= 10 and cov >= 0.18) or (n >= 6 and cov >= 0.30):
+                continue
+            if area_ratio >= 0.18 and n >= 8 and cov >= 0.10:
+                continue
+            if n_inside >= 1 and cov >= 0.55 and area_ratio >= 0.014:
+                continue
+            if n_cjk_inside >= 2 and cov >= 0.36 and area_ratio >= 0.030:
+                continue
+            if area_ratio >= 0.10 and large_line_inside >= 5 and large_line_cov >= 0.14:
+                continue
+            if (
+                wide_large_line_inside >= 3
+                and large_line_cov >= 0.12
+                and area_ratio >= 0.060
+            ):
+                continue
+        else:
+            # Strong text-block candidates should not become image crops.
+            if (
+                (n >= 4 and cov >= 0.10)
+                or (n >= 3 and cov >= 0.16)
+                or (n >= 2 and cov >= 0.24)
+            ):
+                continue
+            # Single OCR block with high coverage is often a false-positive card crop
+            # (e.g. CJK title/body region) rather than a real screenshot/diagram.
+            if n_inside >= 1 and cov >= 0.42 and area_ratio >= 0.012:
+                continue
+            if n_cjk_inside >= 1 and cov >= 0.30 and area_ratio >= 0.020:
+                continue
+            # Large text overlap can indicate mixed text panels, but screenshots may
+            # legitimately contain some embedded text. Keep this gate conservative.
+            if area_ratio >= 0.020 and large_line_inside >= 2 and large_line_cov >= 0.10:
+                continue
+            if large_line_inside >= 4 and (cov >= 0.08 or large_line_cov >= 0.10):
+                continue
+            if (
+                wide_large_line_inside >= 2
+                and large_line_cov >= 0.08
+                and area_ratio >= 0.030
+            ):
+                continue
 
         x0p, y0p = _pdf_pt_to_pix_px(
             x0,
@@ -2830,14 +2914,21 @@ def _build_scanned_image_region_infos(
             ):
                 continue
         else:
-            if cov >= 0.16 or n_inside >= 5 or large_line_inside >= 3:
-                continue
-            if area_ratio >= 0.24:
-                continue
-            if cjk_text_heavy and area_ratio >= 0.06:
-                continue
+            if is_ai_hint:
+                if cov >= 0.24 or n_inside >= 8 or large_line_inside >= 5:
+                    continue
+                if area_ratio >= 0.45:
+                    continue
+                if cjk_text_heavy and area_ratio >= 0.10:
+                    continue
+            else:
+                if cov >= 0.16 or n_inside >= 5 or large_line_inside >= 3:
+                    continue
+                if area_ratio >= 0.24:
+                    continue
+                if cjk_text_heavy and area_ratio >= 0.06:
+                    continue
 
-        cand_bbox = [float(x0), float(y0), float(x1), float(y1)]
         cand_area = max(1.0, area_pt)
         duplicated = False
         for info in infos:
@@ -2881,6 +2972,7 @@ def _build_scanned_image_region_infos(
                 suppress_bbox_pt=[float(v) for v in _coerce_bbox_pt(suppress_bbox)],
                 crop_path=crop_out_path,
                 shape_confirmed=bool(shape_confirmed),
+                ai_hint=bool(is_ai_hint),
                 background_removed=bool(background_removed),
             )
         )
@@ -2913,6 +3005,7 @@ def _build_scanned_image_region_infos(
                     "suppress_bbox_pt": list(_coerce_bbox_pt(info.suppress_bbox_pt)),
                     "crop_path": str(info.crop_path),
                     "shape_confirmed": bool(info.shape_confirmed),
+                    "ai_hint": bool(info.ai_hint),
                     "background_removed": bool(info.background_removed),
                 }
                 for info in infos
@@ -2974,6 +3067,17 @@ def _filter_scanned_ocr_text_elements(
                 continue
             overlap_ratio = float(inter) / t_area
             center_inside = tcx >= ix0 and tcx <= ix1 and tcy >= iy0 and tcy <= iy1
+            ai_hint = bool(getattr(info, "ai_hint", False))
+
+            if ai_hint:
+                # In explicit AI image-region mode, we prefer to avoid text overlays
+                # on top of screenshots/diagrams suggested by the model.
+                if overlap_ratio >= 0.86:
+                    inside_image = True
+                    break
+                if (not keep_as_text_preferred) and center_inside and overlap_ratio >= 0.52:
+                    inside_image = True
+                    break
 
             if keep_as_text_preferred and not info.shape_confirmed:
                 # Prefer keeping CJK/body text editable when the "image region"

@@ -126,6 +126,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
     ocr_ai_provider: str | None = None,
     ocr_ai_base_url: str | None = None,
     ocr_ai_model: str | None = None,
+    ocr_geometry_mode: str | None = None,
     scanned_page_mode: str | None = None,
     image_bg_clear_expand_min_pt: float | None = None,
     image_bg_clear_expand_max_pt: float | None = None,
@@ -169,6 +170,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         ocr_ai_provider,
         ocr_ai_base_url,
         ocr_ai_model,
+        ocr_geometry_mode,
         scanned_page_mode,
         image_bg_clear_expand_min_pt,
         image_bg_clear_expand_max_pt,
@@ -552,6 +554,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 ocr_ai_provider=ocr_ai_provider,
                 ocr_ai_base_url=ocr_ai_base_url,
                 ocr_ai_model=ocr_ai_model,
+                ocr_geometry_mode=ocr_geometry_mode,
                 ocr_ai_linebreak_assist=ocr_ai_linebreak_assist,
                 ocr_strict_mode=ocr_strict_mode,
             )

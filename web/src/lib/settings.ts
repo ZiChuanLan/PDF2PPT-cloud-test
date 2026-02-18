@@ -7,6 +7,7 @@ export type OcrProvider =
   | "paddle_local"
 export type OcrAiProvider = "auto" | "openai" | "siliconflow" | "deepseek" | "ppio" | "novita"
 export type OcrAiLinebreakAssistMode = "auto" | "on" | "off"
+export type OcrGeometryMode = "auto" | "local_tesseract" | "direct_ai"
 export type ScannedPageMode = "segmented" | "fullpage"
 export type MineruModelVersion = "pipeline" | "vlm" | "MinerU-HTML"
 export type TextEraseMode = "smart" | "fill"
@@ -51,6 +52,7 @@ export type Settings = {
   ocrAiBaseUrl: string
   ocrAiModel: string
   ocrAiLinebreakAssistMode: OcrAiLinebreakAssistMode
+  ocrGeometryMode: OcrGeometryMode
 }
 
 export const SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
@@ -109,6 +111,9 @@ export const defaultSettings: Settings = {
   // Optional OCR visual line-break split for coarse block boxes.
   // auto: backend decides based on OCR provider capabilities.
   ocrAiLinebreakAssistMode: "auto",
+  // OCR geometry strategy for AI OCR models.
+  // auto: use stable local geometry for generic VL, keep direct AI geometry for OCR-specialized models.
+  ocrGeometryMode: "auto",
 }
 
 export function safeParseSettings(value: string | null): Partial<Settings> | null {
@@ -274,6 +279,10 @@ export function loadStoredSettings(): Settings {
   }
   if (!validLinebreakAssistModes.includes(merged.ocrAiLinebreakAssistMode)) {
     merged.ocrAiLinebreakAssistMode = "auto"
+  }
+  const validOcrGeometryModes: OcrGeometryMode[] = ["auto", "local_tesseract", "direct_ai"]
+  if (!validOcrGeometryModes.includes(merged.ocrGeometryMode)) {
+    merged.ocrGeometryMode = "auto"
   }
   return merged
 }

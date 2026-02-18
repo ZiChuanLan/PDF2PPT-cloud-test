@@ -1864,6 +1864,33 @@ export default function SettingsPage() {
                   </div>
                 </div>
 
+                <div className="grid gap-2">
+                  <label
+                    className="text-muted-foreground text-xs"
+                    htmlFor="ocr-geometry-mode"
+                  >
+                    AI OCR 几何策略（实验）
+                  </label>
+                  <Select
+                    id="ocr-geometry-mode"
+                    value={settings.ocrGeometryMode}
+                    disabled={!isOcrProviderAi}
+                    onChange={(e) =>
+                      setSettings((s) => ({
+                        ...s,
+                        ocrGeometryMode: e.target.value as Settings["ocrGeometryMode"],
+                      }))
+                    }
+                  >
+                    <option value="auto">自动（推荐）</option>
+                    <option value="local_tesseract">强制稳定几何（Tesseract）</option>
+                    <option value="direct_ai">强制原始 AI 几何</option>
+                  </Select>
+                  <div className="text-muted-foreground text-xs">
+                    仅在 OCR 提供方为 AI OCR 时生效。自动模式会对 GPT/Gemini/Qwen 这类通用视觉模型优先使用更稳定的本地几何框，并保留 AI 文本优化能力；若你确认模型本身 bbox 很准，再手动切到“原始 AI 几何”。
+                  </div>
+                </div>
+
                 {settings.enableLayoutAssist ? (
                   <>
                     <div className="grid gap-2">

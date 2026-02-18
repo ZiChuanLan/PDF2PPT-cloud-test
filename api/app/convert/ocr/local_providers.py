@@ -3617,6 +3617,8 @@ def ocr_image_to_elements(
                 new_item = dict(cand_original)
                 new_item["text"] = cleaned_line
                 new_item["bbox"] = [float(x0), float(ly0), float(x1), float(ly1)]
+                new_item["linebreak_assisted"] = True
+                new_item["linebreak_assist_source"] = "heuristic"
                 out.append(new_item)
 
             split_count += 1
@@ -3732,6 +3734,8 @@ def ocr_image_to_elements(
                 # Lightweight provenance for downstream QA/dedupe (no secrets).
                 "ocr_provider": item.get("provider") or item.get("source"),
                 "ocr_model": item.get("model"),
+                "ocr_linebreak_assisted": bool(item.get("linebreak_assisted")),
+                "ocr_linebreak_assist_source": item.get("linebreak_assist_source"),
             }
         )
 

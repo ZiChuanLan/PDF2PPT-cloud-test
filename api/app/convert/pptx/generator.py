@@ -263,6 +263,20 @@ def generate_pptx_from_ir(
         page_elements = [
             el for el in (page.get("elements") or []) if isinstance(el, dict)
         ]
+        page_ocr_text_elements = [
+            el
+            for el in page_elements
+            if str(el.get("type") or "").strip().lower() == "text"
+            and str(el.get("source") or "").strip().lower() == "ocr"
+        ]
+        baseline_ocr_h_pt = (
+            _estimate_baseline_ocr_line_height_pt(
+                ocr_text_elements=page_ocr_text_elements,
+                page_w_pt=float(page_w_pt),
+            )
+            if page_ocr_text_elements
+            else 12.0
+        )
         has_mineru_elements = any(
             str(el.get("source") or "").strip().lower() == "mineru"
             for el in page_elements
@@ -562,7 +576,8 @@ def generate_pptx_from_ir(
             # 1) Background image (after erase)
             protect_bboxes_for_erase: list[list[float]] = []
             for info in image_region_infos:
-                if not info.shape_confirmed:
+                is_ai_hint = bool(getattr(info, "ai_hint", False))
+                if (not info.shape_confirmed) and (not is_ai_hint):
                     continue
                 try:
                     ix0, iy0, ix1, iy1 = _coerce_bbox_pt(info.bbox_pt)
@@ -575,7 +590,11 @@ def generate_pptx_from_ir(
                 )
                 # Only protect clearly image-dominant regions. Small icon-like crops
                 # often overlap heading/text bboxes and can block text cleanup.
-                if area_ratio < 0.030:
+                if area_ratio < 0.030 and not (is_ai_hint and area_ratio >= 0.018):
+                    continue
+                # For non-shape-confirmed AI hints, keep a stricter minimum so we
+                # don't over-protect tiny ambiguous boxes.
+                if (not info.shape_confirmed) and is_ai_hint and area_ratio < 0.025:
                     continue
                 protect_bboxes_for_erase.append([ix0, iy0, ix1, iy1])
 
@@ -1048,6 +1067,7 @@ def generate_pptx_from_ir(
             source_id = str(el.get("source") or "").strip().lower()
             is_mineru_text = source_id == "mineru"
             is_ocr_text = source_id == "ocr"
+            ocr_linebreak_assisted = bool(el.get("ocr_linebreak_assisted"))
             raw_text = str(el.get("text") or "")
             text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
             if is_mineru_text:
@@ -1090,12 +1110,16 @@ def generate_pptx_from_ir(
                     and bbox_h_pt >= 1.45 * float(baseline_ocr_h_pt)
                     and compact_len <= 56
                 )
+                wrap_override: bool | None = (
+                    False if (ocr_linebreak_assisted and "\n" not in text) else None
+                )
                 text_to_render, font_size_pt, wrap = _fit_ocr_text_style(
                     text=text,
                     bbox_w_pt=bbox_w_pt,
                     bbox_h_pt=bbox_h_pt,
                     baseline_ocr_h_pt=float(baseline_ocr_h_pt),
                     is_heading=is_heading,
+                    wrap_override=wrap_override,
                 )
 
                 if (
@@ -1155,6 +1179,27 @@ def generate_pptx_from_ir(
                             0.50 * float(font_size_pt),
                         ),
                     )
+                nudge_right_emu = int(
+                    round(float(nudge_right_pt) * _EMU_PER_PT * transform.scale)
+                )
+                max_box_w = max(1, int(slide_w_emu) - int(left))
+                textbox_width = max(1, min(int(width) + nudge_right_emu, max_box_w))
+                try:
+                    tx.width = Emu(textbox_width)
+                except Exception:
+                    pass
+            elif is_ocr_text and ocr_linebreak_assisted and not wrap:
+                # Linebreak-assist boxes represent visual lines. Add a small
+                # right-side tolerance to avoid last-character wraps from font
+                # metric drift between OCR-side estimation and PPT rendering.
+                nudge_right_pt = min(
+                    6.0,
+                    max(
+                        1.6,
+                        0.10 * float(bbox_h_pt),
+                        0.26 * float(font_size_pt),
+                    ),
+                )
                 nudge_right_emu = int(
                     round(float(nudge_right_pt) * _EMU_PER_PT * transform.scale)
                 )

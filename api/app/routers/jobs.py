@@ -470,6 +470,13 @@ async def create_job(
         None, description="Optional AI OCR base URL (OpenAI-compatible)"
     ),
     ocr_ai_model: str | None = Form(None, description="Optional AI OCR model name"),
+    ocr_geometry_mode: str | None = Form(
+        "auto",
+        description=(
+            "OCR geometry mode for aiocr (auto, local_tesseract, direct_ai). "
+            "auto uses local geometry for generic VL models and direct AI geometry for OCR-specialized models."
+        ),
+    ),
     scanned_page_mode: str | None = Form(
         "segmented",
         description="Scanned page rendering mode (segmented, fullpage). Controls whether scanned pages are split into editable image blocks.",
@@ -620,6 +627,7 @@ async def create_job(
                     "ocr_ai_provider": ocr_ai_provider,
                     "ocr_ai_base_url": ocr_ai_base_url,
                     "ocr_ai_model": ocr_ai_model,
+                    "ocr_geometry_mode": ocr_geometry_mode,
                     "scanned_page_mode": scanned_page_mode,
                     "image_bg_clear_expand_min_pt": image_bg_clear_expand_min_pt,
                     "image_bg_clear_expand_max_pt": image_bg_clear_expand_max_pt,
@@ -672,6 +680,7 @@ async def create_job(
                 ocr_ai_provider=ocr_ai_provider,
                 ocr_ai_base_url=ocr_ai_base_url,
                 ocr_ai_model=ocr_ai_model,
+                ocr_geometry_mode=ocr_geometry_mode,
                 scanned_page_mode=scanned_page_mode,
                 image_bg_clear_expand_min_pt=image_bg_clear_expand_min_pt,
                 image_bg_clear_expand_max_pt=image_bg_clear_expand_max_pt,

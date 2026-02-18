@@ -135,3 +135,39 @@ def test_collect_scanned_regions_keeps_ai_regions_with_ocr_text(monkeypatch) -> 
     assert regions[0][1] <= 100.0
     assert regions[0][2] >= 300.0
     assert regions[0][3] >= 260.0
+
+
+def test_filter_scanned_ocr_prefers_ai_hinted_region_for_overlay_cleanup() -> None:
+    hinted_info = scanned_page_module._ScannedImageRegionInfo(
+        bbox_pt=[100.0, 100.0, 320.0, 260.0],
+        suppress_bbox_pt=[96.0, 96.0, 324.0, 264.0],
+        crop_path=Path("/tmp/not-used.png"),
+        shape_confirmed=False,
+        ai_hint=True,
+    )
+
+    out = scanned_page_module._filter_scanned_ocr_text_elements(
+        ocr_text_elements=[{"bbox_pt": [220.0, 190.0, 360.0, 280.0], "text": "Header"}],
+        image_region_infos=[hinted_info],
+        baseline_ocr_h_pt=18.0,
+    )
+
+    assert out == []
+
+
+def test_filter_scanned_ocr_keeps_text_for_ambiguous_non_ai_region() -> None:
+    ambiguous_info = scanned_page_module._ScannedImageRegionInfo(
+        bbox_pt=[100.0, 100.0, 320.0, 260.0],
+        suppress_bbox_pt=[96.0, 96.0, 324.0, 264.0],
+        crop_path=Path("/tmp/not-used.png"),
+        shape_confirmed=False,
+        ai_hint=False,
+    )
+
+    out = scanned_page_module._filter_scanned_ocr_text_elements(
+        ocr_text_elements=[{"bbox_pt": [220.0, 190.0, 360.0, 280.0], "text": "Header"}],
+        image_region_infos=[ambiguous_info],
+        baseline_ocr_h_pt=18.0,
+    )
+
+    assert len(out) == 1

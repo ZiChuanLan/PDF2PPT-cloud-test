@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from ..convert.ocr import AiOcrTextRefiner, create_ocr_manager
@@ -27,6 +28,10 @@ class OcrRuntimeSetup:
     strict_ocr_mode: bool
     linebreak_enabled: bool
     auto_linebreak_enabled: bool
+    ocr_geometry_provider: str | None = None
+    ocr_geometry_strategy: str | None = None
+    ocr_geometry_mode_requested: str | None = None
+    ocr_geometry_mode_effective: str | None = None
     setup_warning: str | None = None
 
 
@@ -37,6 +42,30 @@ def _normalize_requested_ocr_provider(value: str | None) -> str:
     if provider_id in {"paddle-local", "local_paddle"}:
         return "paddle_local"
     return provider_id
+
+
+def _normalize_ocr_geometry_mode(value: str | None) -> str:
+    mode = (clean_str(value) or "auto").lower()
+    if mode in {"direct", "direct_ai", "ai", "requested"}:
+        return "direct_ai"
+    if mode in {"local", "local_tesseract", "tesseract", "hybrid_local"}:
+        return "local_tesseract"
+    return "auto"
+
+
+def _is_bbox_reliable_ai_ocr_model(model: str | None) -> bool:
+    lowered = str(model or "").strip().lower()
+    if not lowered:
+        return False
+    if "paddleocr-vl" in lowered:
+        return True
+    if "deepseek-ocr" in lowered:
+        return True
+    # Keep this conservative: only treat clearly OCR-specialized names as
+    # bbox-reliable to avoid regressing generic VL models.
+    if re.search(r"(?:^|[\\/_\\-])ocr(?:$|[\\/_\\-])", lowered):
+        return True
+    return False
 
 
 def setup_ocr_runtime(
@@ -55,8 +84,9 @@ def setup_ocr_runtime(
     ocr_ai_provider: str | None,
     ocr_ai_base_url: str | None,
     ocr_ai_model: str | None,
-    ocr_ai_linebreak_assist: bool | None,
-    ocr_strict_mode: bool | None,
+    ocr_geometry_mode: str | None = None,
+    ocr_ai_linebreak_assist: bool | None = None,
+    ocr_strict_mode: bool | None = None,
 ) -> OcrRuntimeSetup:
     # If the user didn't configure separate AI OCR credentials, reuse
     # the layout-assist OpenAI-compatible settings (when available).
@@ -77,6 +107,7 @@ def setup_ocr_runtime(
         effective_ocr_ai_model = clean_str(model)
 
     effective_ocr_provider = _normalize_requested_ocr_provider(ocr_provider)
+    requested_ocr_provider = effective_ocr_provider
     strict_ocr_mode = bool(False if ocr_strict_mode is None else ocr_strict_mode)
     if effective_ocr_provider in {"aiocr", "paddle"} and not strict_ocr_mode:
         strict_ocr_mode = True
@@ -108,27 +139,101 @@ def setup_ocr_runtime(
     linebreak_refiner: AiOcrTextRefiner | None = None
     linebreak_enabled = False
     auto_linebreak_enabled = False
+    requested_geometry_mode = _normalize_ocr_geometry_mode(ocr_geometry_mode)
+    runtime_ocr_provider = effective_ocr_provider
+    geometry_strategy = "direct"
+    geometry_mode_effective = "n/a"
+
+    # Practical strategy:
+    # For generic VL models (Qwen/GPT/Gemini-style) selected as `aiocr`, bbox
+    # geometry is often coarse/unstable. Keep AI for recognition/refinement,
+    # but let a local bbox-accurate OCR engine provide geometry.
+    if requested_ocr_provider == "aiocr":
+        geometry_mode_effective = "direct_ai"
+        has_ai_key = bool(effective_ocr_ai_api_key)
+        is_bbox_reliable = _is_bbox_reliable_ai_ocr_model(effective_ocr_ai_model)
+
+        if requested_geometry_mode == "local_tesseract":
+            runtime_ocr_provider = "tesseract"
+            geometry_mode_effective = "local_tesseract"
+            geometry_strategy = (
+                "forced_local_tesseract_geometry_with_ai_refine"
+                if has_ai_key
+                else "forced_local_tesseract_geometry"
+            )
+            logger.info(
+                "Forced OCR geometry mode=%s: provider=%s -> runtime=%s (model=%s)",
+                requested_geometry_mode,
+                requested_ocr_provider,
+                runtime_ocr_provider,
+                effective_ocr_ai_model or "<unset>",
+            )
+        elif requested_geometry_mode == "direct_ai":
+            geometry_mode_effective = "direct_ai"
+            geometry_strategy = "forced_direct_ai_geometry"
+        elif has_ai_key and (not is_bbox_reliable):
+            runtime_ocr_provider = "tesseract"
+            geometry_mode_effective = "local_tesseract"
+            geometry_strategy = "local_tesseract_geometry_with_ai_refine"
+            logger.info(
+                "AI OCR geometry strategy enabled: provider=%s -> runtime=%s (model=%s)",
+                requested_ocr_provider,
+                runtime_ocr_provider,
+                effective_ocr_ai_model or "<unset>",
+            )
+        else:
+            geometry_mode_effective = "direct_ai"
 
     try:
-        ocr_manager = create_ocr_manager(
-            provider=effective_ocr_provider,
-            ai_provider=effective_ocr_ai_provider,
-            ai_api_key=effective_ocr_ai_api_key,
-            ai_base_url=effective_ocr_ai_base_url,
-            ai_model=effective_ocr_ai_model,
-            baidu_app_id=ocr_baidu_app_id,
-            baidu_api_key=ocr_baidu_api_key,
-            baidu_secret_key=ocr_baidu_secret_key,
-            tesseract_min_confidence=effective_tesseract_min_conf,
-            tesseract_language=effective_tesseract_language,
-            strict_no_fallback=strict_ocr_mode,
-            allow_paddle_model_downgrade=not strict_ocr_mode,
-        )
+        try:
+            ocr_manager = create_ocr_manager(
+                provider=runtime_ocr_provider,
+                ai_provider=effective_ocr_ai_provider,
+                ai_api_key=effective_ocr_ai_api_key,
+                ai_base_url=effective_ocr_ai_base_url,
+                ai_model=effective_ocr_ai_model,
+                baidu_app_id=ocr_baidu_app_id,
+                baidu_api_key=ocr_baidu_api_key,
+                baidu_secret_key=ocr_baidu_secret_key,
+                tesseract_min_confidence=effective_tesseract_min_conf,
+                tesseract_language=effective_tesseract_language,
+                strict_no_fallback=strict_ocr_mode,
+                allow_paddle_model_downgrade=not strict_ocr_mode,
+            )
+        except Exception as e:
+            if runtime_ocr_provider != requested_ocr_provider:
+                logger.warning(
+                    "OCR geometry fallback provider failed (%s), retrying requested provider=%s: %s",
+                    runtime_ocr_provider,
+                    requested_ocr_provider,
+                    e,
+                )
+                runtime_ocr_provider = requested_ocr_provider
+                geometry_strategy = "direct"
+                geometry_mode_effective = (
+                    "direct_ai" if requested_ocr_provider == "aiocr" else "n/a"
+                )
+                ocr_manager = create_ocr_manager(
+                    provider=runtime_ocr_provider,
+                    ai_provider=effective_ocr_ai_provider,
+                    ai_api_key=effective_ocr_ai_api_key,
+                    ai_base_url=effective_ocr_ai_base_url,
+                    ai_model=effective_ocr_ai_model,
+                    baidu_app_id=ocr_baidu_app_id,
+                    baidu_api_key=ocr_baidu_api_key,
+                    baidu_secret_key=ocr_baidu_secret_key,
+                    tesseract_min_confidence=effective_tesseract_min_conf,
+                    tesseract_language=effective_tesseract_language,
+                    strict_no_fallback=strict_ocr_mode,
+                    allow_paddle_model_downgrade=not strict_ocr_mode,
+                )
+            else:
+                raise
 
         # Optional: refine line texts using an AI vision model while keeping
         # bbox geometry from a bbox-accurate OCR engine (e.g. Tesseract).
         try:
-            provider_choice = effective_ocr_provider
+            provider_choice = requested_ocr_provider
             is_paddle_vl_model = "paddleocr-vl" in (
                 str(effective_ocr_ai_model or "").strip().lower()
             )
@@ -152,6 +257,18 @@ def setup_ocr_runtime(
             if linebreak_requested is None and (
                 provider_choice == "paddle"
                 or (provider_choice in {"aiocr", "auto"} and is_paddle_vl_model)
+            ):
+                linebreak_enabled = True
+                auto_linebreak_enabled = True
+            # For explicit AI OCR with non-Paddle models (for example GPT/Gemini/
+            # Qwen-VL style endpoints), line-level geometry can still be coarse on
+            # dense scanned pages. Auto-enable visual line-break assist so the
+            # model can split paragraph-like OCR boxes into line-level boxes.
+            elif (
+                linebreak_requested is None
+                and provider_choice == "aiocr"
+                and (not is_paddle_vl_model)
+                and bool(effective_ocr_ai_api_key)
             ):
                 linebreak_enabled = True
                 auto_linebreak_enabled = True
@@ -185,7 +302,7 @@ def setup_ocr_runtime(
             ocr_manager=ocr_manager,
             text_refiner=text_refiner,
             linebreak_refiner=linebreak_refiner,
-            effective_ocr_provider=effective_ocr_provider,
+            effective_ocr_provider=runtime_ocr_provider,
             effective_ocr_ai_provider=effective_ocr_ai_provider,
             effective_ocr_ai_api_key=effective_ocr_ai_api_key,
             effective_ocr_ai_base_url=effective_ocr_ai_base_url,
@@ -195,6 +312,10 @@ def setup_ocr_runtime(
             strict_ocr_mode=strict_ocr_mode,
             linebreak_enabled=linebreak_enabled,
             auto_linebreak_enabled=auto_linebreak_enabled,
+            ocr_geometry_provider=runtime_ocr_provider,
+            ocr_geometry_strategy=geometry_strategy,
+            ocr_geometry_mode_requested=requested_geometry_mode,
+            ocr_geometry_mode_effective=geometry_mode_effective,
             setup_warning=None,
         )
     except Exception as e:
@@ -211,7 +332,7 @@ def setup_ocr_runtime(
             ocr_manager=None,
             text_refiner=None,
             linebreak_refiner=None,
-            effective_ocr_provider=effective_ocr_provider,
+            effective_ocr_provider=runtime_ocr_provider,
             effective_ocr_ai_provider=effective_ocr_ai_provider,
             effective_ocr_ai_api_key=effective_ocr_ai_api_key,
             effective_ocr_ai_base_url=effective_ocr_ai_base_url,
@@ -221,6 +342,10 @@ def setup_ocr_runtime(
             strict_ocr_mode=strict_ocr_mode,
             linebreak_enabled=linebreak_enabled,
             auto_linebreak_enabled=auto_linebreak_enabled,
+            ocr_geometry_provider=runtime_ocr_provider,
+            ocr_geometry_strategy=geometry_strategy,
+            ocr_geometry_mode_requested=requested_geometry_mode,
+            ocr_geometry_mode_effective=geometry_mode_effective,
             setup_warning=f"{e!s}",
         )
 
@@ -236,6 +361,12 @@ def build_ocr_debug_payload(
     return {
         "provider_requested": provider_requested or "auto",
         "provider_effective": setup.effective_ocr_provider,
+        "ocr_geometry": {
+            "provider": setup.ocr_geometry_provider or setup.effective_ocr_provider,
+            "strategy": setup.ocr_geometry_strategy or "direct",
+            "mode_requested": setup.ocr_geometry_mode_requested or "auto",
+            "mode_effective": setup.ocr_geometry_mode_effective or "n/a",
+        },
         "tesseract_language": setup.effective_tesseract_language,
         "tesseract_min_confidence": setup.effective_tesseract_min_conf,
         "ocr_render_dpi": int(ocr_render_dpi),

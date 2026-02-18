@@ -360,6 +360,9 @@ function createFormData(
     } else if (settings.ocrAiLinebreakAssistMode === "off") {
       form.append("ocr_ai_linebreak_assist", "false")
     }
+    if (run.effectiveOcrProvider === "aiocr") {
+      form.append("ocr_geometry_mode", settings.ocrGeometryMode)
+    }
 
     if (run.effectiveOcrProvider === "baidu") {
       form.append("ocr_baidu_app_id", settings.ocrBaiduAppId.trim())

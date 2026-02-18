@@ -80,6 +80,7 @@ def _run_single_page_job(
     ocr_ai_key: str,
     ocr_ai_base_url: str,
     ocr_ai_model: str,
+    ocr_geometry_mode: str,
     ocr_strict_mode: bool,
 ) -> JobOutputs:
     _ensure_api_on_path()
@@ -102,6 +103,7 @@ def _run_single_page_job(
         ocr_ai_api_key=ocr_ai_key,
         ocr_ai_base_url=ocr_ai_base_url,
         ocr_ai_model=ocr_ai_model,
+        ocr_geometry_mode=ocr_geometry_mode,
         ocr_ai_linebreak_assist=linebreak_assist,
         ocr_strict_mode=ocr_strict_mode,
     )
@@ -273,6 +275,12 @@ def main() -> int:
     parser.add_argument("--ocr-ai-provider", default="siliconflow")
     parser.add_argument("--ocr-ai-base-url", default="https://api.siliconflow.cn/v1")
     parser.add_argument("--ocr-ai-model", default="PaddlePaddle/PaddleOCR-VL-1.5")
+    parser.add_argument(
+        "--ocr-geometry-mode",
+        default="auto",
+        choices=["auto", "local_tesseract", "direct_ai"],
+        help="Geometry mode used when ocr-provider=aiocr",
+    )
     parser.add_argument("--ocr-ai-key", default=os.getenv("SILICONFLOW_API_KEY", ""))
     parser.add_argument(
         "--ocr-strict-mode",
@@ -325,6 +333,7 @@ def main() -> int:
             ocr_ai_key=args.ocr_ai_key,
             ocr_ai_base_url=args.ocr_ai_base_url,
             ocr_ai_model=args.ocr_ai_model,
+            ocr_geometry_mode=str(args.ocr_geometry_mode),
             ocr_strict_mode=bool(args.ocr_strict_mode),
         )
         on = _run_single_page_job(
@@ -337,6 +346,7 @@ def main() -> int:
             ocr_ai_key=args.ocr_ai_key,
             ocr_ai_base_url=args.ocr_ai_base_url,
             ocr_ai_model=args.ocr_ai_model,
+            ocr_geometry_mode=str(args.ocr_geometry_mode),
             ocr_strict_mode=bool(args.ocr_strict_mode),
         )
 
@@ -508,6 +518,7 @@ def main() -> int:
             "ocr_ai_provider": args.ocr_ai_provider,
             "ocr_ai_base_url": args.ocr_ai_base_url,
             "ocr_ai_model": args.ocr_ai_model,
+            "ocr_geometry_mode": args.ocr_geometry_mode,
             "ocr_strict_mode": bool(args.ocr_strict_mode),
         },
         "overall": overall,
