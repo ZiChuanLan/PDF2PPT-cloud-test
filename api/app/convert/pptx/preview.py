@@ -121,6 +121,11 @@ def _export_final_preview_page_image(
     preview_dir.mkdir(parents=True, exist_ok=True)
 
     base_candidates = [
+        artifacts_dir
+        / "page_renders"
+        / f"page-{page_index:04d}.mineru.clean.images-bg-cleared.png",
+        artifacts_dir / "page_renders" / f"page-{page_index:04d}.clean.images-bg-cleared.png",
+        artifacts_dir / "page_renders" / f"page-{page_index:04d}.clean.icons-bg-cleared.png",
         artifacts_dir / "page_renders" / f"page-{page_index:04d}.mineru.clean.png",
         artifacts_dir / "page_renders" / f"page-{page_index:04d}.clean.png",
         artifacts_dir / "page_renders" / f"page-{page_index:04d}.png",

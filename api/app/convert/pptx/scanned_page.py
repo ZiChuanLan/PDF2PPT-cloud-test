@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -1551,25 +1552,31 @@ def _clear_regions_for_transparent_crops(
             page_height_pt=page_height_pt,
             dpi=int(dpi),
         )
-        x0p, y0p = _pdf_pt_to_pix_px(
-            x0,
-            y0,
-            page_height_pt=page_height_pt,
-            dpi=int(dpi),
-        )
-        x1p, y1p = _pdf_pt_to_pix_px(
-            x1,
-            y1,
-            page_height_pt=page_height_pt,
-            dpi=int(dpi),
-        )
+        # Slight outward expansion + floor/ceil projection reduces edge halos
+        # from bbox rounding and anti-aliased crop borders.
+        w_pt = max(1.0, float(x1 - x0))
+        h_pt = max(1.0, float(y1 - y0))
+        expand_pt = max(0.35, min(1.5, 0.012 * min(w_pt, h_pt)))
+        x0e = float(x0) - float(expand_pt)
+        y0e = float(y0) - float(expand_pt)
+        x1e = float(x1) + float(expand_pt)
+        y1e = float(y1) + float(expand_pt)
+
+        scale = float(dpi) / float(_PTS_PER_INCH)
+        x0p = int(math.floor(x0e * scale))
+        y0p = int(math.floor(y0e * scale))
+        x1p = int(math.ceil(x1e * scale))
+        y1p = int(math.ceil(y1e * scale))
         x0p = max(0, min(int(img.width - 1), int(x0p)))
         y0p = max(0, min(int(img.height - 1), int(y0p)))
         x1p = max(0, min(int(img.width), int(x1p)))
         y1p = max(0, min(int(img.height), int(y1p)))
         if x1p <= x0p or y1p <= y0p:
             continue
-        draw.rectangle([x0p, y0p, x1p, y1p], fill=fill_rgb)
+        draw.rectangle(
+            [x0p, y0p, max(x0p, x1p - 1), max(y0p, y1p - 1)],
+            fill=fill_rgb,
+        )
 
     try:
         _ensure_parent_dir(out_path)
