@@ -474,6 +474,30 @@ async def create_job(
         "segmented",
         description="Scanned page rendering mode (segmented, fullpage). Controls whether scanned pages are split into editable image blocks.",
     ),
+    image_bg_clear_expand_min_pt: float | None = Form(
+        None,
+        description="Optional min expansion (pt) when clearing background under image overlays",
+    ),
+    image_bg_clear_expand_max_pt: float | None = Form(
+        None,
+        description="Optional max expansion (pt) when clearing background under image overlays",
+    ),
+    image_bg_clear_expand_ratio: float | None = Form(
+        None,
+        description="Optional expansion ratio for image-overlay background clearing",
+    ),
+    scanned_image_region_min_area_ratio: float | None = Form(
+        None,
+        description="Optional min page-area ratio for scanned image region candidates",
+    ),
+    scanned_image_region_max_area_ratio: float | None = Form(
+        None,
+        description="Optional max page-area ratio for scanned image region candidates",
+    ),
+    scanned_image_region_max_aspect_ratio: float | None = Form(
+        None,
+        description="Optional max aspect ratio threshold for scanned image region candidates",
+    ),
     ocr_ai_linebreak_assist: bool | None = Form(
         None,
         description=(
@@ -597,6 +621,12 @@ async def create_job(
                     "ocr_ai_base_url": ocr_ai_base_url,
                     "ocr_ai_model": ocr_ai_model,
                     "scanned_page_mode": scanned_page_mode,
+                    "image_bg_clear_expand_min_pt": image_bg_clear_expand_min_pt,
+                    "image_bg_clear_expand_max_pt": image_bg_clear_expand_max_pt,
+                    "image_bg_clear_expand_ratio": image_bg_clear_expand_ratio,
+                    "scanned_image_region_min_area_ratio": scanned_image_region_min_area_ratio,
+                    "scanned_image_region_max_area_ratio": scanned_image_region_max_area_ratio,
+                    "scanned_image_region_max_aspect_ratio": scanned_image_region_max_aspect_ratio,
                     "ocr_ai_linebreak_assist": ocr_ai_linebreak_assist,
                     "ocr_strict_mode": ocr_strict_mode,
                     "job_timeout": "1h",
@@ -643,6 +673,12 @@ async def create_job(
                 ocr_ai_base_url=ocr_ai_base_url,
                 ocr_ai_model=ocr_ai_model,
                 scanned_page_mode=scanned_page_mode,
+                image_bg_clear_expand_min_pt=image_bg_clear_expand_min_pt,
+                image_bg_clear_expand_max_pt=image_bg_clear_expand_max_pt,
+                image_bg_clear_expand_ratio=image_bg_clear_expand_ratio,
+                scanned_image_region_min_area_ratio=scanned_image_region_min_area_ratio,
+                scanned_image_region_max_area_ratio=scanned_image_region_max_area_ratio,
+                scanned_image_region_max_aspect_ratio=scanned_image_region_max_aspect_ratio,
                 ocr_ai_linebreak_assist=ocr_ai_linebreak_assist,
                 ocr_strict_mode=ocr_strict_mode,
                 job_id=job_id,

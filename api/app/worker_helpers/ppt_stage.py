@@ -35,6 +35,12 @@ def run_ppt_stage(
     scanned_render_dpi: int,
     normalized_text_erase_mode: str,
     normalized_scanned_page_mode: str,
+    normalized_image_bg_clear_expand_min_pt: float,
+    normalized_image_bg_clear_expand_max_pt: float,
+    normalized_image_bg_clear_expand_ratio: float,
+    normalized_scanned_image_region_min_area_ratio: float,
+    normalized_scanned_image_region_max_area_ratio: float,
+    normalized_scanned_image_region_max_aspect_ratio: float,
     set_processing_progress: Callable[[JobStage, int, str], None],
     abort_if_cancelled: Callable[..., None],
 ) -> PptStageResult:
@@ -69,6 +75,30 @@ def run_ppt_stage(
         generator_kwargs["text_erase_mode"] = normalized_text_erase_mode
     if "scanned_page_mode" in generator_params:
         generator_kwargs["scanned_page_mode"] = normalized_scanned_page_mode
+    if "image_bg_clear_expand_min_pt" in generator_params:
+        generator_kwargs["image_bg_clear_expand_min_pt"] = (
+            normalized_image_bg_clear_expand_min_pt
+        )
+    if "image_bg_clear_expand_max_pt" in generator_params:
+        generator_kwargs["image_bg_clear_expand_max_pt"] = (
+            normalized_image_bg_clear_expand_max_pt
+        )
+    if "image_bg_clear_expand_ratio" in generator_params:
+        generator_kwargs["image_bg_clear_expand_ratio"] = (
+            normalized_image_bg_clear_expand_ratio
+        )
+    if "scanned_image_region_min_area_ratio" in generator_params:
+        generator_kwargs["scanned_image_region_min_area_ratio"] = (
+            normalized_scanned_image_region_min_area_ratio
+        )
+    if "scanned_image_region_max_area_ratio" in generator_params:
+        generator_kwargs["scanned_image_region_max_area_ratio"] = (
+            normalized_scanned_image_region_max_area_ratio
+        )
+    if "scanned_image_region_max_aspect_ratio" in generator_params:
+        generator_kwargs["scanned_image_region_max_aspect_ratio"] = (
+            normalized_scanned_image_region_max_aspect_ratio
+        )
     if "progress_callback" in generator_params:
         generator_kwargs["progress_callback"] = _on_ppt_page_done
 

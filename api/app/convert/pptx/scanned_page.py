@@ -1522,9 +1522,31 @@ def _clear_regions_for_transparent_crops(
     pix: Any,
     page_height_pt: float,
     dpi: int,
+    clear_expand_min_pt: float = 0.35,
+    clear_expand_max_pt: float = 1.5,
+    clear_expand_ratio: float = 0.012,
 ) -> Path:
     if not regions_pt:
         return cleaned_render_path
+
+    try:
+        min_expand_pt = float(clear_expand_min_pt)
+    except Exception:
+        min_expand_pt = 0.35
+    try:
+        max_expand_pt = float(clear_expand_max_pt)
+    except Exception:
+        max_expand_pt = 1.5
+    try:
+        expand_ratio = float(clear_expand_ratio)
+    except Exception:
+        expand_ratio = 0.012
+
+    min_expand_pt = max(0.0, min(6.0, min_expand_pt))
+    max_expand_pt = max(0.0, min(8.0, max_expand_pt))
+    if max_expand_pt < min_expand_pt:
+        max_expand_pt = min_expand_pt
+    expand_ratio = max(0.0, min(0.12, expand_ratio))
 
     try:
         from PIL import Image, ImageDraw
@@ -1556,7 +1578,10 @@ def _clear_regions_for_transparent_crops(
         # from bbox rounding and anti-aliased crop borders.
         w_pt = max(1.0, float(x1 - x0))
         h_pt = max(1.0, float(y1 - y0))
-        expand_pt = max(0.35, min(1.5, 0.012 * min(w_pt, h_pt)))
+        expand_pt = max(
+            float(min_expand_pt),
+            min(float(max_expand_pt), float(expand_ratio) * min(w_pt, h_pt)),
+        )
         x0e = float(x0) - float(expand_pt)
         y0e = float(y0) - float(expand_pt)
         x1e = float(x1) + float(expand_pt)
@@ -2570,7 +2595,29 @@ def _build_scanned_image_region_infos(
     has_full_page_bg_image: bool,
     text_coverage_ratio_fn: Callable[[list[float]], tuple[float, int]],
     text_inside_counts_fn: Callable[[list[float]], tuple[int, int]],
+    min_area_ratio: float = 0.0025,
+    max_area_ratio: float = 0.72,
+    max_aspect_ratio: float = 4.8,
 ) -> list[_ScannedImageRegionInfo]:
+    try:
+        min_area_ratio_id = float(min_area_ratio)
+    except Exception:
+        min_area_ratio_id = 0.0025
+    try:
+        max_area_ratio_id = float(max_area_ratio)
+    except Exception:
+        max_area_ratio_id = 0.72
+    try:
+        max_aspect_ratio_id = float(max_aspect_ratio)
+    except Exception:
+        max_aspect_ratio_id = 4.8
+
+    min_area_ratio_id = max(0.0, min(0.35, min_area_ratio_id))
+    max_area_ratio_id = max(0.05, min(1.0, max_area_ratio_id))
+    if max_area_ratio_id <= min_area_ratio_id:
+        max_area_ratio_id = min(1.0, min_area_ratio_id + 0.05)
+    max_aspect_ratio_id = max(1.2, min(30.0, max_aspect_ratio_id))
+
     regions_pt = _collect_scanned_image_region_candidates(
         page=page,
         render_path=render_path,
@@ -2631,13 +2678,13 @@ def _build_scanned_image_region_infos(
 
         area_pt = max(0.0, w_pt * h_pt)
         area_ratio = area_pt / page_area
-        if area_ratio < 0.0025 or area_ratio > 0.72:
+        if area_ratio < min_area_ratio_id or area_ratio > max_area_ratio_id:
             continue
         if min(w_pt, h_pt) < 12.0:
             continue
 
         aspect = max(w_pt / max(1.0, h_pt), h_pt / max(1.0, w_pt))
-        if aspect >= 4.8 and area_ratio < 0.08:
+        if aspect >= max_aspect_ratio_id and area_ratio < 0.08:
             continue
 
         min_dim_pt = max(18.0, 1.8 * float(baseline_ocr_h_pt))

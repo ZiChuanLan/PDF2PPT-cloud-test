@@ -33,6 +33,12 @@ export type Settings = {
   enableOcr: boolean
   textEraseMode: TextEraseMode
   scannedPageMode: ScannedPageMode
+  imageBgClearExpandMinPt: string
+  imageBgClearExpandMaxPt: string
+  imageBgClearExpandRatio: string
+  scannedImageRegionMinAreaRatio: string
+  scannedImageRegionMaxAreaRatio: string
+  scannedImageRegionMaxAspectRatio: string
   ocrStrictMode: boolean
   ocrProvider: OcrProvider
   ocrBaiduAppId: string
@@ -78,6 +84,13 @@ export const defaultSettings: Settings = {
   textEraseMode: "fill",
   // segmented: keep some images as editable blocks; fullpage: keep a single page background.
   scannedPageMode: "segmented",
+  // Tunables for image-underlay cleanup and scanned image-region filtering.
+  imageBgClearExpandMinPt: "0.35",
+  imageBgClearExpandMaxPt: "1.5",
+  imageBgClearExpandRatio: "0.012",
+  scannedImageRegionMinAreaRatio: "0.0025",
+  scannedImageRegionMaxAreaRatio: "0.72",
+  scannedImageRegionMaxAspectRatio: "4.8",
   // Non-strict is more open-source friendly: it enables fallbacks/downgrades
   // and keeps conversion running even if OCR fails on some pages.
   ocrStrictMode: false,
@@ -207,6 +220,39 @@ export function loadStoredSettings(): Settings {
   if (!validScannedPageModes.includes(merged.scannedPageMode)) {
     merged.scannedPageMode = "segmented"
   }
+  const toNumberLikeString = (value: unknown, fallback: string): string => {
+    if (typeof value === "string") {
+      return value
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value)
+    }
+    return fallback
+  }
+  merged.imageBgClearExpandMinPt = toNumberLikeString(
+    merged.imageBgClearExpandMinPt,
+    defaultSettings.imageBgClearExpandMinPt
+  )
+  merged.imageBgClearExpandMaxPt = toNumberLikeString(
+    merged.imageBgClearExpandMaxPt,
+    defaultSettings.imageBgClearExpandMaxPt
+  )
+  merged.imageBgClearExpandRatio = toNumberLikeString(
+    merged.imageBgClearExpandRatio,
+    defaultSettings.imageBgClearExpandRatio
+  )
+  merged.scannedImageRegionMinAreaRatio = toNumberLikeString(
+    merged.scannedImageRegionMinAreaRatio,
+    defaultSettings.scannedImageRegionMinAreaRatio
+  )
+  merged.scannedImageRegionMaxAreaRatio = toNumberLikeString(
+    merged.scannedImageRegionMaxAreaRatio,
+    defaultSettings.scannedImageRegionMaxAreaRatio
+  )
+  merged.scannedImageRegionMaxAspectRatio = toNumberLikeString(
+    merged.scannedImageRegionMaxAspectRatio,
+    defaultSettings.scannedImageRegionMaxAspectRatio
+  )
   if (typeof merged.layoutAssistApplyImageRegions !== "boolean") {
     merged.layoutAssistApplyImageRegions = false
   }

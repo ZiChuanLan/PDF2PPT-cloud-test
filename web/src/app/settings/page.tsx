@@ -1136,6 +1136,126 @@ export default function SettingsPage() {
                   分块模式会尝试把截图/图表等区域单独裁剪为可编辑图片；全页模式只保留一张整页背景并覆盖文字，通常更接近原图但图片不可单独编辑。
                 </div>
               </div>
+
+              {showAdvanced ? (
+                <div className="grid gap-3 rounded-md border border-border/70 p-3">
+                  <div className="font-sans text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                    图片底图清除与图块阈值
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="grid gap-1.5">
+                      <label className="text-muted-foreground text-xs" htmlFor="image-bg-clear-min-pt">
+                        清除扩边最小值（pt）
+                      </label>
+                      <Input
+                        id="image-bg-clear-min-pt"
+                        type="number"
+                        inputMode="decimal"
+                        step="0.01"
+                        value={settings.imageBgClearExpandMinPt}
+                        onChange={(e) =>
+                          setSettings((s) => ({ ...s, imageBgClearExpandMinPt: e.target.value }))
+                        }
+                      />
+                    </div>
+
+                    <div className="grid gap-1.5">
+                      <label className="text-muted-foreground text-xs" htmlFor="image-bg-clear-max-pt">
+                        清除扩边最大值（pt）
+                      </label>
+                      <Input
+                        id="image-bg-clear-max-pt"
+                        type="number"
+                        inputMode="decimal"
+                        step="0.01"
+                        value={settings.imageBgClearExpandMaxPt}
+                        onChange={(e) =>
+                          setSettings((s) => ({ ...s, imageBgClearExpandMaxPt: e.target.value }))
+                        }
+                      />
+                    </div>
+
+                    <div className="grid gap-1.5">
+                      <label className="text-muted-foreground text-xs" htmlFor="image-bg-clear-ratio">
+                        清除扩边比例
+                      </label>
+                      <Input
+                        id="image-bg-clear-ratio"
+                        type="number"
+                        inputMode="decimal"
+                        step="0.001"
+                        value={settings.imageBgClearExpandRatio}
+                        onChange={(e) =>
+                          setSettings((s) => ({ ...s, imageBgClearExpandRatio: e.target.value }))
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="grid gap-1.5">
+                      <label className="text-muted-foreground text-xs" htmlFor="scanned-min-area-ratio">
+                        图块最小面积比例
+                      </label>
+                      <Input
+                        id="scanned-min-area-ratio"
+                        type="number"
+                        inputMode="decimal"
+                        step="0.0001"
+                        value={settings.scannedImageRegionMinAreaRatio}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            scannedImageRegionMinAreaRatio: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+
+                    <div className="grid gap-1.5">
+                      <label className="text-muted-foreground text-xs" htmlFor="scanned-max-area-ratio">
+                        图块最大面积比例
+                      </label>
+                      <Input
+                        id="scanned-max-area-ratio"
+                        type="number"
+                        inputMode="decimal"
+                        step="0.01"
+                        value={settings.scannedImageRegionMaxAreaRatio}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            scannedImageRegionMaxAreaRatio: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+
+                    <div className="grid gap-1.5">
+                      <label className="text-muted-foreground text-xs" htmlFor="scanned-max-aspect-ratio">
+                        图块最大长宽比
+                      </label>
+                      <Input
+                        id="scanned-max-aspect-ratio"
+                        type="number"
+                        inputMode="decimal"
+                        step="0.1"
+                        value={settings.scannedImageRegionMaxAspectRatio}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            scannedImageRegionMaxAspectRatio: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div className="text-muted-foreground text-xs">
+                    建议先使用默认值；仅在出现图片底图残留或图块误判时微调。修改后建议用 1 页样本先验证。
+                  </div>
+                </div>
+              ) : null}
             </section>
 
             {isOcrEnabledForCurrentEngine ? (

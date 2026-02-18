@@ -266,6 +266,14 @@ function clampPositiveInt(value: number, max?: number) {
   return Math.min(normalized, max)
 }
 
+function toFiniteFloatStringOrUndefined(value: string): string | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const n = Number(trimmed)
+  if (!Number.isFinite(n)) return undefined
+  return String(n)
+}
+
 function createFormData(
   file: File,
   settings: Settings,
@@ -291,6 +299,36 @@ function createFormData(
   form.append("enable_ocr", String(Boolean(settings.enableOcr)))
   form.append("text_erase_mode", settings.textEraseMode)
   form.append("scanned_page_mode", settings.scannedPageMode)
+  const imageBgClearExpandMinPt = toFiniteFloatStringOrUndefined(settings.imageBgClearExpandMinPt)
+  const imageBgClearExpandMaxPt = toFiniteFloatStringOrUndefined(settings.imageBgClearExpandMaxPt)
+  const imageBgClearExpandRatio = toFiniteFloatStringOrUndefined(settings.imageBgClearExpandRatio)
+  const scannedImageRegionMinAreaRatio = toFiniteFloatStringOrUndefined(
+    settings.scannedImageRegionMinAreaRatio
+  )
+  const scannedImageRegionMaxAreaRatio = toFiniteFloatStringOrUndefined(
+    settings.scannedImageRegionMaxAreaRatio
+  )
+  const scannedImageRegionMaxAspectRatio = toFiniteFloatStringOrUndefined(
+    settings.scannedImageRegionMaxAspectRatio
+  )
+  if (imageBgClearExpandMinPt) {
+    form.append("image_bg_clear_expand_min_pt", imageBgClearExpandMinPt)
+  }
+  if (imageBgClearExpandMaxPt) {
+    form.append("image_bg_clear_expand_max_pt", imageBgClearExpandMaxPt)
+  }
+  if (imageBgClearExpandRatio) {
+    form.append("image_bg_clear_expand_ratio", imageBgClearExpandRatio)
+  }
+  if (scannedImageRegionMinAreaRatio) {
+    form.append("scanned_image_region_min_area_ratio", scannedImageRegionMinAreaRatio)
+  }
+  if (scannedImageRegionMaxAreaRatio) {
+    form.append("scanned_image_region_max_area_ratio", scannedImageRegionMaxAreaRatio)
+  }
+  if (scannedImageRegionMaxAspectRatio) {
+    form.append("scanned_image_region_max_aspect_ratio", scannedImageRegionMaxAspectRatio)
+  }
   form.append("ocr_strict_mode", String(Boolean(settings.ocrStrictMode)))
 
   if (run.parseProvider === "mineru") {

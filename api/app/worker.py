@@ -127,6 +127,12 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
     ocr_ai_base_url: str | None = None,
     ocr_ai_model: str | None = None,
     scanned_page_mode: str | None = None,
+    image_bg_clear_expand_min_pt: float | None = None,
+    image_bg_clear_expand_max_pt: float | None = None,
+    image_bg_clear_expand_ratio: float | None = None,
+    scanned_image_region_min_area_ratio: float | None = None,
+    scanned_image_region_max_area_ratio: float | None = None,
+    scanned_image_region_max_aspect_ratio: float | None = None,
     ocr_ai_linebreak_assist: bool | None = None,
     ocr_strict_mode: bool | None = False,
     job_timeout: str | None = None,
@@ -164,6 +170,12 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         ocr_ai_base_url,
         ocr_ai_model,
         scanned_page_mode,
+        image_bg_clear_expand_min_pt,
+        image_bg_clear_expand_max_pt,
+        image_bg_clear_expand_ratio,
+        scanned_image_region_min_area_ratio,
+        scanned_image_region_max_area_ratio,
+        scanned_image_region_max_aspect_ratio,
         ocr_ai_linebreak_assist,
         ocr_strict_mode,
         job_timeout,
@@ -218,6 +230,70 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         normalized_scanned_page_mode = "fullpage"
     if normalized_scanned_page_mode not in {"segmented", "fullpage"}:
         normalized_scanned_page_mode = "segmented"
+
+    def _normalize_float(
+        value: float | None,
+        *,
+        default: float,
+        low: float,
+        high: float,
+    ) -> float:
+        try:
+            num = float(value) if value is not None else float(default)
+        except Exception:
+            num = float(default)
+        if num < low:
+            num = float(low)
+        if num > high:
+            num = float(high)
+        return float(num)
+
+    normalized_image_bg_clear_expand_min_pt = _normalize_float(
+        image_bg_clear_expand_min_pt,
+        default=0.35,
+        low=0.0,
+        high=6.0,
+    )
+    normalized_image_bg_clear_expand_max_pt = _normalize_float(
+        image_bg_clear_expand_max_pt,
+        default=1.5,
+        low=0.0,
+        high=8.0,
+    )
+    if normalized_image_bg_clear_expand_max_pt < normalized_image_bg_clear_expand_min_pt:
+        normalized_image_bg_clear_expand_max_pt = normalized_image_bg_clear_expand_min_pt
+    normalized_image_bg_clear_expand_ratio = _normalize_float(
+        image_bg_clear_expand_ratio,
+        default=0.012,
+        low=0.0,
+        high=0.12,
+    )
+    normalized_scanned_image_region_min_area_ratio = _normalize_float(
+        scanned_image_region_min_area_ratio,
+        default=0.0025,
+        low=0.0,
+        high=0.35,
+    )
+    normalized_scanned_image_region_max_area_ratio = _normalize_float(
+        scanned_image_region_max_area_ratio,
+        default=0.72,
+        low=0.05,
+        high=1.0,
+    )
+    if (
+        normalized_scanned_image_region_max_area_ratio
+        <= normalized_scanned_image_region_min_area_ratio
+    ):
+        normalized_scanned_image_region_max_area_ratio = min(
+            1.0,
+            normalized_scanned_image_region_min_area_ratio + 0.05,
+        )
+    normalized_scanned_image_region_max_aspect_ratio = _normalize_float(
+        scanned_image_region_max_aspect_ratio,
+        default=4.8,
+        low=1.2,
+        high=30.0,
+    )
 
     try:
         if not input_pdf.exists():
@@ -557,6 +633,12 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             scanned_render_dpi=int(scanned_render_dpi),
             normalized_text_erase_mode=normalized_text_erase_mode,
             normalized_scanned_page_mode=normalized_scanned_page_mode,
+            normalized_image_bg_clear_expand_min_pt=normalized_image_bg_clear_expand_min_pt,
+            normalized_image_bg_clear_expand_max_pt=normalized_image_bg_clear_expand_max_pt,
+            normalized_image_bg_clear_expand_ratio=normalized_image_bg_clear_expand_ratio,
+            normalized_scanned_image_region_min_area_ratio=normalized_scanned_image_region_min_area_ratio,
+            normalized_scanned_image_region_max_area_ratio=normalized_scanned_image_region_max_area_ratio,
+            normalized_scanned_image_region_max_aspect_ratio=normalized_scanned_image_region_max_aspect_ratio,
             set_processing_progress=_set_processing_progress,
             abort_if_cancelled=_abort_if_cancelled,
         ).worker_compat_mode

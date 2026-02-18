@@ -62,6 +62,12 @@ def generate_pptx_from_ir(
     scanned_render_dpi: int = 200,
     scanned_page_mode: str = "fullpage",
     text_erase_mode: str = "fill",
+    image_bg_clear_expand_min_pt: float = 0.35,
+    image_bg_clear_expand_max_pt: float = 1.5,
+    image_bg_clear_expand_ratio: float = 0.012,
+    scanned_image_region_min_area_ratio: float = 0.0025,
+    scanned_image_region_max_area_ratio: float = 0.72,
+    scanned_image_region_max_aspect_ratio: float = 4.8,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> Path:
     """Generate a PPTX from the provided IR.
@@ -73,6 +79,17 @@ def generate_pptx_from_ir(
         force_16x9: If True, use a 16:9 slide size and letterbox PDF content.
         scanned_render_dpi: DPI used when rendering scanned pages to images.
         text_erase_mode: Erase strategy for background cleanup (smart, fill).
+        image_bg_clear_expand_min_pt: Min outward expansion (pt) when clearing
+            background under overlaid image crops.
+        image_bg_clear_expand_max_pt: Max outward expansion (pt) when clearing
+            background under overlaid image crops.
+        image_bg_clear_expand_ratio: Expansion ratio against crop min dimension.
+        scanned_image_region_min_area_ratio: Min page area ratio for scanned
+            image-region candidate filtering.
+        scanned_image_region_max_area_ratio: Max page area ratio for scanned
+            image-region candidate filtering.
+        scanned_image_region_max_aspect_ratio: Max aspect ratio threshold for
+            suppressing long narrow scanned-image candidates.
         progress_callback: Optional callback(done_pages, total_pages), called
             after each IR page is written.
 
@@ -124,6 +141,61 @@ def generate_pptx_from_ir(
         scanned_page_mode_id = "fullpage"
     if scanned_page_mode_id not in {"segmented", "fullpage"}:
         scanned_page_mode_id = "segmented"
+
+    def _clamp_float(value: Any, *, default: float, low: float, high: float) -> float:
+        try:
+            num = float(value)
+        except Exception:
+            num = float(default)
+        if num < low:
+            num = float(low)
+        if num > high:
+            num = float(high)
+        return float(num)
+
+    image_bg_clear_expand_min_pt_id = _clamp_float(
+        image_bg_clear_expand_min_pt,
+        default=0.35,
+        low=0.0,
+        high=6.0,
+    )
+    image_bg_clear_expand_max_pt_id = _clamp_float(
+        image_bg_clear_expand_max_pt,
+        default=1.5,
+        low=0.0,
+        high=8.0,
+    )
+    if image_bg_clear_expand_max_pt_id < image_bg_clear_expand_min_pt_id:
+        image_bg_clear_expand_max_pt_id = image_bg_clear_expand_min_pt_id
+    image_bg_clear_expand_ratio_id = _clamp_float(
+        image_bg_clear_expand_ratio,
+        default=0.012,
+        low=0.0,
+        high=0.12,
+    )
+    scanned_image_region_min_area_ratio_id = _clamp_float(
+        scanned_image_region_min_area_ratio,
+        default=0.0025,
+        low=0.0,
+        high=0.35,
+    )
+    scanned_image_region_max_area_ratio_id = _clamp_float(
+        scanned_image_region_max_area_ratio,
+        default=0.72,
+        low=0.05,
+        high=1.0,
+    )
+    if scanned_image_region_max_area_ratio_id <= scanned_image_region_min_area_ratio_id:
+        scanned_image_region_max_area_ratio_id = min(
+            1.0,
+            scanned_image_region_min_area_ratio_id + 0.05,
+        )
+    scanned_image_region_max_aspect_ratio_id = _clamp_float(
+        scanned_image_region_max_aspect_ratio,
+        default=4.8,
+        low=1.2,
+        high=30.0,
+    )
 
     try:
         first_w_pt = float(first_page.get("page_width_pt") or 0.0)
@@ -336,6 +408,9 @@ def generate_pptx_from_ir(
                 has_full_page_bg_image=has_full_page_bg_image,
                 text_coverage_ratio_fn=_text_coverage_ratio,
                 text_inside_counts_fn=_text_inside_counts,
+                min_area_ratio=scanned_image_region_min_area_ratio_id,
+                max_area_ratio=scanned_image_region_max_area_ratio_id,
+                max_aspect_ratio=scanned_image_region_max_aspect_ratio_id,
             )
             ocr_text_elements = _filter_scanned_ocr_text_elements(
                 ocr_text_elements=ocr_text_elements,
@@ -549,6 +624,9 @@ def generate_pptx_from_ir(
                         pix=pix,
                         page_height_pt=page_h_pt,
                         dpi=int(scanned_render_dpi),
+                        clear_expand_min_pt=image_bg_clear_expand_min_pt_id,
+                        clear_expand_max_pt=image_bg_clear_expand_max_pt_id,
+                        clear_expand_ratio=image_bg_clear_expand_ratio_id,
                     )
 
             slide.shapes.add_picture(
@@ -836,6 +914,9 @@ def generate_pptx_from_ir(
                         pix=mineru_render_pix,
                         page_height_pt=page_h_pt,
                         dpi=int(scanned_render_dpi),
+                        clear_expand_min_pt=image_bg_clear_expand_min_pt_id,
+                        clear_expand_max_pt=image_bg_clear_expand_max_pt_id,
+                        clear_expand_ratio=image_bg_clear_expand_ratio_id,
                     )
 
                 bg_left = int(round(transform.offset_x_emu))
