@@ -11,7 +11,8 @@ services:
       - /app/.next
     environment:
       - NODE_ENV=development
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
+      - NEXT_PUBLIC_API_PORT=${NEXT_PUBLIC_API_PORT:-8000}
     depends_on:
       - api
     networks:
@@ -30,6 +31,8 @@ services:
       - MAX_PAGES=${MAX_PAGES:-200}
       - JOB_TTL_MINUTES=${JOB_TTL_MINUTES:-60}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-*}
+      - CORS_ALLOW_ORIGIN_REGEX=${CORS_ALLOW_ORIGIN_REGEX:-}
       - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
     depends_on:
       - redis

@@ -1,11 +1,52 @@
+declare const process: {
+  env: {
+    NEXT_PUBLIC_API_URL?: string
+    NEXT_PUBLIC_API_PORT?: string
+    [key: string]: string | undefined
+  }
+}
+
 const API_ORIGIN_STORAGE_KEY = "ppt_opencode_api_origin"
 const DEFAULT_FALLBACK_ORIGIN = "http://localhost:8000"
+const DEFAULT_FALLBACK_PORT = "8000"
 
 let resolvedApiOriginCache: string | null = null
 let resolveInFlight: Promise<string> | null = null
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "")
+}
+
+function isLoopbackHost(rawHost: string): boolean {
+  const host = String(rawHost || "").trim().toLowerCase().replace(/^\[|\]$/g, "")
+  return host === "localhost" || host === "127.0.0.1" || host === "::1"
+}
+
+function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const parsed = new URL(origin)
+    return isLoopbackHost(parsed.hostname)
+  } catch {
+    return false
+  }
+}
+
+function getRuntimeFallbackOrigin(): string {
+  if (typeof window === "undefined") return DEFAULT_FALLBACK_ORIGIN
+
+  const host = String(window.location.hostname || "").trim()
+  if (!host || isLoopbackHost(host)) return DEFAULT_FALLBACK_ORIGIN
+
+  const protocol = window.location.protocol === "https:" ? "https:" : "http:"
+  const port = String(process.env.NEXT_PUBLIC_API_PORT || "").trim() || DEFAULT_FALLBACK_PORT
+  return `${protocol}//${host}:${port}`
+}
+
+function shouldIgnoreConfiguredLoopbackOrigin(origin: string): boolean {
+  if (typeof window === "undefined") return false
+  const currentHost = String(window.location.hostname || "").trim()
+  if (!currentHost || isLoopbackHost(currentHost)) return false
+  return isLoopbackOrigin(origin)
 }
 
 function uniq(values: string[]): string[] {
@@ -72,7 +113,7 @@ export function clearStoredApiOrigin(): void {
 
 function inferAutoCandidates(): string[] {
   const candidates: string[] = []
-  const envPort = String(process.env.NEXT_PUBLIC_API_PORT || "").trim()
+  const envPort = String(process.env.NEXT_PUBLIC_API_PORT || "").trim() || DEFAULT_FALLBACK_PORT
   const ports = uniq([envPort, "8000", "8001"]).filter(Boolean)
 
   if (typeof window !== "undefined") {
@@ -89,11 +130,13 @@ function inferAutoCandidates(): string[] {
         candidates.push(`${protocol}//${h}:${p}`)
       }
     }
-  }
 
-  for (const h of ["localhost", "127.0.0.1"]) {
-    for (const p of ports) {
-      candidates.push(`http://${h}:${p}`)
+    if (isLoopbackHost(host)) {
+      for (const h of ["localhost", "127.0.0.1"]) {
+        for (const p of ports) {
+          candidates.push(`http://${h}:${p}`)
+        }
+      }
     }
   }
 
@@ -101,13 +144,21 @@ function inferAutoCandidates(): string[] {
 }
 
 export function listApiOriginCandidates(): string[] {
+  const manualRaw = getStoredApiOrigin() || ""
+  const manual = manualRaw
+  const configuredRaw = getConfiguredApiOrigin() || ""
+  const configured =
+    configuredRaw && !shouldIgnoreConfiguredLoopbackOrigin(configuredRaw) ? configuredRaw : ""
+  const cachedRaw = resolvedApiOriginCache || ""
+  const cached = cachedRaw
+
   return uniq(
     [
-      getStoredApiOrigin() || "",
-      getConfiguredApiOrigin() || "",
-      resolvedApiOriginCache || "",
+      manual,
+      configured,
+      cached,
       ...inferAutoCandidates(),
-      DEFAULT_FALLBACK_ORIGIN,
+      getRuntimeFallbackOrigin(),
     ].filter(Boolean)
   )
 }
@@ -137,7 +188,7 @@ async function probeApiOrigin(origin: string, timeoutMs = 1200): Promise<boolean
 }
 
 export function getApiOrigin(): string {
-  return listApiOriginCandidates()[0] || DEFAULT_FALLBACK_ORIGIN
+  return listApiOriginCandidates()[0] || getRuntimeFallbackOrigin()
 }
 
 export async function resolveApiOrigin(options?: { force?: boolean }): Promise<string> {
@@ -146,13 +197,17 @@ export async function resolveApiOrigin(options?: { force?: boolean }): Promise<s
   if (!force && resolvedApiOriginCache) return resolvedApiOriginCache
   if (!force && resolveInFlight) return resolveInFlight
 
-  const configured = getConfiguredApiOrigin()
-  const manual = getStoredApiOrigin()
+  const configuredRaw = getConfiguredApiOrigin()
+  const configured =
+    configuredRaw && !shouldIgnoreConfiguredLoopbackOrigin(configuredRaw) ? configuredRaw : null
+  const manualRaw = getStoredApiOrigin()
+  const manual = manualRaw
   const candidates = listApiOriginCandidates()
 
   // Server-side render fallback: skip probing.
   if (typeof window === "undefined") {
-    resolvedApiOriginCache = manual || configured || candidates[0] || DEFAULT_FALLBACK_ORIGIN
+    resolvedApiOriginCache =
+      manual || configured || getRuntimeFallbackOrigin() || candidates[0] || DEFAULT_FALLBACK_ORIGIN
     return resolvedApiOriginCache
   }
 
@@ -164,7 +219,8 @@ export async function resolveApiOrigin(options?: { force?: boolean }): Promise<s
         return origin
       }
     }
-    resolvedApiOriginCache = manual || configured || candidates[0] || DEFAULT_FALLBACK_ORIGIN
+    resolvedApiOriginCache =
+      manual || configured || getRuntimeFallbackOrigin() || candidates[0] || DEFAULT_FALLBACK_ORIGIN
     return resolvedApiOriginCache
   })()
 
