@@ -10,6 +10,7 @@ from .geometry_utils import (
     _coerce_bbox_pt,
     _normalize_match_text,
 )
+from .guarded import run_blocking_with_guards
 from .layout import (
     _apply_ai_tables,
     _count_layout_assist_page_changes,
@@ -38,6 +39,7 @@ __all__ = [
     "_layout_page_signature",
     "_normalize_match_text",
     "build_ocr_debug_payload",
+    "run_blocking_with_guards",
     "run_layout_assist_stage",
     "run_ocr_stage",
     "run_ppt_stage",

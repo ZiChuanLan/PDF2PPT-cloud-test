@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from ..convert.pptx_generator import generate_pptx_from_ir
 from ..models.job import JobStage
+from .guarded import run_blocking_with_guards
 
 
 def _progress_in_span(
@@ -43,8 +44,12 @@ def run_ppt_stage(
     normalized_scanned_image_region_max_aspect_ratio: float,
     set_processing_progress: Callable[[JobStage, int, str], None],
     abort_if_cancelled: Callable[..., None],
+    heartbeat: Callable[[], None] | None = None,
+    heartbeat_interval_s: float = 15.0,
 ) -> PptStageResult:
-    ppt_page_total = sum(1 for page in (ir.get("pages") or []) if isinstance(page, dict))
+    ppt_page_total = sum(
+        1 for page in (ir.get("pages") or []) if isinstance(page, dict)
+    )
     set_processing_progress(
         JobStage.pptx_generating,
         84,
@@ -115,10 +120,19 @@ def run_ppt_stage(
         abort_if_cancelled(stage=JobStage.pptx_generating, message="Job cancelled")
 
     abort_if_cancelled(stage=JobStage.pptx_generating, message="Job cancelled")
-    generate_pptx_from_ir(
-        ir,
-        output_pptx,
-        **generator_kwargs,
+    run_blocking_with_guards(
+        lambda: generate_pptx_from_ir(
+            ir,
+            output_pptx,
+            **generator_kwargs,
+        ),
+        cancel_check=lambda: abort_if_cancelled(
+            stage=JobStage.pptx_generating,
+            message="Job cancelled",
+        ),
+        operation_name="ppt generation",
+        heartbeat=heartbeat,
+        heartbeat_interval_s=heartbeat_interval_s,
     )
     set_processing_progress(
         JobStage.packaging,

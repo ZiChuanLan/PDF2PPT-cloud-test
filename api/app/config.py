@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     max_file_mb: int = 100
     max_pages: int = 200
     job_ttl_minutes: int = 60
+    # Keepalive heartbeat interval for long-running blocking stages.
+    # Used to refresh job metadata TTL while no progress update is emitted.
+    job_keepalive_interval_s: int = 15
     # Root directory for per-job runtime artifacts.
     # Relative paths are resolved under the `api/` directory.
     job_root_dir: str = "data/jobs"

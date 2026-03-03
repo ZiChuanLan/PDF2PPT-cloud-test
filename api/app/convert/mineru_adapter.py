@@ -1509,6 +1509,7 @@ def parse_pdf_to_ir_with_mineru(
     data_id: str | None = None,
     poll_interval_s: float = 2.0,
     poll_timeout_s: float = 1200.0,
+    cancel_check: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     path = Path(pdf_path)
     if not path.exists():
@@ -1556,6 +1557,7 @@ def parse_pdf_to_ir_with_mineru(
         batch_id=batch_id,
         poll_interval_s=poll_interval_s,
         timeout_s=poll_timeout_s,
+        cancel_check=cancel_check,
     )
     (out_dir / "batch_result.json").write_text(
         json.dumps(result, ensure_ascii=True, indent=2) + "\n",

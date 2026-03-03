@@ -10,6 +10,7 @@ from ..convert.llm_adapter import LlmLayoutService
 from ..logging_config import get_logger
 from ..models.job import JobStage
 from .debug import _export_layout_assist_debug_images
+from .guarded import run_blocking_with_guards
 from .layout import (
     _apply_ai_tables,
     _count_layout_assist_page_changes,
@@ -42,6 +43,8 @@ def run_layout_assist_stage(
     select_provider: Callable[[], Any | None],
     set_processing_progress: Callable[[JobStage, int, str], None],
     abort_if_cancelled: Callable[..., None],
+    heartbeat: Callable[[], None] | None = None,
+    heartbeat_interval_s: float = 15.0,
 ) -> LayoutAssistStageResult:
     layout_assist_status = "disabled"
     layout_assist_error: str | None = None
@@ -73,11 +76,20 @@ def run_layout_assist_stage(
             "AI 版式辅助处理中…",
         )
         abort_if_cancelled(stage=JobStage.layout_assist, message="Job cancelled")
-        ir = LlmLayoutService(llm_provider).enhance_ir(
-            ir,
-            layout_mode="assist",
-            force_ai=True,
-            allow_image_regions=bool(layout_assist_apply_image_regions),
+        ir = run_blocking_with_guards(
+            lambda: LlmLayoutService(llm_provider).enhance_ir(
+                ir,
+                layout_mode="assist",
+                force_ai=True,
+                allow_image_regions=bool(layout_assist_apply_image_regions),
+            ),
+            cancel_check=lambda: abort_if_cancelled(
+                stage=JobStage.layout_assist,
+                message="Job cancelled",
+            ),
+            operation_name="layout assist",
+            heartbeat=heartbeat,
+            heartbeat_interval_s=heartbeat_interval_s,
         )
         abort_if_cancelled(stage=JobStage.layout_assist, message="Job cancelled")
 

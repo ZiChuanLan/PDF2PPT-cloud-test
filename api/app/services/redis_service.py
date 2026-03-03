@@ -16,6 +16,14 @@ from ..models.job import Job, JobStage, JobStatus, LayoutMode
 
 logger = logging.getLogger(__name__)
 
+_TERMINAL_JOB_STATUSES = frozenset(
+    {
+        JobStatus.completed,
+        JobStatus.failed,
+        JobStatus.cancelled,
+    }
+)
+
 
 @dataclass(frozen=True)
 class _MemValue:
@@ -178,6 +186,10 @@ class RedisService:
         if not job:
             return None
 
+        # Guard terminal states from being overwritten by stale writers.
+        if job.status in _TERMINAL_JOB_STATUSES and status != job.status:
+            return job
+
         # Update fields
         if status is not None:
             job.status = status
@@ -197,6 +209,22 @@ class RedisService:
             job.model_dump_json(),
         )
 
+        return job
+
+    def refresh_job_ttl(self, job_id: str) -> Optional[Job]:
+        """Refresh TTL and expiration timestamp without changing job state."""
+        job = self.get_job(job_id)
+        if not job:
+            return None
+
+        job.expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=self.ttl_seconds
+        )
+        self.redis_client.setex(
+            self._job_key(job_id),
+            self.ttl_seconds,
+            job.model_dump_json(),
+        )
         return job
 
     def set_cancel_flag(self, job_id: str) -> None:

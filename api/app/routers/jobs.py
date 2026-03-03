@@ -177,7 +177,12 @@ def _run_ai_ocr_capability_check(
             sample_items.append(
                 AiOcrCheckSampleItem(
                     text=text[:120],
-                    bbox=[float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+                    bbox=[
+                        float(bbox[0]),
+                        float(bbox[1]),
+                        float(bbox[2]),
+                        float(bbox[3]),
+                    ],
                     confidence=confidence,
                 )
             )
@@ -185,9 +190,7 @@ def _run_ai_ocr_capability_check(
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         ready = valid_bbox_items > 0
         message = (
-            "模型可返回有效 bbox OCR 结果"
-            if ready
-            else "模型未返回有效 bbox OCR 结果"
+            "模型可返回有效 bbox OCR 结果" if ready else "模型未返回有效 bbox OCR 结果"
         )
         check = AiOcrCheckResult(
             provider=normalized_provider,
@@ -568,6 +571,7 @@ async def create_job(
     # Generate job ID
     job_id = str(uuid.uuid4())
     job_dir: Path | None = None
+    job_created = False
 
     try:
         # Create job directory
@@ -591,6 +595,7 @@ async def create_job(
 
         # Create job in Redis
         job = redis_service.create_job(job_id)
+        job_created = True
 
         # Queue job for processing
         if redis_service.is_memory_backend():
@@ -719,6 +724,15 @@ async def create_job(
         raise
     except Exception as e:
         logger.exception(f"Failed to create job: {e}")
+        if job_created:
+            try:
+                redis_service.delete_job(job_id)
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Failed to rollback job metadata for %s: %s",
+                    job_id,
+                    cleanup_error,
+                )
         if job_dir is not None and job_dir.exists():
             shutil.rmtree(job_dir)
         raise AppException(

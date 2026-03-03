@@ -187,6 +187,9 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
     settings = get_settings()
     ocr_render_dpi = int(getattr(settings, "ocr_render_dpi", 200) or 200)
     scanned_render_dpi = int(getattr(settings, "scanned_render_dpi", 200) or 200)
+    keepalive_interval_s = float(
+        getattr(settings, "job_keepalive_interval_s", 15) or 15
+    )
 
     job_path = _job_dir(job_id)
     input_pdf = job_path / "input.pdf"
@@ -215,7 +218,11 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             ocr_ai_base_url=ocr_ai_base_url,
             ocr_ai_model=ocr_ai_model,
         )
-        if selected is not None and (not clean_str(api_key)) and clean_str(ocr_ai_api_key):
+        if (
+            selected is not None
+            and (not clean_str(api_key))
+            and clean_str(ocr_ai_api_key)
+        ):
             logger.info(
                 "Using OCR AI credentials for layout assist (main API key missing)"
             )
@@ -262,8 +269,13 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         low=0.0,
         high=8.0,
     )
-    if normalized_image_bg_clear_expand_max_pt < normalized_image_bg_clear_expand_min_pt:
-        normalized_image_bg_clear_expand_max_pt = normalized_image_bg_clear_expand_min_pt
+    if (
+        normalized_image_bg_clear_expand_max_pt
+        < normalized_image_bg_clear_expand_min_pt
+    ):
+        normalized_image_bg_clear_expand_max_pt = (
+            normalized_image_bg_clear_expand_min_pt
+        )
     normalized_image_bg_clear_expand_ratio = _normalize_float(
         image_bg_clear_expand_ratio,
         default=0.012,
@@ -355,6 +367,9 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             )
             raise JobCancelledError()
 
+        def _refresh_job_ttl() -> None:
+            redis_service.refresh_job_ttl(job_id)
+
         _set_processing_progress(
             JobStage.parsing,
             5,
@@ -418,6 +433,11 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 ocr_ai_provider = "auto"
 
         if parse_provider_id == "mineru":
+
+            def _mineru_poll_check() -> None:
+                _abort_if_cancelled(stage=JobStage.parsing, message="Job cancelled")
+                _refresh_job_ttl()
+
             ir = parse_pdf_to_ir_with_mineru(
                 input_pdf,
                 artifacts_dir / "mineru",
@@ -431,6 +451,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 page_start=page_start,
                 page_end=page_end,
                 data_id=job_id,
+                cancel_check=_mineru_poll_check,
             )
         else:
             ir = parse_pdf_to_ir(
@@ -510,7 +531,9 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             effective_ocr_ai_provider = "openai"
         effective_ocr_ai_base_url = clean_str(ocr_ai_base_url)
         effective_ocr_ai_model = clean_str(ocr_ai_model)
-        effective_tesseract_language = clean_str(ocr_tesseract_language) or "chi_sim+eng"
+        effective_tesseract_language = (
+            clean_str(ocr_tesseract_language) or "chi_sim+eng"
+        )
         effective_tesseract_min_conf: float | None = None
         strict_ocr_mode = bool(False if ocr_strict_mode is None else ocr_strict_mode)
 
@@ -572,7 +595,9 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             auto_linebreak_enabled = ocr_setup.auto_linebreak_enabled
 
             if ocr_setup.setup_warning:
-                logger.warning("OCR setup failed (best-effort): %s", ocr_setup.setup_warning)
+                logger.warning(
+                    "OCR setup failed (best-effort): %s", ocr_setup.setup_warning
+                )
                 ir.setdefault("warnings", []).append(
                     f"ocr_setup_failed_best_effort: error={ocr_setup.setup_warning}"
                 )
@@ -627,6 +652,8 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             select_provider=_select_provider,
             set_processing_progress=_set_processing_progress,
             abort_if_cancelled=_abort_if_cancelled,
+            heartbeat=_refresh_job_ttl,
+            heartbeat_interval_s=keepalive_interval_s,
         ).ir
 
         worker_compat_mode = run_ppt_stage(
@@ -644,6 +671,8 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             normalized_scanned_image_region_max_aspect_ratio=normalized_scanned_image_region_max_aspect_ratio,
             set_processing_progress=_set_processing_progress,
             abort_if_cancelled=_abort_if_cancelled,
+            heartbeat=_refresh_job_ttl,
+            heartbeat_interval_s=keepalive_interval_s,
         ).worker_compat_mode
         # Persist final IR so users can inspect what the generator saw.
         ir_path.write_text(
@@ -651,7 +680,8 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         )
 
         # Collect user-facing warnings from IR
-        ir_warnings = ir.get("warnings") if isinstance(ir.get("warnings"), list) else []
+        warnings_obj = ir.get("warnings")
+        ir_warnings: list[Any] = warnings_obj if isinstance(warnings_obj, list) else []
         user_warnings: list[str] = []
         for w in ir_warnings:
             w_str = str(w)
