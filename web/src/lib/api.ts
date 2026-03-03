@@ -37,9 +37,7 @@ function getRuntimeFallbackOrigin(): string {
   const host = String(window.location.hostname || "").trim()
   if (!host || isLoopbackHost(host)) return DEFAULT_FALLBACK_ORIGIN
 
-  const protocol = window.location.protocol === "https:" ? "https:" : "http:"
-  const port = String(process.env.NEXT_PUBLIC_API_PORT || "").trim() || DEFAULT_FALLBACK_PORT
-  return `${protocol}//${host}:${port}`
+  return trimTrailingSlash(window.location.origin || `https://${host}`)
 }
 
 function shouldIgnoreConfiguredLoopbackOrigin(origin: string): boolean {
@@ -113,12 +111,18 @@ export function clearStoredApiOrigin(): void {
 
 function inferAutoCandidates(): string[] {
   const candidates: string[] = []
-  const envPort = String(process.env.NEXT_PUBLIC_API_PORT || "").trim() || DEFAULT_FALLBACK_PORT
-  const ports = uniq([envPort, "8000", "8001"]).filter(Boolean)
 
   if (typeof window !== "undefined") {
     const protocol = window.location.protocol || "http:"
     const host = window.location.hostname || "localhost"
+
+    if (!isLoopbackHost(host)) {
+      candidates.push(trimTrailingSlash(window.location.origin || `${protocol}//${host}`))
+      return uniq(candidates)
+    }
+
+    const envPort = String(process.env.NEXT_PUBLIC_API_PORT || "").trim() || DEFAULT_FALLBACK_PORT
+    const ports = uniq([envPort, "8000", "8001"]).filter(Boolean)
     const hosts = uniq([
       host,
       host === "localhost" ? "127.0.0.1" : "",
@@ -131,11 +135,9 @@ function inferAutoCandidates(): string[] {
       }
     }
 
-    if (isLoopbackHost(host)) {
-      for (const h of ["localhost", "127.0.0.1"]) {
-        for (const p of ports) {
-          candidates.push(`http://${h}:${p}`)
-        }
+    for (const h of ["localhost", "127.0.0.1"]) {
+      for (const p of ports) {
+        candidates.push(`http://${h}:${p}`)
       }
     }
   }

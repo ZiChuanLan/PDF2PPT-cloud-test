@@ -893,7 +893,7 @@ export default function SettingsPage() {
                   </Button>
                 </div>
                 <div className="text-muted-foreground text-xs">
-                  自动模式会探测 `:8000` 与 `:8001`；公开部署可用 `NEXT_PUBLIC_API_URL` 固定地址。
+                  自动模式在公开部署优先使用同源地址；本地开发会探测 `:8000` 与 `:8001`。如需固定地址请设置 `NEXT_PUBLIC_API_URL`。
                 </div>
                 {apiOriginError ? (
                   <div className="text-xs text-destructive">{apiOriginError}</div>
