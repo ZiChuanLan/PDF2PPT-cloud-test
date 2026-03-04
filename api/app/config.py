@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # degrade on others and increases CPU/memory usage. Keep conservative defaults.
     ocr_render_dpi: int = 200
     scanned_render_dpi: int = 200
+    # Parallel workers for text style fitting during PPT generation.
+    # This does not reduce output quality; it only parallelizes CPU-heavy
+    # text measurement/fitting on dense pages.
+    ppt_text_fit_workers: int = 2
     siliconflow_api_key: str | None = None
     siliconflow_base_url: str | None = "https://api.siliconflow.cn/v1"
     siliconflow_model: str | None = "Pro/deepseek-ai/deepseek-ocr"

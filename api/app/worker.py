@@ -661,6 +661,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             output_pptx=output_pptx,
             artifacts_dir=artifacts_dir,
             scanned_render_dpi=int(scanned_render_dpi),
+            ppt_text_fit_workers=int(settings.ppt_text_fit_workers),
             normalized_text_erase_mode=normalized_text_erase_mode,
             normalized_scanned_page_mode=normalized_scanned_page_mode,
             normalized_image_bg_clear_expand_min_pt=normalized_image_bg_clear_expand_min_pt,

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Any
+
 
 def _map_font_name(name: str | None) -> str | None:
     if not name:
@@ -69,7 +71,18 @@ def _char_width_factor(ch: str) -> float:
     # punctuation / symbols
     return 0.38
 
+
 _MEASURE_FONT_CACHE: dict[tuple[int, bool], Any] = {}
+_PT_CACHE_SCALE = 10
+
+
+def _pt_to_cache_key(value_pt: float) -> int:
+    return int(round(max(0.0, float(value_pt)) * float(_PT_CACHE_SCALE)))
+
+
+def _pt_from_cache_key(value_key: int) -> float:
+    return float(max(0, int(value_key))) / float(_PT_CACHE_SCALE)
+
 
 def _try_load_measure_font(*, size_px: int, prefer_cjk: bool) -> Any | None:
     """Load a reasonably representative font for measuring text width.
@@ -119,22 +132,17 @@ def _try_load_measure_font(*, size_px: int, prefer_cjk: bool) -> Any | None:
     return None
 
 
-def _measure_text_width_pt(
+@lru_cache(maxsize=131072)
+def _measure_text_width_cached(
     text: str,
     *,
-    font_size_pt: float,
+    font_size_key: int,
     prefer_cjk: bool,
 ) -> float:
-    """Best-effort text width in the same 'pt-like' space used by bbox_w_pt.
-
-    We treat the font size (pt) as a pixel size at 72 DPI. That keeps ratios
-    consistent and is sufficient for line-break/fit heuristics.
-    """
-
     if not text:
         return 0.0
 
-    font_size_pt = max(1.0, float(font_size_pt))
+    font_size_pt = max(1.0, _pt_from_cache_key(font_size_key))
     font = _try_load_measure_font(
         size_px=int(round(font_size_pt)),
         prefer_cjk=prefer_cjk,
@@ -161,7 +169,57 @@ def _measure_text_width_pt(
     return sum(_char_width_factor(ch) for ch in text) * font_size_pt
 
 
+def _measure_text_width_pt(
+    text: str,
+    *,
+    font_size_pt: float,
+    prefer_cjk: bool,
+) -> float:
+    """Best-effort text width in the same 'pt-like' space used by bbox_w_pt.
+
+    We treat the font size (pt) as a pixel size at 72 DPI. That keeps ratios
+    consistent and is sufficient for line-break/fit heuristics.
+    """
+
+    return _measure_text_width_cached(
+        text,
+        font_size_key=_pt_to_cache_key(max(1.0, float(font_size_pt))),
+        prefer_cjk=bool(prefer_cjk),
+    )
+
+
+@lru_cache(maxsize=65536)
+def _measure_text_lines_cached(
+    text: str,
+    *,
+    max_width_key: int,
+    font_size_key: int,
+    wrap: bool,
+) -> tuple[int, float]:
+    return _measure_text_lines_uncached(
+        text,
+        max_width_pt=max(1.0, _pt_from_cache_key(max_width_key)),
+        font_size_pt=max(1.0, _pt_from_cache_key(font_size_key)),
+        wrap=bool(wrap),
+    )
+
+
 def _measure_text_lines(
+    text: str,
+    *,
+    max_width_pt: float,
+    font_size_pt: float,
+    wrap: bool,
+) -> tuple[int, float]:
+    return _measure_text_lines_cached(
+        text,
+        max_width_key=_pt_to_cache_key(max_width_pt),
+        font_size_key=_pt_to_cache_key(font_size_pt),
+        wrap=bool(wrap),
+    )
+
+
+def _measure_text_lines_uncached(
     text: str,
     *,
     max_width_pt: float,
@@ -263,7 +321,34 @@ def _token_width_pt(token: str, *, font_size_pt: float, prefer_cjk: bool) -> flo
     )
 
 
+@lru_cache(maxsize=65536)
+def _wrap_paragraph_to_lines_cached(
+    para: str,
+    *,
+    max_width_key: int,
+    font_size_key: int,
+) -> tuple[str, ...]:
+    wrapped = _wrap_paragraph_to_lines_uncached(
+        para,
+        max_width_pt=max(1.0, _pt_from_cache_key(max_width_key)),
+        font_size_pt=max(1.0, _pt_from_cache_key(font_size_key)),
+    )
+    return tuple(str(line) for line in wrapped)
+
+
 def _wrap_paragraph_to_lines(
+    para: str, *, max_width_pt: float, font_size_pt: float
+) -> list[str]:
+    return list(
+        _wrap_paragraph_to_lines_cached(
+            para,
+            max_width_key=_pt_to_cache_key(max_width_pt),
+            font_size_key=_pt_to_cache_key(font_size_pt),
+        )
+    )
+
+
+def _wrap_paragraph_to_lines_uncached(
     para: str, *, max_width_pt: float, font_size_pt: float
 ) -> list[str]:
     max_width_pt = max(1.0, float(max_width_pt))
@@ -276,6 +361,8 @@ def _wrap_paragraph_to_lines(
     lines: list[str] = []
     current_tokens: list[str] = []
     current_width = 0.0
+    token_width_cache: dict[str, float] = {}
+    char_width_cache: dict[str, float] = {}
 
     def _flush_current() -> None:
         nonlocal current_tokens, current_width
@@ -288,7 +375,12 @@ def _wrap_paragraph_to_lines(
         current_width = 0.0
 
     for token in tokens:
-        token_w = _token_width_pt(token, font_size_pt=font_size_pt, prefer_cjk=prefer_cjk)
+        token_w = token_width_cache.get(token)
+        if token_w is None:
+            token_w = _token_width_pt(
+                token, font_size_pt=font_size_pt, prefer_cjk=prefer_cjk
+            )
+            token_width_cache[token] = token_w
         if token == " " and not current_tokens:
             continue
 
@@ -309,11 +401,14 @@ def _wrap_paragraph_to_lines(
 
         # Token itself is wider than one line; split by character.
         for ch in token:
-            ch_w = _measure_text_width_pt(
-                ch,
-                font_size_pt=font_size_pt,
-                prefer_cjk=prefer_cjk,
-            )
+            ch_w = char_width_cache.get(ch)
+            if ch_w is None:
+                ch_w = _measure_text_width_pt(
+                    ch,
+                    font_size_pt=font_size_pt,
+                    prefer_cjk=prefer_cjk,
+                )
+                char_width_cache[ch] = ch_w
             if current_width <= 0.0:
                 current_tokens = [ch]
                 current_width = ch_w
@@ -369,9 +464,7 @@ def _wrap_paragraph_to_lines(
     return out if out else [para]
 
 
-def _wrap_text_to_width(
-    text: str, *, max_width_pt: float, font_size_pt: float
-) -> str:
+def _wrap_text_to_width(text: str, *, max_width_pt: float, font_size_pt: float) -> str:
     paragraphs = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     wrapped_lines: list[str] = []
     for para in paragraphs:
@@ -454,8 +547,10 @@ def _fit_font_size_pt(
 
     return max(float(min_pt), min(float(max_pt), round(float(best), 1)))
 
+
 def _compact_text_length(text: str) -> int:
     return len("".join(ch for ch in str(text or "") if not ch.isspace()))
+
 
 def _is_inline_short_token(text: str) -> bool:
     """Heuristic: short parenthetical/label-like token, often not body text."""
@@ -578,7 +673,12 @@ def _fit_mineru_text_style(
     min_body_pt = 6.0
     prefit_font_size_pt: float | None = None
 
-    if is_heading and "\n" not in text_to_fit and (not is_primary_heading) and plain_len >= 14:
+    if (
+        is_heading
+        and "\n" not in text_to_fit
+        and (not is_primary_heading)
+        and plain_len >= 14
+    ):
         single_line_pt = _fit_font_size_pt(
             text_to_fit,
             bbox_w_pt=bbox_w_pt,
@@ -648,7 +748,9 @@ def _fit_mineru_text_style(
                 max_width_pt=wrap_width_pt,
                 font_size_pt=float(font_size_pt),
             )
-            candidate_lines = [line for line in candidate_text.splitlines() if line.strip()]
+            candidate_lines = [
+                line for line in candidate_text.splitlines() if line.strip()
+            ]
             if not candidate_lines:
                 candidate_lines = [text_to_fit]
                 candidate_text = text_to_fit
@@ -797,7 +899,9 @@ def _fit_ocr_text_style(
                 max_width_pt=max(1.0, 1.01 * float(bbox_w_pt)),
                 font_size_pt=float(font_size_pt),
             )
-            candidate_lines = [line for line in candidate_text.splitlines() if line.strip()]
+            candidate_lines = [
+                line for line in candidate_text.splitlines() if line.strip()
+            ]
             if not candidate_lines:
                 candidate_lines = [normalized]
                 candidate_text = normalized
