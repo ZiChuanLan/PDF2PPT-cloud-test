@@ -67,6 +67,16 @@ type JobStatusResponse = {
   error?: { code?: string; message?: string } | null
 }
 
+type JobApiErrorBody = {
+  code?: string
+  message?: string
+} | null
+
+type JobStatusFetchError = Error & {
+  statusCode?: number
+  errorCode?: string
+}
+
 type RunConfig = {
   parseProvider: "local" | "mineru"
   llmProvider: "openai" | "claude"
@@ -472,14 +482,21 @@ export default function Home() {
 
   const fetchJobStatus = React.useCallback(async (targetJobId: string) => {
     const response = await apiFetch(`/jobs/${targetJobId}`)
+    const body = (await response.json().catch(() => null)) as JobApiErrorBody
     if (!response.ok) {
-      throw new Error("查询任务状态失败")
+      const err = new Error(
+        body?.message || `查询任务状态失败（HTTP ${response.status}）`
+      ) as JobStatusFetchError
+      err.statusCode = response.status
+      if (typeof body?.code === "string") {
+        err.errorCode = body.code
+      }
+      throw err
     }
-    const body = (await response.json().catch(() => null)) as JobStatusResponse | null
     if (!body || typeof body !== "object") {
       throw new Error("任务状态响应异常")
     }
-    return body
+    return body as JobStatusResponse
   }, [])
 
   const onDrop = React.useCallback((accepted: File[]) => {
@@ -688,8 +705,21 @@ export default function Home() {
           stopPolling()
           void fetchJobs(true)
         }
-      } catch {
-        // ignore transient polling error
+      } catch (error) {
+        if (!mounted) return
+        const pollingError = error as JobStatusFetchError
+        const isJobNotFound =
+          pollingError?.statusCode === 404 || pollingError?.errorCode === "JOB_NOT_FOUND"
+        if (!isJobNotFound) {
+          return
+        }
+
+        stopPolling()
+        setIsSubmitting(false)
+        setActiveJob(null)
+        setJobId(null)
+        setActionError("任务状态不存在或已过期，请重新提交任务")
+        void fetchJobs(true)
       }
     }
 

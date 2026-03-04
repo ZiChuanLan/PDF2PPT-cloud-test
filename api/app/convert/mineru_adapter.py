@@ -1383,7 +1383,15 @@ class MineruClient:
 
         return (batch_id, upload_url)
 
-    def upload_file(self, *, upload_url: str, file_path: Path) -> None:
+    def upload_file(
+        self,
+        *,
+        upload_url: str,
+        file_path: Path,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> None:
+        if cancel_check is not None:
+            cancel_check()
         try:
             with file_path.open("rb") as f:
                 response = httpx.put(
@@ -1406,6 +1414,9 @@ class MineruClient:
                 details={"status_code": response.status_code},
                 status_code=502,
             )
+
+        if cancel_check is not None:
+            cancel_check()
 
     def poll_batch_result(
         self,
@@ -1473,8 +1484,16 @@ class MineruClient:
 
             time.sleep(max(0.2, float(poll_interval_s)))
 
-    def download_result_zip(self, *, zip_url: str, output_zip: Path) -> None:
+    def download_result_zip(
+        self,
+        *,
+        zip_url: str,
+        output_zip: Path,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> None:
         output_zip.parent.mkdir(parents=True, exist_ok=True)
+        if cancel_check is not None:
+            cancel_check()
         try:
             with httpx.stream(
                 "GET", zip_url, timeout=max(self._timeout, 120.0)
@@ -1482,6 +1501,8 @@ class MineruClient:
                 response.raise_for_status()
                 with output_zip.open("wb") as f:
                     for chunk in response.iter_bytes():
+                        if cancel_check is not None:
+                            cancel_check()
                         if chunk:
                             f.write(chunk)
         except Exception as e:
@@ -1508,7 +1529,7 @@ def parse_pdf_to_ir_with_mineru(
     page_end: int | None = None,
     data_id: str | None = None,
     poll_interval_s: float = 2.0,
-    poll_timeout_s: float = 1200.0,
+    poll_timeout_s: float = 3600.0,
     cancel_check: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     path = Path(pdf_path)
@@ -1530,7 +1551,12 @@ def parse_pdf_to_ir_with_mineru(
     out_dir.mkdir(parents=True, exist_ok=True)
     page_ranges = _parse_page_ranges(page_start=page_start, page_end=page_end)
 
+    def _step_check() -> None:
+        if cancel_check is not None:
+            cancel_check()
+
     client = MineruClient(token=token_cleaned, base_url=base_url)
+    _step_check()
     batch_id, upload_url = client.create_upload_batch(
         file_name=path.name,
         data_id=data_id,
@@ -1551,14 +1577,21 @@ def parse_pdf_to_ir_with_mineru(
         + "\n",
         encoding="utf-8",
     )
+    _step_check()
 
-    client.upload_file(upload_url=upload_url, file_path=path)
+    client.upload_file(
+        upload_url=upload_url,
+        file_path=path,
+        cancel_check=cancel_check,
+    )
+    _step_check()
     result = client.poll_batch_result(
         batch_id=batch_id,
         poll_interval_s=poll_interval_s,
         timeout_s=poll_timeout_s,
         cancel_check=cancel_check,
     )
+    _step_check()
     (out_dir / "batch_result.json").write_text(
         json.dumps(result, ensure_ascii=True, indent=2) + "\n",
         encoding="utf-8",
@@ -1588,12 +1621,19 @@ def parse_pdf_to_ir_with_mineru(
 
     archive_path = out_dir / "result.zip"
     extracted_dir = out_dir / "result"
-    client.download_result_zip(zip_url=zip_url, output_zip=archive_path)
+    client.download_result_zip(
+        zip_url=zip_url,
+        output_zip=archive_path,
+        cancel_check=cancel_check,
+    )
+    _step_check()
 
     extracted_dir.mkdir(parents=True, exist_ok=True)
     try:
+        _step_check()
         with zipfile.ZipFile(archive_path) as zf:
             zf.extractall(extracted_dir)
+        _step_check()
     except Exception as e:
         raise AppException(
             code=ErrorCode.CONVERSION_FAILED,
@@ -1633,6 +1673,7 @@ def parse_pdf_to_ir_with_mineru(
     content_items: list[dict[str, Any]] = []
     best_score: tuple[int, int] = (-1, -1)
     for candidate in content_candidates:
+        _step_check()
         items = _extract_content_items(_load_json(candidate))
         candidate_score = _estimate_content_items_quality(items)
         if candidate_score > best_score:
@@ -1688,6 +1729,7 @@ def parse_pdf_to_ir_with_mineru(
     )
     page_sizes: dict[int, tuple[float, float]] = {}
     if middle_json is not None:
+        _step_check()
         middle_payload = _load_json(middle_json)
         page_sizes = _extract_page_sizes(middle_payload)
     pdf_page_sizes = _extract_pdf_page_sizes(path)
@@ -1696,6 +1738,7 @@ def parse_pdf_to_ir_with_mineru(
         merged_page_sizes.update(pdf_page_sizes)
         page_sizes = merged_page_sizes
 
+    _step_check()
     ir = _build_ir_from_mineru_outputs(
         source_pdf=path,
         content_items=content_items,
@@ -1707,6 +1750,7 @@ def parse_pdf_to_ir_with_mineru(
         mineru_result_dir=extracted_dir,
         mineru_result_path_prefix=f"{out_dir.name}/result",
     )
+    _step_check()
     ir["warnings"] = list(ir.get("warnings") or [])
     ir["warnings"].append(f"mineru_batch_id={batch_id}")
     ir["warnings"].append(f"mineru_content_json={content_json.name}")
