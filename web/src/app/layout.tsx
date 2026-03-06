@@ -4,6 +4,7 @@ import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { Toaster } from "@/components/ui/sonner"
 import { UploadSessionProvider } from "@/components/upload-session-provider"
+import { WorkbenchNav } from "@/components/workbench-nav"
 
 export const metadata: Metadata = {
   title: "PDF 转 PPT",
@@ -28,6 +29,7 @@ export default function RootLayout({
           disableTransitionOnChange
         >
           <UploadSessionProvider>
+            <WorkbenchNav />
             {children}
             <Toaster />
           </UploadSessionProvider>

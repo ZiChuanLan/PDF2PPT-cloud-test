@@ -17,9 +17,18 @@ def _build_ocr_effective_runtime_debug(
     fallback_provider: str | None,
 ) -> dict[str, Any]:
     debug: dict[str, Any] = {
+        "configured_provider": getattr(ocr_manager, "provider_id", None) or fallback_provider or "unknown",
         "runtime_provider": fallback_provider or "unknown",
+        "provider_chain": [],
         "paddle_doc_parser": None,
     }
+
+    try:
+        providers = getattr(ocr_manager, "providers", None)
+        if isinstance(providers, list):
+            debug["provider_chain"] = [type(provider).__name__ for provider in providers]
+    except Exception:
+        pass
 
     try:
         primary_provider = getattr(ocr_manager, "primary_provider", None)
@@ -77,6 +86,13 @@ def _build_ocr_effective_runtime_debug(
         )
         debug["ai_provider_disabled_reason"] = getattr(
             ocr_manager, "ai_provider_disabled_reason", None
+        )
+        debug["last_provider_error"] = getattr(
+            ocr_manager, "last_provider_error", None
+        )
+        quality_notes = getattr(ocr_manager, "last_quality_notes", [])
+        debug["last_quality_notes"] = (
+            list(quality_notes) if isinstance(quality_notes, list) else []
         )
     except Exception:
         pass

@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from app.job_options import LAYOUT_PROVIDER_ALIASES, normalize_layout_provider
 from app.models.error import AppException, ErrorCode
 
 router = APIRouter(prefix="/api/v1/models", tags=["models"])
@@ -78,22 +79,29 @@ def _is_vision_model(model_id: str, item: Any) -> bool:
     return _has_any_pattern(model_id, _VISION_NAME_PATTERNS)
 
 
+def _is_explicit_ocr_model(model_id: str, item: Any) -> bool:
+    # Product rule: the dedicated OCR model picker should only show models that
+    # are *explicitly branded / exposed* as OCR-specialized. Some gateways tag
+    # generic VL models (for example Qwen-VL) with an `ocr` capability, but we
+    # still want those to live under the vision-model picker instead.
+    return _has_any_pattern(model_id, _OCR_NAME_PATTERNS)
+
+
 def _is_ocr_model(model_id: str, item: Any) -> bool:
-    if _has_any_pattern(model_id, _OCR_NAME_PATTERNS):
-        return True
-    modalities = _extract_modalities(item)
-    if "ocr" in modalities:
-        return True
-    # Many vision/VL models can be used for OCR via prompting. Treat them as
-    # OCR-capable so the frontend can pick models like Qwen-VL / GPT-4o for OCR.
-    return _is_vision_model(model_id, item)
+    # OCR capability in product settings now means a *dedicated OCR model*.
+    # Generic vision/VL models remain available via `capability=vision` for
+    # layout assist / OCR post-process use, but should not appear in the
+    # explicit OCR model picker.
+    return _is_explicit_ocr_model(model_id, item)
 
 
 def _model_matches_capability(*, model_id: str, item: Any, capability: str) -> bool:
     if capability == "all":
         return True
     if capability == "vision":
-        return _is_vision_model(model_id, item)
+        return _is_vision_model(model_id, item) and not _is_explicit_ocr_model(
+            model_id, item
+        )
     if capability == "ocr":
         return _is_ocr_model(model_id, item)
     return True
@@ -101,12 +109,18 @@ def _model_matches_capability(*, model_id: str, item: Any, capability: str) -> b
 
 class ModelListRequest(BaseModel):
     provider: str = Field(
-        "openai", description="LLM provider identifier (openai, domestic)"
+        "openai",
+        description="LLM provider identifier (openai, siliconflow, claude, domestic)",
     )
     api_key: str = Field(..., description="API key for the provider")
     base_url: str | None = Field(None, description="Optional OpenAI-compatible base URL")
     capability: str = Field(
-        "all", description="Filter models by capability (all, vision, ocr)"
+        "all",
+        description=(
+            "Filter models by capability "
+            "(all, vision, ocr). `ocr` returns dedicated OCR models only; "
+            "generic VL/vision models are listed under `vision`."
+        ),
     )
 
 
@@ -116,18 +130,20 @@ class ModelListResponse(BaseModel):
 
 @router.post("", response_model=ModelListResponse)
 async def list_models(payload: ModelListRequest):
-    provider = payload.provider.strip().lower()
-    if provider == "claude":
-        raise AppException(
-            code=ErrorCode.VALIDATION_ERROR,
-            message="Model listing is not supported for Claude",
-            status_code=400,
-        )
-    if provider not in {"openai", "domestic"}:
+    raw_provider = payload.provider.strip().lower()
+    if raw_provider and raw_provider not in LAYOUT_PROVIDER_ALIASES:
         raise AppException(
             code=ErrorCode.VALIDATION_ERROR,
             message="Unsupported provider for model listing",
             details={"provider": payload.provider},
+            status_code=400,
+        )
+
+    provider = normalize_layout_provider(payload.provider)
+    if provider == "claude":
+        raise AppException(
+            code=ErrorCode.VALIDATION_ERROR,
+            message="Model listing is not supported for Claude",
             status_code=400,
         )
 

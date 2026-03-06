@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw
 from rq import Queue
 
 from ..config import get_settings
+from ..job_options import validate_and_normalize_job_options
 from ..job_paths import (
     ensure_job_dir as ensure_job_dir_via_paths,
     get_job_dir as get_job_dir_via_paths,
@@ -404,7 +405,8 @@ async def create_job(
         ),
     ),
     provider: str = Form(
-        "openai", description="LLM provider identifier (openai, claude, domestic)"
+        "openai",
+        description="LLM provider identifier (openai, claude, siliconflow, domestic)",
     ),
     api_key: str | None = Form(None, description="Optional API key for AI services"),
     base_url: str | None = Form(
@@ -443,7 +445,7 @@ async def create_job(
     ),
     mineru_hybrid_ocr: bool | None = Form(
         False,
-        description="Enable local hybrid OCR alignment in MinerU mode (no AI text refiner)",
+        description="Deprecated and ignored: MinerU no longer layers local hybrid OCR alignment",
     ),
     ocr_provider: str | None = Form(
         "auto",
@@ -476,8 +478,8 @@ async def create_job(
     ocr_geometry_mode: str | None = Form(
         "auto",
         description=(
-            "OCR geometry mode for aiocr (auto, local_tesseract, direct_ai). "
-            "auto uses local geometry for generic VL models and direct AI geometry for OCR-specialized models."
+            "Deprecated geometry hint for aiocr (auto, local_tesseract, direct_ai). "
+            "Explicit aiocr now always stays on pure AI bbox at runtime."
         ),
     ),
     scanned_page_mode: str | None = Form(
@@ -511,14 +513,14 @@ async def create_job(
     ocr_ai_linebreak_assist: bool | None = Form(
         None,
         description=(
-            "Optional AI visual line-break assist for OCR blocks (split coarse boxes into line-level boxes). "
+            "Optional AI OCR line-break post-process for OCR blocks (split coarse boxes into line-level boxes). "
             "When omitted (null), the backend may auto-enable this for some OCR providers/models."
         ),
     ),
     ocr_strict_mode: bool | None = Form(
-        False,
+        True,
         description=(
-            "Strict OCR quality mode: disable implicit OCR fallbacks/downgrades and fail fast on OCR errors"
+            "Strict OCR quality mode (default on): when enabled, disable implicit OCR fallbacks/downgrades and fail fast on OCR errors"
         ),
     ),
 ):
@@ -530,19 +532,26 @@ async def create_job(
     """
     settings = get_settings()
     redis_service = get_redis_service()
-    parse_provider_id = (parse_provider or "local").strip().lower()
+    normalized_options = validate_and_normalize_job_options(
+        parse_provider=parse_provider,
+        mineru_api_token=mineru_api_token,
+        provider=provider,
+        api_key=api_key,
+        ocr_provider=ocr_provider,
+        ocr_ai_provider=ocr_ai_provider,
+        ocr_ai_api_key=ocr_ai_api_key,
+        ocr_ai_model=ocr_ai_model,
+        ocr_baidu_app_id=ocr_baidu_app_id,
+        ocr_baidu_api_key=ocr_baidu_api_key,
+        ocr_baidu_secret_key=ocr_baidu_secret_key,
+        ocr_geometry_mode=ocr_geometry_mode,
+        text_erase_mode=text_erase_mode,
+        scanned_page_mode=scanned_page_mode,
+        page_start=page_start,
+        page_end=page_end,
+    )
+    parse_provider_id = normalized_options.parse_provider
 
-    if parse_provider_id not in {"local", "mineru", "v2"}:
-        raise AppException(
-            code=ErrorCode.VALIDATION_ERROR,
-            message="Unsupported parse provider",
-            details={"parse_provider": parse_provider},
-        )
-    if parse_provider_id == "mineru" and not (mineru_api_token or "").strip():
-        raise AppException(
-            code=ErrorCode.VALIDATION_ERROR,
-            message="mineru_api_token is required when parse_provider=mineru",
-        )
     if parse_provider_id == "v2":
         has_v2_key = (
             bool((api_key or "").strip())
@@ -604,16 +613,15 @@ async def create_job(
                 kwargs={
                     "job_id": job_id,
                     "enable_ocr": enable_ocr,
-                    "text_erase_mode": text_erase_mode,
                     "enable_layout_assist": enable_layout_assist,
                     "layout_assist_apply_image_regions": layout_assist_apply_image_regions,
-                    "provider": provider,
+                    "provider": normalized_options.provider,
                     "api_key": api_key,
                     "base_url": base_url,
                     "model": model,
                     "page_start": page_start,
                     "page_end": page_end,
-                    "parse_provider": parse_provider_id,
+                    "parse_provider": normalized_options.parse_provider,
                     "mineru_api_token": mineru_api_token,
                     "mineru_base_url": mineru_base_url,
                     "mineru_model_version": mineru_model_version,
@@ -622,18 +630,19 @@ async def create_job(
                     "mineru_language": mineru_language,
                     "mineru_is_ocr": mineru_is_ocr,
                     "mineru_hybrid_ocr": mineru_hybrid_ocr,
-                    "ocr_provider": ocr_provider,
+                    "ocr_provider": normalized_options.ocr_provider,
                     "ocr_baidu_app_id": ocr_baidu_app_id,
                     "ocr_baidu_api_key": ocr_baidu_api_key,
                     "ocr_baidu_secret_key": ocr_baidu_secret_key,
                     "ocr_tesseract_min_confidence": ocr_tesseract_min_confidence,
                     "ocr_tesseract_language": ocr_tesseract_language,
                     "ocr_ai_api_key": ocr_ai_api_key,
-                    "ocr_ai_provider": ocr_ai_provider,
+                    "ocr_ai_provider": normalized_options.ocr_ai_provider,
                     "ocr_ai_base_url": ocr_ai_base_url,
                     "ocr_ai_model": ocr_ai_model,
-                    "ocr_geometry_mode": ocr_geometry_mode,
-                    "scanned_page_mode": scanned_page_mode,
+                    "ocr_geometry_mode": normalized_options.ocr_geometry_mode,
+                    "text_erase_mode": normalized_options.text_erase_mode,
+                    "scanned_page_mode": normalized_options.scanned_page_mode,
                     "image_bg_clear_expand_min_pt": image_bg_clear_expand_min_pt,
                     "image_bg_clear_expand_max_pt": image_bg_clear_expand_max_pt,
                     "image_bg_clear_expand_ratio": image_bg_clear_expand_ratio,
@@ -657,16 +666,15 @@ async def create_job(
                 # and also set the RQ job id to match for easier debugging.
                 job_id,
                 enable_ocr=enable_ocr,
-                text_erase_mode=text_erase_mode,
                 enable_layout_assist=enable_layout_assist,
                 layout_assist_apply_image_regions=layout_assist_apply_image_regions,
-                provider=provider,
+                provider=normalized_options.provider,
                 api_key=api_key,
                 base_url=base_url,
                 model=model,
                 page_start=page_start,
                 page_end=page_end,
-                parse_provider=parse_provider_id,
+                parse_provider=normalized_options.parse_provider,
                 mineru_api_token=mineru_api_token,
                 mineru_base_url=mineru_base_url,
                 mineru_model_version=mineru_model_version,
@@ -675,18 +683,19 @@ async def create_job(
                 mineru_language=mineru_language,
                 mineru_is_ocr=mineru_is_ocr,
                 mineru_hybrid_ocr=mineru_hybrid_ocr,
-                ocr_provider=ocr_provider,
+                ocr_provider=normalized_options.ocr_provider,
                 ocr_baidu_app_id=ocr_baidu_app_id,
                 ocr_baidu_api_key=ocr_baidu_api_key,
                 ocr_baidu_secret_key=ocr_baidu_secret_key,
                 ocr_tesseract_min_confidence=ocr_tesseract_min_confidence,
                 ocr_tesseract_language=ocr_tesseract_language,
                 ocr_ai_api_key=ocr_ai_api_key,
-                ocr_ai_provider=ocr_ai_provider,
+                ocr_ai_provider=normalized_options.ocr_ai_provider,
                 ocr_ai_base_url=ocr_ai_base_url,
                 ocr_ai_model=ocr_ai_model,
-                ocr_geometry_mode=ocr_geometry_mode,
-                scanned_page_mode=scanned_page_mode,
+                ocr_geometry_mode=normalized_options.ocr_geometry_mode,
+                text_erase_mode=normalized_options.text_erase_mode,
+                scanned_page_mode=normalized_options.scanned_page_mode,
                 image_bg_clear_expand_min_pt=image_bg_clear_expand_min_pt,
                 image_bg_clear_expand_max_pt=image_bg_clear_expand_max_pt,
                 image_bg_clear_expand_ratio=image_bg_clear_expand_ratio,
@@ -887,6 +896,8 @@ async def cancel_job(job_id: str):
     redis_service.update_job(
         job_id,
         status=JobStatus.cancelled,
+        stage=job.stage,
+        progress=100,
         message="Job cancellation requested",
     )
 
@@ -907,15 +918,6 @@ async def download_result(job_id: str):
     Only available for completed jobs.
     """
     redis_service = get_redis_service()
-
-    output_path = get_job_dir(job_id) / "output.pptx"
-    if output_path.exists():
-        return FileResponse(
-            path=output_path,
-            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            filename=f"converted_{job_id}.pptx",
-        )
-
     job = redis_service.get_job(job_id)
     if not job:
         raise AppException(
@@ -931,13 +933,20 @@ async def download_result(job_id: str):
             details={"status": job.status},
         )
 
-    # Job metadata exists and indicates completion, but output is missing.
-    if not output_path.exists():
-        raise AppException(
-            code=ErrorCode.INTERNAL_ERROR,
-            message="Output file not found",
-            status_code=500,
+    output_path = get_job_dir(job_id) / "output.pptx"
+    if output_path.exists():
+        return FileResponse(
+            path=output_path,
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            filename=f"converted_{job_id}.pptx",
         )
+
+    # Job metadata exists and indicates completion, but output is missing.
+    raise AppException(
+        code=ErrorCode.INTERNAL_ERROR,
+        message="Output file not found",
+        status_code=500,
+    )
 
 
 @router.get("/{job_id}/artifacts", response_model=JobArtifactsResponse)

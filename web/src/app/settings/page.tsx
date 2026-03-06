@@ -1,8 +1,10 @@
 "use client"
 
 import * as React from "react"
-import Link from "next/link"
-import { ArrowLeftIcon, CheckIcon, KeyRoundIcon } from "lucide-react"
+import {
+  CheckIcon,
+  KeyRoundIcon,
+} from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -10,15 +12,12 @@ import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
 
 import {
+  type LayoutAssistMode,
   SILICONFLOW_BASE_URL,
   SETTINGS_STORAGE_KEY,
   defaultSettings,
@@ -26,6 +25,13 @@ import {
   type OcrAiProvider,
   type Settings,
 } from "@/lib/settings"
+import {
+  applyParseEngineMode,
+  getMainProviderConfig,
+  getOcrConfigSourceLabel,
+  resolveOcrSettingsState,
+  type ParseEngineMode,
+} from "@/lib/run-config"
 import {
   apiFetch,
   clearStoredApiOrigin,
@@ -35,7 +41,7 @@ import {
   setStoredApiOrigin,
 } from "@/lib/api"
 
-type ParseEngineMode = "local_ocr" | "remote_ocr" | "mineru_cloud"
+type SettingsSectionId = "api" | "strategy" | "ocr" | "vision"
 
 const parseEngineOptions: Array<{ id: ParseEngineMode; label: string }> = [
   { id: "local_ocr", label: "本地 OCR" },
@@ -47,6 +53,38 @@ const parseEngineModeLabels: Record<ParseEngineMode, string> = {
   local_ocr: "本地 OCR",
   remote_ocr: "远程 OCR",
   mineru_cloud: "云端 MinerU",
+}
+
+const settingsSectionItems: Array<{
+  id: SettingsSectionId
+  label: string
+  description: string
+}> = [
+  { id: "api", label: "接口配置", description: "密钥、模型与接口地址" },
+  { id: "strategy", label: "处理策略", description: "输出方式与版式选项" },
+  { id: "ocr", label: "OCR 配置", description: "OCR 来源与能力检测" },
+  { id: "vision", label: "版式辅助", description: "页面结构修正与图片区建议" },
+]
+
+function AdvancedReveal({
+  show,
+  children,
+}: {
+  show: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <div
+      aria-hidden={!show}
+      className={`grid transition-[grid-template-rows,opacity,transform] duration-300 ${
+        show
+          ? "grid-rows-[1fr] translate-y-0 opacity-100 ease-out"
+          : "pointer-events-none grid-rows-[0fr] -translate-y-1 opacity-0 ease-in"
+      }`}
+    >
+      <div className="min-h-0 overflow-hidden pt-0.5">{children}</div>
+    </div>
+  )
 }
 
 const aiProviderOptions: Array<{ id: "openai" | "siliconflow" | "claude"; label: string }> = [
@@ -138,6 +176,12 @@ function isOpenAiCompatibleEndpoint(baseUrl: string): boolean {
   return !normalized.includes("api.openai.com")
 }
 
+function isOcrSpecializedModel(modelId: string): boolean {
+  const normalized = modelId.trim().toLowerCase()
+  if (!normalized) return false
+  return normalized.includes("ocr") || normalized.includes("paddleocr") || normalized.includes("mineru")
+}
+
 export default function SettingsPage() {
   const [settings, setSettings] = React.useState<Settings>(defaultSettings)
   const [settingsHydrated, setSettingsHydrated] = React.useState(false)
@@ -199,48 +243,22 @@ export default function SettingsPage() {
     }
   }, [])
 
-  const isMineruProvider = settings.provider === "mineru"
-  const isOcrEnabledForCurrentEngine = isMineruProvider
-    ? settings.mineruHybridOcr
-    : true
-  const hasBaiduCredentials =
-    Boolean(settings.ocrBaiduAppId.trim()) &&
-    Boolean(settings.ocrBaiduApiKey.trim()) &&
-    Boolean(settings.ocrBaiduSecretKey.trim())
-  const canUseAiOcr = !isMineruProvider
-  const selectedOcrProvider: Settings["ocrProvider"] =
-    isMineruProvider
-      ? settings.ocrProvider === "aiocr" ||
-          settings.ocrProvider === "paddle_local"
-        ? "auto"
-        : settings.ocrProvider
-      : settings.ocrProvider === "auto"
-        ? "tesseract"
-        : settings.ocrProvider
-  const parseEngineMode: ParseEngineMode = isMineruProvider
-    ? "mineru_cloud"
-    : (selectedOcrProvider === "aiocr" ||
-        selectedOcrProvider === "baidu")
-      ? "remote_ocr"
-      : "local_ocr"
-  const isRemoteOcrMode = parseEngineMode === "remote_ocr"
-  const isOcrProviderAuto = selectedOcrProvider === "auto"
-  const isOcrProviderAi = selectedOcrProvider === "aiocr"
-  const isOcrProviderPaddleLocal = selectedOcrProvider === "paddle_local"
-  const isOcrProviderBaidu = selectedOcrProvider === "baidu"
-  const isOcrProviderTesseract = selectedOcrProvider === "tesseract"
-  const isAiOcrProviderSelected = isOcrProviderAi || isOcrProviderAuto
-  const needsRequiredOcrAiConfig = !isMineruProvider && isOcrProviderAi
-  const supportsOptionalOcrAiConfig = !isMineruProvider && isOcrProviderAuto
-  const hasAnyOcrAiConfigValue =
-    Boolean(settings.ocrAiApiKey.trim()) ||
-    Boolean(settings.ocrAiBaseUrl.trim()) ||
-    Boolean(settings.ocrAiModel.trim())
-  const shouldExpandOptionalOcrAiConfig =
-    supportsOptionalOcrAiConfig && hasAnyOcrAiConfigValue
-  const shouldShowLocalOcrCheck =
-    !isMineruProvider &&
-    (isOcrProviderAuto || isOcrProviderTesseract || isOcrProviderPaddleLocal)
+  const ocrState = React.useMemo(() => resolveOcrSettingsState(settings), [settings])
+  const isMineruProvider = ocrState.isMineruProvider
+  const isOcrEnabledForCurrentEngine = ocrState.isOcrEnabledForCurrentEngine
+  const canUseAiOcr = ocrState.canUseAiOcr
+  const selectedOcrProvider = ocrState.selectedOcrProvider
+  const parseEngineMode = ocrState.parseEngineMode
+  const currentLayoutAssistMode: LayoutAssistMode = ocrState.currentLayoutAssistMode
+  const isLayoutAssistEnabledForCurrentEngine = ocrState.isLayoutAssistEnabledForCurrentEngine
+  const currentOcrLinebreakAssistMode = ocrState.currentOcrLinebreakAssistMode
+  const canConfigureOcrLinebreakAssist = ocrState.canConfigureOcrLinebreakAssist
+  const isOcrProviderAi = ocrState.isOcrProviderAi
+  const isOcrProviderPaddleLocal = ocrState.isOcrProviderPaddleLocal
+  const isOcrProviderBaidu = ocrState.isOcrProviderBaidu
+  const isOcrProviderTesseract = ocrState.isOcrProviderTesseract
+  const needsRequiredOcrAiConfig = ocrState.needsRequiredOcrAiConfig
+  const shouldShowLocalOcrCheck = ocrState.shouldShowLocalOcrCheck
   const tesseractSuite = localOcrSuite?.tesseract ?? null
   const paddleSuite = localOcrSuite?.paddle ?? null
   const hasTesseractSuite = Boolean(
@@ -257,54 +275,42 @@ export default function SettingsPage() {
   )
   const tesseractSuiteReady = Boolean(tesseractSuite?.runtime?.ok && tesseractSuite?.models?.ok)
   const paddleSuiteReady = Boolean(paddleSuite?.runtime?.ok && paddleSuite?.models?.ok)
-  const shouldShowBaiduConfig = isOcrProviderBaidu || isOcrProviderAuto
-  const shouldShowTesseractConfig = isOcrProviderTesseract || isOcrProviderAuto
-  const shouldShowAiVendorAdapter =
-    canUseAiOcr &&
-    (isOcrProviderAi ||
-      (isOcrProviderAuto && hasAnyOcrAiConfigValue))
+  const shouldShowBaiduConfig = ocrState.shouldShowBaiduConfig
+  const shouldShowTesseractConfig = ocrState.shouldShowTesseractConfig
+  const shouldShowAiVendorAdapter = ocrState.shouldShowAiVendorAdapter
+  const mainConfig = getMainProviderConfig(settings)
   const aiProvider =
-    settings.provider === "claude"
-      ? "claude"
-      : settings.provider === "siliconflow"
-        ? "siliconflow"
-        : "openai"
-  const mainModelsApiKeyRaw =
-    aiProvider === "siliconflow"
-      ? settings.siliconflowApiKey
-      : settings.openaiApiKey
+    settings.provider === "mineru" ? settings.preferredMainProvider : settings.provider
+  const mainModelsApiKeyRaw = mainConfig.apiKey
   const mainModelsBaseUrlRaw =
     aiProvider === "siliconflow"
-      ? (settings.siliconflowBaseUrl || SILICONFLOW_BASE_URL)
-      : settings.openaiBaseUrl
-  const mainModelsSelectedRaw =
-    aiProvider === "siliconflow"
-      ? settings.siliconflowModel
-      : settings.openaiModel
-  const ocrPrimaryApiKey = settings.ocrAiApiKey.trim()
-  const ocrPrimaryBaseUrl = settings.ocrAiBaseUrl.trim()
-  const ocrPrimaryModel = settings.ocrAiModel.trim()
-  const canReuseOcrForMain =
-    !isMineruProvider && aiProvider !== "claude" && Boolean(ocrPrimaryApiKey)
-  const modelsApiKey = mainModelsApiKeyRaw || (canReuseOcrForMain ? ocrPrimaryApiKey : "")
-  const modelsBaseUrl =
-    mainModelsBaseUrlRaw || (canReuseOcrForMain ? ocrPrimaryBaseUrl : "")
-  const modelsSelected =
-    mainModelsSelectedRaw || (canReuseOcrForMain ? ocrPrimaryModel : "")
-  const isMainUsingOcrKeyFallback =
-    !mainModelsApiKeyRaw.trim() && canReuseOcrForMain
+      ? mainConfig.baseUrl || SILICONFLOW_BASE_URL
+      : mainConfig.baseUrl
+  const mainModelsSelectedRaw = mainConfig.model
+  const modelsApiKey = mainModelsApiKeyRaw
+  const modelsBaseUrl = mainModelsBaseUrlRaw
+  const modelsSelected = mainModelsSelectedRaw
   const isCompatGatewayMode =
     !isMineruProvider &&
     aiProvider === "openai" &&
     isOpenAiCompatibleEndpoint(modelsBaseUrl)
-  const aiFeaturesRequested = !isMineruProvider && settings.enableLayoutAssist
-  const canLoadModels =
+  const localOcrAiPostprocessRequested =
     !isMineruProvider &&
+    isOcrEnabledForCurrentEngine &&
+    !isOcrProviderAi &&
+    currentOcrLinebreakAssistMode === "on"
+  const shouldShowVisionModelConfig =
+    isLayoutAssistEnabledForCurrentEngine || localOcrAiPostprocessRequested
+  const layoutAssistRequested =
+    settings.visualAssistModeLocal !== "off" ||
+    settings.visualAssistModeRemote !== "off" ||
+    settings.visualAssistModeMineru !== "off"
+  const canLoadModels =
     aiProvider !== "claude" &&
-    aiFeaturesRequested &&
-    Boolean(modelsApiKey)
-  const ocrModelsApiKey = ocrPrimaryApiKey || mainModelsApiKeyRaw.trim()
-  const ocrModelsBaseUrl = ocrPrimaryBaseUrl || mainModelsBaseUrlRaw
+    Boolean(modelsApiKey) &&
+    (layoutAssistRequested || localOcrAiPostprocessRequested)
+  const ocrModelsApiKey = ocrState.ocrModelsApiKey
+  const ocrModelsBaseUrl = ocrState.ocrModelsBaseUrl
 
   React.useEffect(() => {
     if (!canLoadModels) {
@@ -345,10 +351,11 @@ export default function SettingsPage() {
         const models = Array.isArray(body?.models)
           ? body.models.filter((m: unknown) => typeof m === "string")
           : []
+        const filteredModels = models.filter((model: string) => !isOcrSpecializedModel(model))
 
         if (!mounted) return
-        setModelOptions(models)
-        if (models.length && !models.includes(modelsSelected)) {
+        setModelOptions(filteredModels)
+        if (filteredModels.length && !filteredModels.includes(modelsSelected)) {
           setSettings((prev) =>
             aiProvider === "siliconflow"
               ? { ...prev, siliconflowModel: "" }
@@ -376,14 +383,129 @@ export default function SettingsPage() {
     modelsSelected,
     aiProvider,
     isMineruProvider,
-    aiFeaturesRequested,
+    layoutAssistRequested,
   ])
 
   const canLoadOcrModels =
     canUseAiOcr &&
     isOcrEnabledForCurrentEngine &&
-    isAiOcrProviderSelected &&
+    needsRequiredOcrAiConfig &&
     Boolean(ocrModelsApiKey)
+
+  const visibleSectionItems = React.useMemo(
+    () =>
+      settingsSectionItems.filter(
+        (section) =>
+          (section.id !== "ocr" || isOcrEnabledForCurrentEngine) &&
+          (section.id !== "vision" || showAdvanced)
+      ),
+    [isOcrEnabledForCurrentEngine, showAdvanced]
+  )
+  const observableSectionItems = React.useMemo(
+    () =>
+      visibleSectionItems.filter(
+        (section) => section.id !== "vision" || showAdvanced
+      ),
+    [showAdvanced, visibleSectionItems]
+  )
+  const [activeSection, setActiveSection] = React.useState<SettingsSectionId>("api")
+
+  React.useEffect(() => {
+    if (visibleSectionItems.some((section) => section.id === activeSection)) {
+      return
+    }
+    if (visibleSectionItems.length > 0) {
+      setActiveSection(visibleSectionItems[0].id)
+    }
+  }, [activeSection, visibleSectionItems])
+
+  const selectSection = React.useCallback(
+    (sectionId: SettingsSectionId) => {
+      if (sectionId === "vision" && !showAdvanced) {
+        setShowAdvanced(true)
+      }
+
+      setActiveSection(sectionId)
+      const scrollToTarget = () => {
+        const target = document.getElementById(`settings-section-${sectionId}`)
+        if (!target) return
+        target.scrollIntoView({ behavior: "smooth", block: "start" })
+      }
+      if (sectionId === "vision" && !showAdvanced) {
+        window.setTimeout(scrollToTarget, 180)
+      } else {
+        scrollToTarget()
+      }
+    },
+    [showAdvanced]
+  )
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return
+
+    let ticking = false
+
+    const syncActiveSectionWithScroll = () => {
+      const viewportHeight =
+        window.innerHeight || document.documentElement.clientHeight || 0
+      const activationLine = Math.min(Math.max(viewportHeight * 0.38, 110), 220)
+      const scrolledToBottom =
+        window.scrollY + viewportHeight >= document.documentElement.scrollHeight - 8
+
+      if (scrolledToBottom && observableSectionItems.length > 0) {
+        const bottomSection = observableSectionItems[observableSectionItems.length - 1]
+        setActiveSection((prev) =>
+          prev === bottomSection.id ? prev : bottomSection.id
+        )
+        return
+      }
+
+      let nextActive: SettingsSectionId | null = null
+
+      for (const section of observableSectionItems) {
+        const target = document.getElementById(`settings-section-${section.id}`)
+        if (!target) continue
+        if (target.offsetHeight <= 0) continue
+        const rect = target.getBoundingClientRect()
+
+        if (rect.top <= activationLine) {
+          nextActive = section.id
+          continue
+        }
+
+        if (!nextActive) {
+          nextActive = section.id
+        }
+        break
+      }
+
+      if (!nextActive && observableSectionItems.length > 0) {
+        nextActive = observableSectionItems[0].id
+      }
+
+      if (nextActive) {
+        setActiveSection((prev) => (prev === nextActive ? prev : nextActive))
+      }
+    }
+
+    const onScrollOrResize = () => {
+      if (ticking) return
+      ticking = true
+      window.requestAnimationFrame(() => {
+        ticking = false
+        syncActiveSectionWithScroll()
+      })
+    }
+
+    syncActiveSectionWithScroll()
+    window.addEventListener("scroll", onScrollOrResize, { passive: true })
+    window.addEventListener("resize", onScrollOrResize)
+
+    return () => {
+      window.removeEventListener("scroll", onScrollOrResize)
+      window.removeEventListener("resize", onScrollOrResize)
+    }
+  }, [observableSectionItems])
 
   React.useEffect(() => {
     if (!canLoadOcrModels) {
@@ -630,13 +752,20 @@ export default function SettingsPage() {
   }, [runSingleLocalOcrSuite])
 
   const onCheckAiOcrModel = React.useCallback(async () => {
-    const apiKey = ocrPrimaryApiKey || mainModelsApiKeyRaw.trim()
-    const baseUrl = ocrPrimaryBaseUrl || mainModelsBaseUrlRaw.trim()
+    const apiKey = ocrModelsApiKey.trim()
+    const baseUrl = ocrModelsBaseUrl.trim()
     const model = settings.ocrAiModel.trim()
-    const provider = (settings.ocrAiProvider || "auto").trim() || "auto"
+    const provider =
+      ocrState.ocrModelsConfigSource === "main"
+        ? (mainConfig.ocrAdapter ?? "auto")
+        : (settings.ocrAiProvider || "auto").trim() || "auto"
+    const sourceLabel = getOcrConfigSourceLabel(ocrState.ocrModelsConfigSource)
 
     if (!apiKey) {
-      const message = "请先填写 OCR API Key"
+      const message =
+        needsRequiredOcrAiConfig
+          ? "显式 AI OCR 需要独立 OCR API Key"
+          : `请先补充可用的 OCR AI 配置（当前来源：${sourceLabel}）`
       setAiOcrCheck(null)
       setAiOcrCheckError(message)
       toast.error(message)
@@ -690,171 +819,170 @@ export default function SettingsPage() {
       setAiOcrChecking(false)
     }
   }, [
-    mainModelsApiKeyRaw,
-    mainModelsBaseUrlRaw,
-    ocrPrimaryApiKey,
-    ocrPrimaryBaseUrl,
+    mainConfig.ocrAdapter,
+    needsRequiredOcrAiConfig,
+    ocrModelsApiKey,
+    ocrModelsBaseUrl,
+    ocrState.ocrModelsConfigSource,
     settings.ocrAiModel,
     settings.ocrAiProvider,
   ])
 
-  const [editionDate, setEditionDate] = React.useState("----/--/--")
-
-  React.useEffect(() => {
-    setEditionDate(
-      new Intl.DateTimeFormat("zh-CN", {
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        timeZone: "Asia/Shanghai",
-      }).format(new Date())
-    )
-  }, [])
-
   return (
     <div className="min-h-dvh bg-background">
-      <div className="mx-auto w-full max-w-screen-xl px-4 py-6 md:py-10">
-        <header className="newsprint-texture border border-border bg-background">
-          <div className="grid md:grid-cols-12">
-            <div className="border-b border-border px-4 py-5 md:col-span-9 md:border-b-0 md:border-r md:px-6 md:py-6">
-              <p className="font-mono text-[11px] uppercase tracking-[0.24em] text-neutral-600">
-                第 1 卷 | {editionDate} | 配置专刊
-              </p>
-              <h1 className="mt-3 font-serif text-5xl leading-[0.92] tracking-tight md:text-7xl">
-                设置中心
-              </h1>
-              <p className="drop-cap mt-4 max-w-3xl text-sm leading-relaxed text-justify md:text-base">
-                配置模型提供方、接口密钥与 OCR 策略。设置仅保存在当前浏览器 localStorage。
-              </p>
-            </div>
-
-            <div className="flex flex-col justify-between gap-4 px-4 py-5 md:col-span-3 md:px-6 md:py-6">
+      <div className="mx-auto w-full max-w-[1440px] px-4 py-6 md:px-6 md:py-10">
+        <header className="editorial-page-header newsprint-texture page-enter border border-border bg-background p-5 md:p-6">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 space-y-3">
               <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="outline">本地保存</Badge>
-                <Badge className="border-[#cc0000] bg-[#cc0000] text-[#f9f9f7]">
-                  OCR 可选
+                <div className="font-mono text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                  参数设置
+                </div>
+                <Badge variant="outline" className="font-sans text-[11px] uppercase tracking-[0.12em]">
+                  参数管理
                 </Badge>
               </div>
-
-              <Button asChild variant="outline" className="w-full justify-center">
-                <Link href="/" aria-label="返回上传页">
-                  <ArrowLeftIcon className="size-4" />
-                  返回上传页
-                </Link>
-              </Button>
+              <div>
+                <h1 className="font-serif text-4xl leading-[0.95] tracking-tight md:text-5xl">
+                  处理设置
+                </h1>
+                <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground md:text-base">
+                  在这里管理模型、OCR 和处理策略。设置会保存在当前浏览器，方便下次继续使用。
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline">浏览器保存</Badge>
+              <Badge className="editorial-pill">可选 OCR</Badge>
+              <Badge variant="outline">与首页联动</Badge>
             </div>
           </div>
         </header>
 
-        <Card className="mt-4 border border-border py-0">
-          <CardHeader className="border-b border-border py-5">
-            <CardTitle>接口与处理配置</CardTitle>
-            <CardDescription>
-              先选择处理模式，再配置 OCR 与 AI 参数。配置仅保存在本地浏览器。
-            </CardDescription>
-          </CardHeader>
-
-          <CardContent className="!px-0">
-            <section className="flex flex-col gap-3 border-b border-border p-5">
-              <div className="flex items-center justify-between">
-                <div className="font-sans text-sm font-semibold uppercase tracking-[0.14em]">
-                  解析引擎
+        <div className="page-enter page-enter-delay-1 mt-4 grid gap-4 xl:grid-cols-[15rem_minmax(0,1fr)] xl:gap-6">
+          <aside className="hidden xl:block">
+            <div className="sticky top-24 space-y-1 pr-3">
+              <div className="space-y-1 pt-1">
+                <div className="pl-3 font-sans text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                  设置目录
                 </div>
-                <Badge variant="secondary">
-                  {parseEngineModeLabels[parseEngineMode]}
-                </Badge>
+                <div className="grid gap-1">
+                  {visibleSectionItems.map((section) => {
+                    const active = activeSection === section.id
+                    return (
+                      <button
+                        key={section.id}
+                        type="button"
+                        onClick={() => selectSection(section.id)}
+                        className={`nav-highlight group border-l-2 px-3 py-2.5 text-left ${
+                          active
+                            ? "nav-highlight-active border-primary text-foreground"
+                            : "nav-highlight-inactive border-transparent text-muted-foreground hover:border-border hover:text-foreground"
+                        }`}
+                      >
+                        <div className="text-sm font-medium">{section.label}</div>
+                        <div className="mt-0.5 text-xs opacity-80 transition-colors">
+                          {section.description}
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
               </div>
+            </div>
+          </aside>
 
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-4">
-                {parseEngineOptions.map((p) => (
-                  <Button
-                    key={p.id}
+          <div className="page-enter page-enter-delay-2 min-w-0 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 border border-border bg-background/90 px-3 py-2">
+              <div className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground">
+                配置操作
+              </div>
+              <div className="flex items-center gap-2">
+                {lastSavedAt ? (
+                  <div className="hidden font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground sm:block">
+                    自动保存已开启
+                  </div>
+                ) : null}
+                <Button type="button" variant="outline" size="sm" onClick={onClear}>
+                  清空本地配置
+                </Button>
+                <Button type="button" size="sm" onClick={onSave}>
+                  立即保存
+                </Button>
+              </div>
+            </div>
+
+            <Card className="border border-border py-0 hard-shadow-hover">
+              <CardContent className="grid gap-3 p-5">
+                <div className="flex items-center justify-between">
+                  <div className="font-sans text-sm font-semibold uppercase tracking-[0.14em]">
+                    解析引擎
+                  </div>
+                  <Badge variant="secondary">{parseEngineModeLabels[parseEngineMode]}</Badge>
+                </div>
+
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-4">
+                  {parseEngineOptions.map((p) => (
+                    <Button
+                      key={p.id}
+                      type="button"
+                      variant={p.id === parseEngineMode ? "default" : "outline"}
+                      onClick={() => setSettings((s) => applyParseEngineMode(s, p.id))}
+                      className="justify-center"
+                    >
+                      {p.id === parseEngineMode ? (
+                        <CheckIcon className="size-4" />
+                      ) : (
+                        <KeyRoundIcon className="size-4" />
+                      )}
+                      {p.label}
+                    </Button>
+                  ))}
+                </div>
+
+                <div className="flex items-center justify-between rounded-md border border-border bg-muted/20 px-3 py-2">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-[#111111]"
+                      checked={showAdvanced}
+                      onChange={(e) => setShowAdvanced(e.target.checked)}
+                    />
+                    显示高级设置
+                  </label>
+                  <div className="text-muted-foreground text-xs">
+                    {showAdvanced ? "已展开" : "已折叠"}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <div className="flex items-center gap-2 overflow-x-auto rounded-md border border-border bg-background p-2 xl:hidden">
+              {visibleSectionItems.map((section) => {
+                const active = activeSection === section.id
+                return (
+                  <button
+                    key={section.id}
                     type="button"
-                    variant={p.id === parseEngineMode ? "default" : "outline"}
-                    onClick={() =>
-                      setSettings((s) => {
-                        const hasBaiduCredsInState =
-                          Boolean(s.ocrBaiduAppId.trim()) &&
-                          Boolean(s.ocrBaiduApiKey.trim()) &&
-                          Boolean(s.ocrBaiduSecretKey.trim())
-
-                        if (p.id === "mineru_cloud") {
-                          const nextOcrProvider: Settings["ocrProvider"] =
-                            s.ocrProvider === "aiocr" ||
-                              s.ocrProvider === "paddle_local"
-                              ? hasBaiduCredsInState
-                                ? "baidu"
-                                : "auto"
-                              : s.ocrProvider === "auto" && hasBaiduCredsInState
-                                ? "baidu"
-                                : s.ocrProvider
-                          return {
-                            ...s,
-                            provider: "mineru",
-                            ocrProvider: nextOcrProvider,
-                          }
-                        }
-
-                        if (p.id === "remote_ocr") {
-                          const nextOcrProvider: Settings["ocrProvider"] =
-                            s.ocrProvider === "aiocr" ||
-                              s.ocrProvider === "baidu"
-                              ? s.ocrProvider
-                              : hasBaiduCredsInState
-                                ? "baidu"
-                                : "aiocr"
-                          return {
-                            ...s,
-                            provider:
-                              s.provider === "mineru"
-                                ? "openai"
-                                : s.provider,
-                            ocrProvider: nextOcrProvider,
-                          }
-                        }
-
-                        const nextOcrProvider: Settings["ocrProvider"] =
-                          s.ocrProvider === "paddle_local" ? "paddle_local" : "tesseract"
-                        return {
-                          ...s,
-                          provider:
-                            s.provider === "mineru"
-                              ? "openai"
-                              : s.provider,
-                          ocrProvider: nextOcrProvider,
-                        }
-                      })
-                    }
-                    className="justify-center"
+                    onClick={() => selectSection(section.id)}
+                    className={`shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                      active
+                        ? "border-primary bg-primary/10"
+                        : "border-border bg-background hover:bg-muted/50"
+                    }`}
                   >
-                    {p.id === parseEngineMode ? (
-                      <CheckIcon className="size-4" />
-                    ) : (
-                      <KeyRoundIcon className="size-4" />
-                    )}
-                    {p.label}
-                  </Button>
-                ))}
-              </div>
+                    {section.label}
+                  </button>
+                )
+              })}
+            </div>
 
-              <div className="flex items-center justify-between rounded-md border border-border bg-muted/20 px-3 py-2">
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-[#111111]"
-                    checked={showAdvanced}
-                    onChange={(e) => setShowAdvanced(e.target.checked)}
-                  />
-                  显示高级设置
-                </label>
-                <div className="text-muted-foreground text-xs">
-                  {showAdvanced ? "已展开" : "已折叠"}
-                </div>
-              </div>
-
-            </section>
-
-            <section className="grid gap-4 border-b border-border p-5">
+            <Card className="border border-border py-0">
+              <CardContent className="!px-0">
+            <section
+              id="settings-section-api"
+              className="scroll-mt-24 grid gap-4 border-b border-border p-5"
+            >
               <div className="font-sans text-sm font-semibold uppercase tracking-[0.14em]">
                 接口配置
               </div>
@@ -1036,15 +1164,18 @@ export default function SettingsPage() {
               )}
             </section>
 
-            <section className="grid gap-4 border-b border-border p-5">
+            <section
+              id="settings-section-strategy"
+              className="scroll-mt-24 grid gap-4 border-b border-border p-5"
+            >
               <div className="font-sans text-sm font-semibold uppercase tracking-[0.14em]">
                 处理策略
               </div>
 
               {isMineruProvider ? (
                 <>
-                  {showAdvanced ? (
-                    <div className="grid gap-2">
+                  <AdvancedReveal show={showAdvanced}>
+                    <div className="grid gap-2 pt-1">
                       <label
                         className="text-muted-foreground text-xs"
                         htmlFor="text-erase-mode"
@@ -1067,30 +1198,11 @@ export default function SettingsPage() {
                       <div className="text-muted-foreground text-xs">
                         默认推荐纯色填充，输出更稳定；智能消除保留为实验模式。
                       </div>
-                      {settings.mineruHybridOcr && settings.textEraseMode === "fill" ? (
-                        <div className="border border-amber-500/40 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                          当前为 MinerU 混合 OCR。纯色填充已启用“精细框定位”策略（不再自动切回智能模式），建议先用一页样本确认效果。
-                        </div>
-                      ) : null}
                     </div>
-                  ) : null}
+                  </AdvancedReveal>
 
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 accent-[#111111]"
-                      checked={settings.mineruHybridOcr}
-                      onChange={(e) =>
-                        setSettings((s) => ({
-                          ...s,
-                          mineruHybridOcr: e.target.checked,
-                        }))
-                      }
-                    />
-                    启用混合 OCR 定位（实验）
-                  </label>
                   <div className="text-muted-foreground text-sm">
-                    仅在 MinerU 模式使用本地 OCR 辅助定位，OCR 提供方可在下方单独选择。
+                    MinerU 现在只使用自身解析与 OCR，不再叠加本地/远程 OCR 定位。
                   </div>
                 </>
               ) : (
@@ -1101,8 +1213,8 @@ export default function SettingsPage() {
                 </>
               )}
 
-              {!isMineruProvider && showAdvanced ? (
-                <div className="grid gap-2">
+              <AdvancedReveal show={!isMineruProvider && showAdvanced}>
+                <div className="grid gap-2 pt-1">
                   <label
                     className="text-muted-foreground text-xs"
                     htmlFor="text-erase-mode"
@@ -1126,7 +1238,7 @@ export default function SettingsPage() {
                     默认推荐纯色填充，输出更稳定；智能消除保留为实验模式。
                   </div>
                 </div>
-              ) : null}
+              </AdvancedReveal>
 
               <div className="grid gap-2">
                 <label className="text-muted-foreground text-xs" htmlFor="scanned-page-mode">
@@ -1150,7 +1262,7 @@ export default function SettingsPage() {
                 </div>
               </div>
 
-              {showAdvanced ? (
+              <AdvancedReveal show={showAdvanced}>
                 <div className="grid gap-3 rounded-md border border-border/70 p-3">
                   <div className="flex items-center justify-between gap-2">
                     <div className="font-sans text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
@@ -1297,11 +1409,14 @@ export default function SettingsPage() {
                     建议先使用默认值；仅在出现图片底图残留或图块误判时微调。修改后建议用 1 页样本先验证。
                   </div>
                 </div>
-              ) : null}
+              </AdvancedReveal>
             </section>
 
             {isOcrEnabledForCurrentEngine ? (
-              <section className="grid gap-4 p-5">
+              <section
+                id="settings-section-ocr"
+                className="scroll-mt-24 grid gap-4 p-5"
+              >
               <div className="font-sans text-sm font-semibold uppercase tracking-[0.14em]">
                 OCR 配置
               </div>
@@ -1320,44 +1435,25 @@ export default function SettingsPage() {
                     }))
                   }
                 >
-                  {isRemoteOcrMode ? (
-                    <>
-                      <option value="aiocr">AI OCR（OpenAI 兼容）</option>
-                      <option value="baidu">百度 OCR</option>
-                    </>
-                  ) : parseEngineMode === "local_ocr" ? (
-                    <>
-                      <option value="tesseract">Tesseract（本地）</option>
-                      <option value="paddle_local">PaddleOCR（本地）</option>
-                    </>
-                  ) : (
-                    <>
-                      <option value="auto">自动（推荐）</option>
-                      <option value="baidu">百度 OCR</option>
-                      <option value="tesseract">Tesseract（本地）</option>
-                    </>
-                  )}
+                  {ocrState.availableOcrProviders.map((providerId) => (
+                    <option key={providerId} value={providerId}>
+                      {ocrProviderLabels[providerId]}
+                    </option>
+                  ))}
                 </Select>
-                <div className="text-muted-foreground text-xs">
-                  当前模式：{ocrProviderLabels[selectedOcrProvider]}。
-                  {isOcrProviderAi
-                    ? " 显式 AI OCR 为严格执行：失败即报错，不自动回退。"
-                    : isOcrProviderAuto
-                      ? " 自动模式优先本地 OCR，可选百度。"
-                      : isOcrProviderPaddleLocal
-                        ? " 使用本地 PaddleOCR。"
-                        : isOcrProviderBaidu
-                          ? " 使用百度 OCR。"
-                          : " 使用本地 Tesseract。"}
-                </div>
-              {isMineruProvider && selectedOcrProvider === "auto" && hasBaiduCredentials ? (
                   <div className="text-muted-foreground text-xs">
-                    已检测到百度 OCR 凭证。MinerU 混合 OCR 任务会默认优先使用百度 OCR。
+                    当前模式：{ocrProviderLabels[selectedOcrProvider]}。
+                    {isOcrProviderAi
+                      ? " 显式 AI OCR 只使用专用 OCR 模型本身的识别与 bbox。"
+                      : isOcrProviderPaddleLocal
+                        ? " 使用本地 PaddleOCR；如需 AI 修字/拆行，可在下方开启 AI OCR 后处理。"
+                        : isOcrProviderBaidu
+                          ? " 使用百度 OCR；如需 AI 修字/拆行，可在下方开启 AI OCR 后处理。"
+                          : " 使用本地 Tesseract；如需 AI 修字/拆行，可在下方开启 AI OCR 后处理。"}
                   </div>
-                ) : null}
               </div>
 
-              {showAdvanced ? (
+              <AdvancedReveal show={showAdvanced}>
                 <>
                   <label className="flex items-center gap-2 text-sm">
                     <input
@@ -1371,13 +1467,13 @@ export default function SettingsPage() {
                         }))
                       }
                     />
-                    OCR 严格模式（失败即报错，不自动降级/回退）
+                    OCR 严格模式（默认开启；开启后禁止隐式 OCR provider 回退，初始化/运行失败即报错）
                   </label>
                   <div className="text-muted-foreground text-xs">
-                    关闭后会启用最佳努力策略：失败时允许降级或以图片页继续。
+                    默认开启。关闭后才启用最佳努力策略：允许 provider 降级，或在 OCR 失败时按图片页继续。
                   </div>
                 </>
-              ) : null}
+              </AdvancedReveal>
 
               {shouldShowAiVendorAdapter ? (
                 <div className="grid gap-3">
@@ -1412,10 +1508,15 @@ export default function SettingsPage() {
                 </div>
               ) : null}
 
-              {(needsRequiredOcrAiConfig || shouldExpandOptionalOcrAiConfig) ? (
+              {needsRequiredOcrAiConfig ? (
                 <div className="grid gap-3 border border-border bg-muted/20 p-3">
                   <div className="font-sans text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                    OCR AI 接口参数
+                    专用 OCR 接口参数
+                  </div>
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    <Badge variant="outline">
+                      配置来源：{getOcrConfigSourceLabel(ocrState.ocrModelsConfigSource)}
+                    </Badge>
                   </div>
 
                   <div className="grid gap-2">
@@ -1423,7 +1524,7 @@ export default function SettingsPage() {
                       className="text-muted-foreground text-xs"
                       htmlFor="ocr-ai-api-key"
                     >
-                      OCR API Key（主 Key）
+                      OCR API Key
                     </label>
                     <Input
                       id="ocr-ai-api-key"
@@ -1467,7 +1568,7 @@ export default function SettingsPage() {
                       className="text-muted-foreground text-xs"
                       htmlFor="ocr-ai-model"
                     >
-                      OCR 模型{needsRequiredOcrAiConfig ? "（必填）" : "（可选）"}
+                      专用 OCR 模型（必填）
                     </label>
                     <Select
                       id="ocr-ai-model"
@@ -1496,6 +1597,10 @@ export default function SettingsPage() {
                     {ocrModelError ? (
                       <div className="text-xs text-destructive">{ocrModelError}</div>
                     ) : null}
+                  </div>
+
+                  <div className="text-muted-foreground text-xs">
+                    显式 AI OCR 现在固定走纯 AI OCR 链路，不再混用本地 Tesseract 几何定位；这里仅列专门的 OCR 模型。
                   </div>
 
                   <div className="grid gap-2">
@@ -1539,24 +1644,56 @@ export default function SettingsPage() {
                     ) : null}
                   </div>
 
-                  {isMainUsingOcrKeyFallback ? (
+                  {needsRequiredOcrAiConfig &&
+                  !settings.ocrAiApiKey.trim() &&
+                  Boolean(mainModelsApiKeyRaw.trim()) ? (
                     <div className="text-muted-foreground text-xs">
-                      主 AI Key 为空：主模型拉取与可选 AI 辅助会复用 OCR 主 Key（不影响 OCR Key 生效）。
+                      显式 AI OCR 不再复用主 AI Key。请填写独立 OCR API Key 与 OCR 模型后再执行。
                     </div>
                   ) : null}
 
                 </div>
               ) : null}
 
-              {supportsOptionalOcrAiConfig && !shouldExpandOptionalOcrAiConfig ? (
+              {!showAdvanced && canConfigureOcrLinebreakAssist ? (
                 <div className="text-muted-foreground text-xs">
-                  自动模式下 OCR AI 参数可留空。
+                  AI OCR 后处理属于高级功能，请展开“高级设置”后配置。启用后，非显式 AI OCR 会复用下方视觉模型做文字修正与逐行拆分。
                 </div>
               ) : null}
 
-              {!canUseAiOcr ? null : !isAiOcrProviderSelected ? (
+              <AdvancedReveal show={showAdvanced}>
+                {canConfigureOcrLinebreakAssist ? (
+                  <div className="grid gap-2">
+                    <label
+                      className="text-muted-foreground text-xs"
+                      htmlFor="ocr-ai-linebreak-mode"
+                    >
+                      AI OCR 后处理
+                    </label>
+                    <Select
+                      id="ocr-ai-linebreak-mode"
+                      value={currentOcrLinebreakAssistMode}
+                      onChange={(e) =>
+                        setSettings((s) => ({
+                          ...s,
+                          ocrAiLinebreakAssistMode: e.target.value as Settings["ocrAiLinebreakAssistMode"],
+                        }))
+                      }
+                    >
+                      <option value="auto">自动（显式 AI OCR 推荐）</option>
+                      <option value="on">开启（本地 OCR 也可用）</option>
+                      <option value="off">关闭</option>
+                    </Select>
+                    <div className="text-muted-foreground text-xs">
+                      这是 OCR 后处理，不属于版式辅助。显式 AI OCR：自动模式会按 OCR 模型特性决定是否拆行。非显式 AI OCR：开启后会尽量复用下方视觉模型做文字修正与逐行拆分；若没有可用视觉模型，则退回启发式处理。
+                    </div>
+                  </div>
+                ) : null}
+              </AdvancedReveal>
+
+              {!canUseAiOcr ? null : !needsRequiredOcrAiConfig ? (
                 <div className="text-muted-foreground text-xs">
-                  当前为纯本地 OCR，AI OCR 厂商配置已折叠。
+                  当前链路不需要单独的专用 OCR 模型；如需给本地 OCR 增加 AI 修字/拆行，请开启上面的 AI OCR 后处理，并在下方配置视觉模型。
                 </div>
               ) : null}
 
@@ -1795,28 +1932,44 @@ export default function SettingsPage() {
               </section>
             ) : null}
 
-            {!isMineruProvider && showAdvanced ? (
-              <section className="grid gap-4 border-t border-border p-5">
+            <AdvancedReveal show={showAdvanced}>
+              <section
+                id="settings-section-vision"
+                className="scroll-mt-24 grid gap-4 border-t border-border p-5"
+              >
                 <div className="font-sans text-sm font-semibold uppercase tracking-[0.14em]">
-                  AI 辅助（可选）
+                  AI 视觉辅助
                 </div>
 
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-[#111111]"
-                    checked={settings.enableLayoutAssist}
-                    onChange={(e) =>
-                      setSettings((s) => ({
-                        ...s,
-                        enableLayoutAssist: e.target.checked,
-                      }))
-                    }
-                  />
-                  启用 AI 版式辅助（实验）
-                </label>
-                <div className="text-muted-foreground text-xs">
-                  默认仅优化阅读顺序和表格网格；图片区域建议默认关闭，按需手动开启。
+                <div className="rounded-md border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
+                  当前链路：{parseEngineModeLabels[parseEngineMode]}。这里配置页面结构分析使用的视觉模型；当本地 OCR 开启“AI OCR 后处理”时，也会复用这里的模型做文字修正与拆行。
+                </div>
+
+                <div className="grid gap-2">
+                  <label className="text-muted-foreground text-xs" htmlFor="vision-mode-current">
+                    版式辅助模式
+                  </label>
+                  <Select
+                    id="vision-mode-current"
+                    value={currentLayoutAssistMode}
+                    onChange={(e) => {
+                      const nextMode = e.target.value as LayoutAssistMode
+                      setSettings((s) =>
+                        parseEngineMode === "local_ocr"
+                          ? { ...s, visualAssistModeLocal: nextMode }
+                          : parseEngineMode === "remote_ocr"
+                            ? { ...s, visualAssistModeRemote: nextMode }
+                            : { ...s, visualAssistModeMineru: nextMode }
+                      )
+                    }}
+                  >
+                    <option value="off">关闭（默认）</option>
+                    <option value="on">强制开启</option>
+                    <option value="auto">自动（按模型能力）</option>
+                  </Select>
+                  <div className="text-muted-foreground text-xs">
+                    关闭：禁用当前链路的 AI 版式辅助。强制开启：始终启用版式辅助。自动：由后端按模型能力决定。它不会改变 OCR 提供方，也不会替你切换成另一条 OCR 链路。
+                  </div>
                 </div>
 
                 <label className="flex items-center gap-2 text-sm">
@@ -1824,7 +1977,7 @@ export default function SettingsPage() {
                     type="checkbox"
                     className="h-4 w-4 accent-[#111111]"
                     checked={settings.layoutAssistApplyImageRegions}
-                    disabled={!settings.enableLayoutAssist}
+                    disabled={!isLayoutAssistEnabledForCurrentEngine}
                     onChange={(e) =>
                       setSettings((s) => ({
                         ...s,
@@ -1835,67 +1988,20 @@ export default function SettingsPage() {
                   应用 AI 图片区域建议（高风险实验）
                 </label>
                 <div className="text-muted-foreground text-xs">
-                  开启后可能让图片更干净，也可能误判导致图片缺失；默认关闭更稳妥。
+                  仅当当前链路的版式辅助模式不为“关闭”时生效。开启后可能让图片更干净，也可能误判导致图片缺失；默认关闭更稳妥。
                 </div>
 
-                <div className="grid gap-2">
-                  <label
-                    className="text-muted-foreground text-xs"
-                    htmlFor="ocr-linebreak-assist"
-                  >
-                    OCR 行级拆分辅助（实验）
-                  </label>
-                  <Select
-                    id="ocr-linebreak-assist"
-                    value={settings.ocrAiLinebreakAssistMode}
-                    onChange={(e) =>
-                      setSettings((s) => ({
-                        ...s,
-                        ocrAiLinebreakAssistMode: e.target.value as Settings["ocrAiLinebreakAssistMode"],
-                      }))
-                    }
-                  >
-                    <option value="auto">自动（推荐）</option>
-                    <option value="on">强制开启</option>
-                    <option value="off">强制关闭</option>
-                  </Select>
-                  <div className="text-muted-foreground text-xs">
-                    使用视觉模型辅助判断块内换行，把粗粒度文本框拆为行级文本框，可改善字号、颜色和段落对齐稳定性。自动模式下后端会按 OCR 引擎能力自行决定（例如 AI OCR 场景可自动启用）。
-                  </div>
+                <div className="rounded-md border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
+                  {isMineruProvider
+                    ? "当前为云端 MinerU 链路：这里只控制 AI 版式辅助。"
+                    : "当前为 OCR 链路：这里控制页面结构修正与视觉模型；OCR 识字由 OCR 提供方决定，AI 修字/拆行在 OCR 配置中单独开关。"}
                 </div>
 
-                <div className="grid gap-2">
-                  <label
-                    className="text-muted-foreground text-xs"
-                    htmlFor="ocr-geometry-mode"
-                  >
-                    AI OCR 几何策略（实验）
-                  </label>
-                  <Select
-                    id="ocr-geometry-mode"
-                    value={settings.ocrGeometryMode}
-                    disabled={!isOcrProviderAi}
-                    onChange={(e) =>
-                      setSettings((s) => ({
-                        ...s,
-                        ocrGeometryMode: e.target.value as Settings["ocrGeometryMode"],
-                      }))
-                    }
-                  >
-                    <option value="auto">自动（推荐）</option>
-                    <option value="local_tesseract">强制稳定几何（Tesseract）</option>
-                    <option value="direct_ai">强制原始 AI 几何</option>
-                  </Select>
-                  <div className="text-muted-foreground text-xs">
-                    仅在 OCR 提供方为 AI OCR 时生效。自动模式会对 GPT/Gemini/Qwen 这类通用视觉模型优先使用更稳定的本地几何框，并保留 AI 文本优化能力；若你确认模型本身 bbox 很准，再手动切到“原始 AI 几何”。
-                  </div>
-                </div>
-
-                {settings.enableLayoutAssist ? (
+                {shouldShowVisionModelConfig ? (
                   <>
                     <div className="grid gap-2">
                       <label className="text-muted-foreground text-xs" htmlFor="ai-provider-2">
-                        AI 提供方
+                        视觉模型提供方
                       </label>
                       <Select
                         id="ai-provider-2"
@@ -1903,7 +2009,11 @@ export default function SettingsPage() {
                         onChange={(e) =>
                           setSettings((s) => ({
                             ...s,
-                            provider: e.target.value as "openai" | "siliconflow" | "claude",
+                            preferredMainProvider: e.target.value as "openai" | "siliconflow" | "claude",
+                            provider:
+                              s.provider === "mineru"
+                                ? "mineru"
+                                : (e.target.value as "openai" | "siliconflow" | "claude"),
                           }))
                         }
                       >
@@ -1965,7 +2075,7 @@ export default function SettingsPage() {
                             className="text-muted-foreground text-xs"
                             htmlFor="openai-model"
                           >
-                            OpenAI 兼容模型
+                            OpenAI 兼容视觉模型
                           </label>
                           <Select
                             id="openai-model"
@@ -2041,7 +2151,7 @@ export default function SettingsPage() {
                             className="text-muted-foreground text-xs"
                             htmlFor="siliconflow-model"
                           >
-                            SiliconFlow 模型
+                            SiliconFlow 视觉模型
                           </label>
                           <Select
                             id="siliconflow-model"
@@ -2089,33 +2199,30 @@ export default function SettingsPage() {
                         />
                       </div>
                     )}
+                    {localOcrAiPostprocessRequested ? (
+                      <div className="rounded-md border border-emerald-500/25 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+                        当前 OCR 已开启 AI OCR 后处理：会复用这里的视觉模型做文字修正与逐行拆分；它不改变 OCR 提供方，也不等同于 AI 版式辅助。
+                      </div>
+                    ) : null}
+
+                    {localOcrAiPostprocessRequested && aiProvider === "claude" ? (
+                      <div className="rounded-md border border-amber-500/35 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                        Claude 目前只用于版式辅助，不会参与当前 OCR 链路的 AI 后处理。若要使用 AI 修字/拆行，请切换到 OpenAI 兼容视觉模型提供方。
+                      </div>
+                    ) : null}
                   </>
                 ) : (
                   <div className="text-muted-foreground text-sm">
-                    当前未启用 AI 辅助，已折叠 AI 相关配置。
+                    当前未启用 AI 版式辅助，也未开启本地 OCR 的 AI 后处理，已折叠视觉模型配置。
                   </div>
                 )}
               </section>
-            ) : null}
+            </AdvancedReveal>
           </CardContent>
 
-          <CardFooter className="border-t border-border justify-between gap-3 py-5">
-            <Button type="button" variant="outline" onClick={onClear}>
-              清空本地配置
-            </Button>
-
-            <div className="flex items-center gap-3">
-              {lastSavedAt ? (
-                <div className="hidden font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground sm:block">
-                  自动保存已开启
-                </div>
-              ) : null}
-              <Button type="button" onClick={onSave}>
-                立即保存
-              </Button>
-            </div>
-          </CardFooter>
-        </Card>
+            </Card>
+          </div>
+        </div>
       </div>
     </div>
   )

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from functools import lru_cache
 from typing import Any
 
 
@@ -73,15 +72,6 @@ def _char_width_factor(ch: str) -> float:
 
 
 _MEASURE_FONT_CACHE: dict[tuple[int, bool], Any] = {}
-_PT_CACHE_SCALE = 10
-
-
-def _pt_to_cache_key(value_pt: float) -> int:
-    return int(round(max(0.0, float(value_pt)) * float(_PT_CACHE_SCALE)))
-
-
-def _pt_from_cache_key(value_key: int) -> float:
-    return float(max(0, int(value_key))) / float(_PT_CACHE_SCALE)
 
 
 def _try_load_measure_font(*, size_px: int, prefer_cjk: bool) -> Any | None:
@@ -132,17 +122,22 @@ def _try_load_measure_font(*, size_px: int, prefer_cjk: bool) -> Any | None:
     return None
 
 
-@lru_cache(maxsize=131072)
-def _measure_text_width_cached(
+def _measure_text_width_pt(
     text: str,
     *,
-    font_size_key: int,
+    font_size_pt: float,
     prefer_cjk: bool,
 ) -> float:
+    """Best-effort text width in the same 'pt-like' space used by bbox_w_pt.
+
+    We treat the font size (pt) as a pixel size at 72 DPI. That keeps ratios
+    consistent and is sufficient for line-break/fit heuristics.
+    """
+
     if not text:
         return 0.0
 
-    font_size_pt = max(1.0, _pt_from_cache_key(font_size_key))
+    font_size_pt = max(1.0, float(font_size_pt))
     font = _try_load_measure_font(
         size_px=int(round(font_size_pt)),
         prefer_cjk=prefer_cjk,
@@ -169,57 +164,7 @@ def _measure_text_width_cached(
     return sum(_char_width_factor(ch) for ch in text) * font_size_pt
 
 
-def _measure_text_width_pt(
-    text: str,
-    *,
-    font_size_pt: float,
-    prefer_cjk: bool,
-) -> float:
-    """Best-effort text width in the same 'pt-like' space used by bbox_w_pt.
-
-    We treat the font size (pt) as a pixel size at 72 DPI. That keeps ratios
-    consistent and is sufficient for line-break/fit heuristics.
-    """
-
-    return _measure_text_width_cached(
-        text,
-        font_size_key=_pt_to_cache_key(max(1.0, float(font_size_pt))),
-        prefer_cjk=bool(prefer_cjk),
-    )
-
-
-@lru_cache(maxsize=65536)
-def _measure_text_lines_cached(
-    text: str,
-    *,
-    max_width_key: int,
-    font_size_key: int,
-    wrap: bool,
-) -> tuple[int, float]:
-    return _measure_text_lines_uncached(
-        text,
-        max_width_pt=max(1.0, _pt_from_cache_key(max_width_key)),
-        font_size_pt=max(1.0, _pt_from_cache_key(font_size_key)),
-        wrap=bool(wrap),
-    )
-
-
 def _measure_text_lines(
-    text: str,
-    *,
-    max_width_pt: float,
-    font_size_pt: float,
-    wrap: bool,
-) -> tuple[int, float]:
-    return _measure_text_lines_cached(
-        text,
-        max_width_key=_pt_to_cache_key(max_width_pt),
-        font_size_key=_pt_to_cache_key(font_size_pt),
-        wrap=bool(wrap),
-    )
-
-
-def _measure_text_lines_uncached(
     text: str,
     *,
     max_width_pt: float,
@@ -321,34 +266,7 @@ def _token_width_pt(token: str, *, font_size_pt: float, prefer_cjk: bool) -> flo
     )
 
 
-@lru_cache(maxsize=65536)
-def _wrap_paragraph_to_lines_cached(
-    para: str,
-    *,
-    max_width_key: int,
-    font_size_key: int,
-) -> tuple[str, ...]:
-    wrapped = _wrap_paragraph_to_lines_uncached(
-        para,
-        max_width_pt=max(1.0, _pt_from_cache_key(max_width_key)),
-        font_size_pt=max(1.0, _pt_from_cache_key(font_size_key)),
-    )
-    return tuple(str(line) for line in wrapped)
-
-
 def _wrap_paragraph_to_lines(
-    para: str, *, max_width_pt: float, font_size_pt: float
-) -> list[str]:
-    return list(
-        _wrap_paragraph_to_lines_cached(
-            para,
-            max_width_key=_pt_to_cache_key(max_width_pt),
-            font_size_key=_pt_to_cache_key(font_size_pt),
-        )
-    )
-
-
-def _wrap_paragraph_to_lines_uncached(
     para: str, *, max_width_pt: float, font_size_pt: float
 ) -> list[str]:
     max_width_pt = max(1.0, float(max_width_pt))
@@ -361,8 +279,6 @@ def _wrap_paragraph_to_lines_uncached(
     lines: list[str] = []
     current_tokens: list[str] = []
     current_width = 0.0
-    token_width_cache: dict[str, float] = {}
-    char_width_cache: dict[str, float] = {}
 
     def _flush_current() -> None:
         nonlocal current_tokens, current_width
@@ -375,12 +291,9 @@ def _wrap_paragraph_to_lines_uncached(
         current_width = 0.0
 
     for token in tokens:
-        token_w = token_width_cache.get(token)
-        if token_w is None:
-            token_w = _token_width_pt(
-                token, font_size_pt=font_size_pt, prefer_cjk=prefer_cjk
-            )
-            token_width_cache[token] = token_w
+        token_w = _token_width_pt(
+            token, font_size_pt=font_size_pt, prefer_cjk=prefer_cjk
+        )
         if token == " " and not current_tokens:
             continue
 
@@ -401,14 +314,11 @@ def _wrap_paragraph_to_lines_uncached(
 
         # Token itself is wider than one line; split by character.
         for ch in token:
-            ch_w = char_width_cache.get(ch)
-            if ch_w is None:
-                ch_w = _measure_text_width_pt(
-                    ch,
-                    font_size_pt=font_size_pt,
-                    prefer_cjk=prefer_cjk,
-                )
-                char_width_cache[ch] = ch_w
+            ch_w = _measure_text_width_pt(
+                ch,
+                font_size_pt=font_size_pt,
+                prefer_cjk=prefer_cjk,
+            )
             if current_width <= 0.0:
                 current_tokens = [ch]
                 current_width = ch_w
@@ -598,6 +508,9 @@ def _split_heading_text_after_colon(text: str) -> str:
     if not normalized or "\n" in normalized:
         return normalized
 
+    def _has_ascii_alpha(s: str) -> bool:
+        return any(ch.isascii() and ch.isalpha() for ch in (s or ""))
+
     for sep in ("：", ":"):
         split_at = normalized.find(sep)
         if split_at < 2 or split_at >= (len(normalized) - 2):
@@ -607,6 +520,22 @@ def _split_heading_text_after_colon(text: str) -> str:
         if not left_part or not right_part:
             continue
         if _compact_text_length(right_part) < 2:
+            continue
+        left_has_paren = ("(" in left_part and ")" in left_part) or (
+            "（" in left_part and "）" in left_part
+        )
+        right_has_paren = ("(" in right_part and ")" in right_part) or (
+            "（" in right_part and "）" in right_part
+        )
+        right_has_struct_tail = any(
+            token in right_part for token in ("/", "&", "+", "、")
+        )
+        has_bilingual_signal = _has_ascii_alpha(left_part) or _has_ascii_alpha(
+            right_part
+        )
+        if not left_has_paren:
+            continue
+        if not (right_has_paren or right_has_struct_tail or has_bilingual_signal):
             continue
         return f"{left_part}\n{right_part}"
 
@@ -661,9 +590,15 @@ def _fit_mineru_text_style(
         is_heading and y0_pt <= 0.16 * page_h_pt and bbox_w_pt >= 0.34 * page_w_pt
     )
 
+    source_heading_text = text_to_fit
     if is_heading:
-        text_to_fit = _split_heading_text_after_colon(text_to_fit)
-    plain_len = len(text_to_fit.replace("\n", ""))
+        text_to_fit = " ".join(
+            [
+                line.strip()
+                for line in str(text_to_fit or "").split("\n")
+                if line.strip()
+            ]
+        ).strip()
 
     wrap_for_fit = bool(not is_heading)
     max_body_pt = min(
@@ -671,15 +606,12 @@ def _fit_mineru_text_style(
         max(7.0, (0.98 if is_heading else 0.94) * float(bbox_h_pt)),
     )
     min_body_pt = 6.0
+    line_height = 1.18 if _contains_cjk(text_to_fit or normalized) else 1.15
     prefit_font_size_pt: float | None = None
 
-    if (
-        is_heading
-        and "\n" not in text_to_fit
-        and (not is_primary_heading)
-        and plain_len >= 14
-    ):
-        single_line_pt = _fit_font_size_pt(
+    if is_heading:
+        wrap_for_fit = False
+        prefit_font_size_pt = _fit_font_size_pt(
             text_to_fit,
             bbox_w_pt=bbox_w_pt,
             bbox_h_pt=bbox_h_pt,
@@ -689,32 +621,6 @@ def _fit_mineru_text_style(
             width_fit_ratio=1.00,
             height_fit_ratio=0.995,
         )
-        wrapped_pt = _fit_font_size_pt(
-            text_to_fit,
-            bbox_w_pt=bbox_w_pt,
-            bbox_h_pt=bbox_h_pt,
-            wrap=True,
-            min_pt=min_body_pt,
-            max_pt=max_body_pt,
-            width_fit_ratio=1.03,
-            height_fit_ratio=0.96,
-        )
-        wrapped_lines, _ = _measure_text_lines(
-            text_to_fit,
-            max_width_pt=max(1.0, 1.03 * bbox_w_pt),
-            font_size_pt=float(wrapped_pt),
-            wrap=True,
-        )
-        if (
-            wrapped_lines >= 2
-            and wrapped_lines <= 3
-            and wrapped_pt >= max(single_line_pt + 1.2, 1.18 * single_line_pt)
-        ):
-            wrap_for_fit = True
-            prefit_font_size_pt = float(wrapped_pt)
-        else:
-            wrap_for_fit = False
-            prefit_font_size_pt = float(single_line_pt)
 
     if prefit_font_size_pt is not None:
         font_size_pt = float(prefit_font_size_pt)
@@ -731,7 +637,74 @@ def _fit_mineru_text_style(
         )
 
     text_to_render = text_to_fit
-    if wrap_for_fit:
+    if is_heading:
+        single_line_font_size_pt = float(font_size_pt)
+        single_line_fill_ratio = (
+            float(single_line_font_size_pt) * float(line_height)
+        ) / max(1.0, float(bbox_h_pt))
+        multiline_candidates: list[str] = []
+        seen_multiline_candidates: set[str] = set()
+        for candidate in (
+            _normalize_ocr_text_for_render(source_heading_text),
+            _split_heading_text_after_colon(text_to_fit),
+        ):
+            cleaned_candidate = _normalize_ocr_text_for_render(candidate)
+            if (
+                not cleaned_candidate
+                or "\n" not in cleaned_candidate
+                or cleaned_candidate == text_to_fit
+                or cleaned_candidate in seen_multiline_candidates
+            ):
+                continue
+            seen_multiline_candidates.add(cleaned_candidate)
+            multiline_candidates.append(cleaned_candidate)
+
+        best_multiline_text: str | None = None
+        best_multiline_font_pt = float(single_line_font_size_pt)
+        best_multiline_fill_ratio = float(single_line_fill_ratio)
+
+        for candidate_text in multiline_candidates:
+            candidate_lines = [
+                line for line in candidate_text.splitlines() if line.strip()
+            ]
+            if len(candidate_lines) < 2:
+                continue
+            candidate_font_pt = _fit_font_size_pt(
+                candidate_text,
+                bbox_w_pt=bbox_w_pt,
+                bbox_h_pt=bbox_h_pt,
+                wrap=True,
+                min_pt=min_body_pt,
+                max_pt=max_body_pt,
+                width_fit_ratio=1.02,
+                height_fit_ratio=0.985,
+            )
+            candidate_fill_ratio = (
+                float(len(candidate_lines))
+                * float(candidate_font_pt)
+                * float(line_height)
+            ) / max(1.0, float(bbox_h_pt))
+            if candidate_fill_ratio > 0.995:
+                continue
+            if candidate_font_pt <= (single_line_font_size_pt + 0.6):
+                continue
+            if candidate_fill_ratio <= (single_line_fill_ratio + 0.18):
+                continue
+            if candidate_font_pt <= best_multiline_font_pt:
+                continue
+            best_multiline_text = candidate_text
+            best_multiline_font_pt = float(candidate_font_pt)
+            best_multiline_fill_ratio = float(candidate_fill_ratio)
+
+        if best_multiline_text is not None and (
+            best_multiline_font_pt >= (single_line_font_size_pt * 1.12)
+            or best_multiline_fill_ratio >= (single_line_fill_ratio + 0.24)
+        ):
+            text_to_render = best_multiline_text
+            font_size_pt = float(best_multiline_font_pt)
+            wrap_for_fit = True
+
+    if wrap_for_fit and not (is_heading and "\n" in text_to_render):
         candidate_text = text_to_fit
         for _ in range(12):
             wrap_width_pt = max(
@@ -859,6 +832,51 @@ def _fit_ocr_text_style(
     if not normalized:
         return ("", 6.0, False)
 
+    line_height = 1.18 if _contains_cjk(normalized) else 1.15
+
+    def _fit_wrapped_text(
+        *,
+        seed_font_pt: float,
+        min_pt: float,
+        bbox_w_pt: float,
+        bbox_h_pt: float,
+    ) -> tuple[str, float, int, float]:
+        wrapped_font_pt = float(seed_font_pt)
+        wrapped_text = normalized
+        wrapped_lines_count = 1
+        for _ in range(14):
+            candidate_text = _wrap_text_to_width(
+                normalized,
+                max_width_pt=max(1.0, 1.01 * float(bbox_w_pt)),
+                font_size_pt=float(wrapped_font_pt),
+            )
+            candidate_lines = [
+                line for line in candidate_text.splitlines() if line.strip()
+            ]
+            if not candidate_lines:
+                candidate_lines = [normalized]
+                candidate_text = normalized
+            total_h = (
+                float(len(candidate_lines))
+                * float(wrapped_font_pt)
+                * float(line_height)
+            )
+            wrapped_text = candidate_text
+            wrapped_lines_count = len(candidate_lines)
+            if total_h <= (0.985 * float(bbox_h_pt)):
+                break
+            wrapped_font_pt = max(float(min_pt), float(wrapped_font_pt) - 0.32)
+
+        fill_ratio = (
+            float(wrapped_lines_count) * float(wrapped_font_pt) * float(line_height)
+        ) / max(1.0, float(bbox_h_pt))
+        return (
+            wrapped_text,
+            float(wrapped_font_pt),
+            int(wrapped_lines_count),
+            float(fill_ratio),
+        )
+
     # Headings are usually single-line unless explicit line breaks exist.
     if is_heading and ("\n" not in normalized):
         wrap = False
@@ -893,25 +911,53 @@ def _fit_ocr_text_style(
 
     text_to_render = normalized
     if wrap:
-        for _ in range(14):
-            candidate_text = _wrap_text_to_width(
+        text_to_render, font_size_pt, _line_count, _fill = _fit_wrapped_text(
+            seed_font_pt=float(font_size_pt),
+            min_pt=float(min_pt),
+            bbox_w_pt=float(bbox_w_pt),
+            bbox_h_pt=float(bbox_h_pt),
+        )
+    elif (
+        wrap_override is None
+        and (not is_heading)
+        and ("\n" not in normalized)
+        and len(normalized.replace("\n", "").strip()) >= 16
+    ):
+        # Adaptive fallback: if single-line rendering leaves too much vertical
+        # whitespace, try wrapped fitting and accept it only when it materially
+        # improves box fill (user-reported "上下偏离太远" cases).
+        single_fill = (float(font_size_pt) * float(line_height)) / max(
+            1.0, float(bbox_h_pt)
+        )
+        if single_fill < 0.54:
+            wrapped_seed = _fit_font_size_pt(
                 normalized,
-                max_width_pt=max(1.0, 1.01 * float(bbox_w_pt)),
-                font_size_pt=float(font_size_pt),
+                bbox_w_pt=max(1.0, 1.01 * float(bbox_w_pt)),
+                bbox_h_pt=float(bbox_h_pt),
+                wrap=True,
+                min_pt=float(min_pt),
+                max_pt=float(max_pt),
+                width_fit_ratio=1.02,
+                height_fit_ratio=0.95,
             )
-            candidate_lines = [
-                line for line in candidate_text.splitlines() if line.strip()
-            ]
-            if not candidate_lines:
-                candidate_lines = [normalized]
-                candidate_text = normalized
-            line_height = 1.18 if _contains_cjk(normalized) else 1.15
-            total_h = float(len(candidate_lines)) * float(font_size_pt) * line_height
-            if total_h <= (0.985 * float(bbox_h_pt)):
-                text_to_render = candidate_text
-                break
-            font_size_pt = max(float(min_pt), float(font_size_pt) - 0.32)
-        else:
-            text_to_render = candidate_text if candidate_text else normalized
+            wrapped_text, wrapped_font_pt, wrapped_lines, wrapped_fill = (
+                _fit_wrapped_text(
+                    seed_font_pt=float(wrapped_seed),
+                    min_pt=float(min_pt),
+                    bbox_w_pt=float(bbox_w_pt),
+                    bbox_h_pt=float(bbox_h_pt),
+                )
+            )
+            if (
+                wrapped_lines >= 2
+                and wrapped_fill <= 0.995
+                and (
+                    wrapped_fill >= (single_fill + 0.16)
+                    or wrapped_font_pt >= (float(font_size_pt) * 1.06)
+                )
+            ):
+                wrap = True
+                text_to_render = wrapped_text
+                font_size_pt = float(wrapped_font_pt)
 
     return (text_to_render, float(font_size_pt), bool(wrap))

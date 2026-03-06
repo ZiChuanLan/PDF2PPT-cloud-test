@@ -1,11 +1,25 @@
 "use client"
 
 import * as React from "react"
-import Link from "next/link"
-import { ArrowLeftIcon } from "lucide-react"
+import Image, { type ImageLoader } from "next/image"
 import { useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 
+import {
+  JOB_STAGE_LABELS,
+  JOB_STATUS_LABELS,
+  normalizeJobListResponse,
+  QUEUE_STATE_LABELS,
+  type JobListItem,
+  type JobListResponse,
+  type JobStatusValue,
+} from "@/lib/job-status"
+import {
+  formatArtifactPageLabel,
+  getArtifactPageIndex,
+  normalizeArtifactPages,
+  resolveActiveArtifactPage,
+} from "@/lib/tracking-artifacts"
 import { cn } from "@/lib/utils"
 import { apiFetch, normalizeFetchError, resolveApiOrigin } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
@@ -19,28 +33,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-
-type JobStatusValue = "pending" | "processing" | "completed" | "failed" | "cancelled"
-type JobQueueState = "queued" | "running" | "waiting" | "done"
-
-type JobListItem = {
-  job_id: string
-  status: JobStatusValue
-  stage: string
-  progress: number
-  created_at: string
-  expires_at: string
-  message?: string | null
-  error?: { code?: string; message?: string } | null
-  queue_position?: number | null
-  queue_state?: JobQueueState | string | null
-}
-
-type JobListResponse = {
-  jobs: JobListItem[]
-  queue_size: number
-  returned: number
-}
 
 type JobArtifactImage = {
   page_index: number
@@ -61,33 +53,6 @@ type JobArtifactsResponse = {
   available_pages: number[]
 }
 
-const jobStatusLabels: Record<string, string> = {
-  pending: "排队中",
-  processing: "处理中",
-  completed: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-}
-
-const jobStageLabels: Record<string, string> = {
-  upload_received: "上传接收",
-  queued: "队列等待",
-  parsing: "解析 PDF",
-  ocr: "OCR 识别",
-  layout_assist: "版式辅助",
-  pptx_generating: "生成 PPTX",
-  packaging: "打包",
-  cleanup: "清理",
-  done: "已完成",
-}
-
-const queueStateLabels: Record<string, string> = {
-  queued: "排队中",
-  running: "执行中",
-  waiting: "等待调度",
-  done: "完成",
-}
-
 const jobStatusFilterOptions: Array<{ value: "all" | JobStatusValue; label: string }> = [
   { value: "all", label: "全部状态" },
   { value: "pending", label: "排队中" },
@@ -96,6 +61,8 @@ const jobStatusFilterOptions: Array<{ value: "all" | JobStatusValue; label: stri
   { value: "failed", label: "失败" },
   { value: "cancelled", label: "已取消" },
 ]
+
+const passthroughImageLoader: ImageLoader = ({ src }) => src
 
 function formatDateTime(iso: string) {
   const date = new Date(iso)
@@ -108,6 +75,38 @@ function formatDateTime(iso: string) {
     hour12: false,
     timeZone: "Asia/Shanghai",
   }).format(date)
+}
+
+function getStatusBadgeClass(status: JobStatusValue) {
+  if (status === "completed") return "status-badge status-badge-success"
+  if (status === "failed") return "status-badge status-badge-error"
+  if (status === "cancelled") return "status-badge status-badge-neutral"
+  return "status-badge status-badge-warning"
+}
+
+function TrackingArtifactImage({
+  src,
+  alt,
+  className,
+  priority = false,
+}: {
+  src: string
+  alt: string
+  className?: string
+  priority?: boolean
+}) {
+  return (
+    <Image
+      loader={passthroughImageLoader}
+      unoptimized
+      src={src}
+      alt={alt}
+      fill
+      priority={priority}
+      sizes="(min-width: 1280px) 720px, (min-width: 1024px) 50vw, 100vw"
+      className={className}
+    />
+  )
 }
 
 function TrackingPageContent() {
@@ -125,7 +124,7 @@ function TrackingPageContent() {
   )
   const [trackedArtifactsLoading, setTrackedArtifactsLoading] = React.useState(false)
   const [trackedArtifactsError, setTrackedArtifactsError] = React.useState<string | null>(null)
-  const [trackedArtifactsPage, setTrackedArtifactsPage] = React.useState(1)
+  const [trackedArtifactsPage, setTrackedArtifactsPage] = React.useState<number | null>(null)
   const [trackingMenu, setTrackingMenu] = React.useState<"frames" | "compare">("compare")
   const [compareSplitRatio, setCompareSplitRatio] = React.useState(0.5)
   const [showInlinePdf, setShowInlinePdf] = React.useState(false)
@@ -157,40 +156,9 @@ function TrackingPageContent() {
         throw new Error("加载任务记录失败")
       }
       const body = (await response.json().catch(() => null)) as JobListResponse | null
-      const rows = Array.isArray(body?.jobs) ? body.jobs : []
-      const normalized = rows
-        .map((row) => {
-          if (!row || typeof row !== "object") return null
-          if (typeof row.job_id !== "string" || !row.job_id) return null
-          return {
-            job_id: row.job_id,
-            status: (row.status || "pending") as JobStatusValue,
-            stage: typeof row.stage === "string" ? row.stage : "queued",
-            progress:
-              typeof row.progress === "number"
-                ? Math.max(0, Math.min(100, row.progress))
-                : 0,
-            created_at:
-              typeof row.created_at === "string"
-                ? row.created_at
-                : new Date().toISOString(),
-            expires_at:
-              typeof row.expires_at === "string"
-                ? row.expires_at
-                : new Date().toISOString(),
-            message: typeof row.message === "string" ? row.message : null,
-            error: row.error && typeof row.error === "object" ? row.error : null,
-            queue_position:
-              typeof row.queue_position === "number" ? row.queue_position : null,
-            queue_state: typeof row.queue_state === "string" ? row.queue_state : null,
-          } as JobListItem
-        })
-        .filter((row): row is JobListItem => row !== null)
-
-      setJobRecords(normalized)
-      setQueueSize(
-        typeof body?.queue_size === "number" ? Math.max(0, body.queue_size) : 0
-      )
+      const normalized = normalizeJobListResponse(body)
+      setJobRecords(normalized.jobs)
+      setQueueSize(normalized.queueSize)
       setJobsError(null)
     } catch (e) {
       if (!silent) {
@@ -233,11 +201,7 @@ function TrackingPageContent() {
         layout_after_images: Array.isArray(body.layout_after_images)
           ? body.layout_after_images
           : [],
-        available_pages: Array.isArray(body.available_pages)
-          ? body.available_pages
-              .map((v) => Number(v))
-              .filter((v) => Number.isFinite(v) && v > 0)
-          : [],
+        available_pages: normalizeArtifactPages(body.available_pages),
       })
     } catch (e) {
       setTrackedArtifacts(null)
@@ -292,16 +256,17 @@ function TrackingPageContent() {
   React.useEffect(() => {
     const pages = trackedArtifacts?.available_pages || []
     if (!pages.length) {
-      setTrackedArtifactsPage(1)
+      setTrackedArtifactsPage(null)
       return
     }
-    if (!pages.includes(trackedArtifactsPage)) {
-      setTrackedArtifactsPage(pages[0])
+    if (trackedArtifactsPage === null || !pages.includes(trackedArtifactsPage)) {
+      setTrackedArtifactsPage(pages[0] ?? null)
     }
   }, [trackedArtifacts, trackedArtifactsPage])
 
   const findArtifactByPage = React.useCallback(
-    (images: JobArtifactImage[] | undefined, page: number) => {
+    (images: JobArtifactImage[] | undefined, page: number | null) => {
+      if (page === null) return null
       if (!Array.isArray(images) || !images.length) return null
       return images.find((item) => item.page_index === page) || null
     },
@@ -334,9 +299,9 @@ function TrackingPageContent() {
   const sourcePdfAbsoluteUrl = trackedArtifacts?.source_pdf_url
     ? `${apiOrigin}${trackedArtifacts.source_pdf_url}`
     : null
-  const activeTrackedPage = trackedPages.includes(trackedArtifactsPage)
-    ? trackedArtifactsPage
-    : trackedPages[0] || 1
+  const activeTrackedPage = resolveActiveArtifactPage(trackedPages, trackedArtifactsPage)
+  const activeTrackedPageIndex = getArtifactPageIndex(trackedPages, activeTrackedPage)
+  const activeTrackedPageLabel = formatArtifactPageLabel(activeTrackedPage)
   const trackedOriginal = findArtifactByPage(trackedArtifacts?.original_images, activeTrackedPage)
   const trackedClean = findArtifactByPage(trackedArtifacts?.cleaned_images, activeTrackedPage)
   const trackedFinalPreview = findArtifactByPage(
@@ -366,36 +331,45 @@ function TrackingPageContent() {
   return (
     <div className="min-h-dvh bg-background">
       <div className="mx-auto w-full max-w-screen-xl px-4 py-6 md:py-10">
-        <header className="border border-border bg-background p-5 md:p-6">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <div className="font-mono text-xs uppercase tracking-[0.16em] text-muted-foreground">
-                跟踪中心
+        <header className="editorial-page-header newsprint-texture page-enter border border-border bg-background p-5 md:p-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="min-w-0 space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="font-mono text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                  任务追踪
+                </div>
+                <Badge variant="outline" className="font-sans text-[11px] uppercase tracking-[0.12em]">
+                  结果校验
+                </Badge>
               </div>
-              <h1 className="mt-2 font-serif text-4xl leading-[0.95] md:text-5xl">
-                转换追踪与前后对比
-              </h1>
-              <p className="mt-3 text-sm text-muted-foreground">
-                单独查看任务产物，按页对比原始图与转换完成图。
-              </p>
+              <div>
+                <div className="font-mono text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                  任务记录 / 页面校验 / PDF 回看
+                </div>
+                <h1 className="mt-2 font-serif text-4xl leading-[0.95] md:text-5xl">
+                  任务追踪与结果对比
+                </h1>
+                <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground md:text-base">
+                  在这里查看任务进度、处理结果和逐页对比，方便快速确认输出是否符合预期。
+                </p>
+              </div>
             </div>
-            <Button asChild variant="outline">
-              <Link href="/">
-                <ArrowLeftIcon className="size-4" />
-                返回主页
-              </Link>
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline">任务详情</Badge>
+              <Badge className="editorial-pill">页面对比</Badge>
+              <Badge variant="outline">与首页联动</Badge>
+            </div>
           </div>
         </header>
 
-        <div className="mt-4 grid gap-4 lg:grid-cols-12">
-          <Card className="py-0 lg:col-span-4">
-            <CardHeader className="border-b border-border">
+        <div className="mt-4 grid gap-4 xl:grid-cols-[23rem_minmax(0,1fr)]">
+          <Card className="page-enter page-enter-delay-1 py-0 hard-shadow-hover">
+            <CardHeader className="border-b border-border pt-5 md:pt-6">
               <div className="flex items-center justify-between gap-2">
-                <CardTitle>队列 / 历史记录</CardTitle>
+                <CardTitle>任务列表</CardTitle>
                 <Badge variant="outline">排队 {queueSize}</Badge>
               </div>
-              <CardDescription>支持按状态和任务号筛选，点击后在右侧查看产物追踪。</CardDescription>
+              <CardDescription>可按状态或任务号筛选，选中后在右侧查看结果详情。</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3 py-4">
               <div className="grid gap-2 sm:grid-cols-[1fr_150px]">
@@ -427,38 +401,34 @@ function TrackingPageContent() {
                 <div className="text-xs text-muted-foreground">加载中...</div>
               ) : null}
               {filteredJobRecords.length ? (
-                <div className="max-h-[70vh] overflow-y-auto border">
+                <div className="max-h-[70vh] overflow-y-auto border border-border/80 bg-background/80">
                   {filteredJobRecords.map((record) => {
                     const isCurrent = record.job_id === trackedArtifacts?.job_id
-                    const statusLabel = jobStatusLabels[record.status] || record.status
-                    const stageLabel = jobStageLabels[record.stage] || record.stage
+                    const statusLabel = JOB_STATUS_LABELS[record.status] || record.status
+                    const stageLabel = JOB_STAGE_LABELS[record.stage] || record.stage
                     const detailMessage =
                       (record.status === "failed" &&
                         typeof record.error?.message === "string" &&
                         record.error.message.trim()) ||
                       (typeof record.message === "string" && record.message.trim()) ||
                       null
-                    const badgeTone =
-                      record.status === "completed"
-                        ? "bg-[#d9fbe2] text-[#0f5132]"
-                        : record.status === "failed"
-                          ? "bg-[#ffe9e9] text-[#7d1111]"
-                          : record.status === "cancelled"
-                            ? "bg-[#e5e5e0] text-[#222222]"
-                            : "bg-[#fff3cd] text-[#6b4f00]"
                     return (
                       <div
                         key={record.job_id}
                         className={cn(
-                          "border-b px-3 py-2 last:border-b-0",
-                          isCurrent && "bg-muted"
+                          "border-b px-3 py-2 transition-colors duration-200 last:border-b-0",
+                          isCurrent
+                            ? "bg-secondary/80 shadow-[inset_4px_0_0_0_#111111]"
+                            : "hover:bg-muted/40"
                         )}
                       >
                         <div className="flex items-center justify-between gap-2">
                           <div className="font-mono text-[11px] uppercase tracking-[0.14em]">
                             {record.job_id.slice(0, 8)}
                           </div>
-                          <Badge className={cn("border-0", badgeTone)}>{statusLabel}</Badge>
+                          <Badge className={cn("border-0", getStatusBadgeClass(record.status))}>
+                            {statusLabel}
+                          </Badge>
                         </div>
                         <div className="mt-1 text-xs text-muted-foreground">
                           {stageLabel} · {record.progress}%
@@ -473,7 +443,7 @@ function TrackingPageContent() {
                           </div>
                         ) : record.queue_state ? (
                           <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-                            队列状态：{queueStateLabels[record.queue_state] || record.queue_state}
+                            队列状态：{QUEUE_STATE_LABELS[record.queue_state] || record.queue_state}
                           </div>
                         ) : null}
                         {detailMessage ? (
@@ -520,12 +490,12 @@ function TrackingPageContent() {
             </CardContent>
           </Card>
 
-          <Card className="py-0 lg:col-span-8">
-            <CardHeader className="border-b border-border">
+          <Card className="page-enter page-enter-delay-2 py-0 hard-shadow-hover">
+            <CardHeader className="border-b border-border pt-5 md:pt-6">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <CardTitle>跟踪画面</CardTitle>
-                  <CardDescription>支持按页查看与悬停分割对比</CardDescription>
+                  <CardTitle>结果预览</CardTitle>
+                  <CardDescription>支持逐页查看，也可切换前后对比。</CardDescription>
                 </div>
                 <Badge variant="outline">
                   {trackedArtifacts?.job_id ? trackedArtifacts.job_id.slice(0, 8) : "未选择任务"}
@@ -538,7 +508,7 @@ function TrackingPageContent() {
                   variant={trackingMenu === "frames" ? "default" : "outline"}
                   onClick={() => setTrackingMenu("frames")}
                 >
-                  跟踪画面
+                  逐页预览
                 </Button>
                 <Button
                   type="button"
@@ -546,13 +516,13 @@ function TrackingPageContent() {
                   variant={trackingMenu === "compare" ? "default" : "outline"}
                   onClick={() => setTrackingMenu("compare")}
                 >
-                  前后对比（悬停高亮）
+                  前后对比
                 </Button>
               </div>
               {currentTrackedJob ? (
                 <div className="mt-3 grid gap-1 border border-border bg-muted/40 px-3 py-2">
                   <div className="text-xs text-muted-foreground">
-                    {jobStageLabels[currentTrackedJob.stage] || currentTrackedJob.stage} ·{" "}
+                    {JOB_STAGE_LABELS[currentTrackedJob.stage] || currentTrackedJob.stage} ·{" "}
                     {currentTrackedJob.progress}%
                   </div>
                   {(currentTrackedJob.status === "failed" &&
@@ -576,7 +546,7 @@ function TrackingPageContent() {
                     </div>
                   ) : currentTrackedJob.queue_state ? (
                     <div className="font-mono text-[11px] text-muted-foreground">
-                      队列状态：{queueStateLabels[currentTrackedJob.queue_state] || currentTrackedJob.queue_state}
+                      队列状态：{QUEUE_STATE_LABELS[currentTrackedJob.queue_state] || currentTrackedJob.queue_state}
                     </div>
                   ) : null}
                 </div>
@@ -602,17 +572,18 @@ function TrackingPageContent() {
                   {trackedPages.length ? (
                     <div className="flex flex-wrap items-center gap-2">
                       <div className="font-mono text-xs text-muted-foreground">
-                        第 {activeTrackedPage} 页 / 共 {trackedPages.length} 页
+                        第 {activeTrackedPageLabel} 页 / 共 {trackedPages.length} 页
                       </div>
                       <Button
                         type="button"
                         size="xs"
                         variant="outline"
                         onClick={() => {
-                          const idx = trackedPages.indexOf(activeTrackedPage)
-                          if (idx > 0) setTrackedArtifactsPage(trackedPages[idx - 1])
+                          if (activeTrackedPageIndex > 0) {
+                            setTrackedArtifactsPage(trackedPages[activeTrackedPageIndex - 1] ?? null)
+                          }
                         }}
-                        disabled={activeTrackedPage <= (trackedPages[0] || 1)}
+                        disabled={activeTrackedPageIndex <= 0}
                       >
                         上一页
                       </Button>
@@ -621,12 +592,19 @@ function TrackingPageContent() {
                         size="xs"
                         variant="outline"
                         onClick={() => {
-                          const idx = trackedPages.indexOf(activeTrackedPage)
-                          if (idx >= 0 && idx < trackedPages.length - 1) {
-                            setTrackedArtifactsPage(trackedPages[idx + 1])
+                          if (
+                            activeTrackedPageIndex >= 0 &&
+                            activeTrackedPageIndex < trackedPages.length - 1
+                          ) {
+                            setTrackedArtifactsPage(
+                              trackedPages[activeTrackedPageIndex + 1] ?? null
+                            )
                           }
                         }}
-                        disabled={activeTrackedPage >= (trackedPages[trackedPages.length - 1] || 1)}
+                        disabled={
+                          activeTrackedPageIndex < 0 ||
+                          activeTrackedPageIndex >= trackedPages.length - 1
+                        }
                       >
                         下一页
                       </Button>
@@ -669,23 +647,24 @@ function TrackingPageContent() {
                         <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
                           原始 PDF（悬停显示识别框）
                         </div>
-                        <div className="group relative overflow-hidden border bg-[#1e1e1e]">
+                        <div className="panel-contrast group relative min-h-[22rem] overflow-hidden border sm:min-h-[28rem]">
                           {trackedOriginal ? (
-                            <img
+                            <TrackingArtifactImage
                               src={`${apiOrigin}${trackedOriginal.url}`}
-                              alt={`原始第 ${activeTrackedPage} 页`}
-                              className="block h-auto w-full"
+                              alt={`原始第 ${activeTrackedPageLabel} 页`}
+                              className="object-contain"
+                              priority
                             />
                           ) : (
-                            <div className="grid h-52 place-items-center text-xs text-[#e5e5e0]">
+                            <div className="grid h-52 place-items-center text-xs text-white/80">
                               暂无原始页图
                             </div>
                           )}
                           {trackedBeforeOverlay ? (
-                            <img
+                            <TrackingArtifactImage
                               src={`${apiOrigin}${trackedBeforeOverlay.url}`}
-                              alt={`第 ${activeTrackedPage} 页识别框`}
-                              className="pointer-events-none absolute inset-0 h-full w-full object-contain opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                              alt={`第 ${activeTrackedPageLabel} 页识别框`}
+                              className="pointer-events-none object-contain opacity-0 transition-opacity duration-200 group-hover:opacity-100"
                             />
                           ) : null}
                         </div>
@@ -695,29 +674,31 @@ function TrackingPageContent() {
                         <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
                           转换完成图（悬停显示后处理框）
                         </div>
-                        <div className="group relative overflow-hidden border bg-[#1e1e1e]">
+                        <div className="panel-contrast group relative min-h-[22rem] overflow-hidden border sm:min-h-[28rem]">
                           {trackedAfterOverlay ? (
-                            <img
+                            <TrackingArtifactImage
                               src={`${apiOrigin}${trackedAfterOverlay.url}`}
-                              alt={`第 ${activeTrackedPage} 页转换对比`}
-                              className="block h-auto w-full"
+                              alt={`第 ${activeTrackedPageLabel} 页转换对比`}
+                              className="object-contain"
+                              priority
                             />
                           ) : trackedOriginal ? (
-                            <img
+                            <TrackingArtifactImage
                               src={`${apiOrigin}${trackedOriginal.url}`}
-                              alt={`第 ${activeTrackedPage} 页原图`}
-                              className="block h-auto w-full"
+                              alt={`第 ${activeTrackedPageLabel} 页原图`}
+                              className="object-contain"
+                              priority
                             />
                           ) : (
-                            <div className="grid h-52 place-items-center text-xs text-[#e5e5e0]">
+                            <div className="grid h-52 place-items-center text-xs text-white/80">
                               暂无转换对比图
                             </div>
                           )}
                           {trackedLayoutAfter ? (
-                            <img
+                            <TrackingArtifactImage
                               src={`${apiOrigin}${trackedLayoutAfter.url}`}
-                              alt={`第 ${activeTrackedPage} 页后处理框`}
-                              className="pointer-events-none absolute inset-0 h-full w-full object-contain opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                              alt={`第 ${activeTrackedPageLabel} 页后处理框`}
+                              className="pointer-events-none object-contain opacity-0 transition-opacity duration-200 group-hover:opacity-100"
                             />
                           ) : null}
                         </div>
@@ -734,52 +715,65 @@ function TrackingPageContent() {
                         <Badge variant="outline">分割线 {compareSplitPercent}%</Badge>
                       </div>
                       <div
-                        className="group relative overflow-hidden border bg-[#101010]"
+                        className="panel-contrast-strong group relative min-h-[24rem] overflow-hidden border sm:min-h-[30rem]"
                         onMouseMove={handleComparePointerMove}
                         onTouchStart={handleCompareTouchMove}
                         onTouchMove={handleCompareTouchMove}
                       >
                         {trackedCompareBase ? (
-                          <img
+                          <TrackingArtifactImage
                             src={`${apiOrigin}${trackedCompareBase.url}`}
-                            alt={`第 ${activeTrackedPage} 页对比底图`}
-                            className="block h-auto w-full"
+                            alt={`第 ${activeTrackedPageLabel} 页对比底图`}
+                            className="object-contain"
+                            priority
                           />
                         ) : (
-                          <div className="grid h-64 place-items-center text-sm text-[#e5e5e0]">
+                          <div className="grid h-64 place-items-center text-sm text-white/80">
                             暂无可用于对比的图片
                           </div>
                         )}
 
                         {trackedCompareAfter ? (
-                          <img
-                            src={`${apiOrigin}${trackedCompareAfter.url}`}
-                            alt={`第 ${activeTrackedPage} 页转换后`}
-                            className="pointer-events-none absolute inset-0 h-full w-full object-contain transition-[clip-path] duration-75"
+                          <div
+                            className="pointer-events-none absolute inset-0 transition-[clip-path] duration-150 ease-out"
                             style={{ clipPath: `inset(0 0 0 ${compareSplitPercent}%)` }}
-                          />
+                          >
+                            <TrackingArtifactImage
+                              src={`${apiOrigin}${trackedCompareAfter.url}`}
+                              alt={`第 ${activeTrackedPageLabel} 页转换后`}
+                              className="object-contain"
+                            />
+                          </div>
                         ) : null}
 
                         {trackedBeforeOverlay ? (
-                          <img
-                            src={`${apiOrigin}${trackedBeforeOverlay.url}`}
-                            alt={`第 ${activeTrackedPage} 页转换前高亮`}
-                            className="pointer-events-none absolute inset-0 h-full w-full object-contain opacity-45"
+                          <div
+                            className="pointer-events-none absolute inset-0"
                             style={{ clipPath: `inset(0 ${100 - compareSplitPercent}% 0 0)` }}
-                          />
+                          >
+                            <TrackingArtifactImage
+                              src={`${apiOrigin}${trackedBeforeOverlay.url}`}
+                              alt={`第 ${activeTrackedPageLabel} 页转换前高亮`}
+                              className="object-contain opacity-45"
+                            />
+                          </div>
                         ) : null}
 
                         {trackedLayoutAfter && trackedCompareAfter?.path !== trackedLayoutAfter.path ? (
-                          <img
-                            src={`${apiOrigin}${trackedLayoutAfter.url}`}
-                            alt={`第 ${activeTrackedPage} 页转换后高亮`}
-                            className="pointer-events-none absolute inset-0 h-full w-full object-contain opacity-60"
+                          <div
+                            className="pointer-events-none absolute inset-0"
                             style={{ clipPath: `inset(0 0 0 ${compareSplitPercent}%)` }}
-                          />
+                          >
+                            <TrackingArtifactImage
+                              src={`${apiOrigin}${trackedLayoutAfter.url}`}
+                              alt={`第 ${activeTrackedPageLabel} 页转换后高亮`}
+                              className="object-contain opacity-60"
+                            />
+                          </div>
                         ) : null}
 
                         <div
-                          className="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-[#ffe082]"
+                          className="compare-divider pointer-events-none absolute inset-y-0 z-20 w-0.5"
                           style={{ left: `${compareSplitPercent}%` }}
                         />
                         <div className="pointer-events-none absolute left-2 top-2 z-20 border bg-black/50 px-2 py-1 font-mono text-[11px] text-white">

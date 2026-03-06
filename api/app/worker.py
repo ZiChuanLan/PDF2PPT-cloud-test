@@ -18,6 +18,15 @@ import redis
 from rq import Connection, Queue, Worker
 
 from .config import get_settings
+from .job_options import (
+    LAYOUT_PROVIDER_ALIASES,
+    normalize_ai_ocr_provider,
+    normalize_layout_provider,
+    normalize_parse_provider,
+    normalize_requested_ocr_provider,
+    normalize_scanned_page_mode,
+    normalize_text_erase_mode,
+)
 from .job_paths import get_job_dir
 from .convert.mineru_adapter import parse_pdf_to_ir_with_mineru
 from .convert.pdf_parser import parse_pdf_to_ir
@@ -29,7 +38,6 @@ from .models.job import JobStage, JobStatus
 from .services.redis_service import get_redis_service
 from .utils.text import clean_str
 from .worker_helpers import (
-    _apply_mineru_hybrid_ocr_alignment,
     build_ocr_debug_payload,
     run_layout_assist_stage,
     run_ocr_stage,
@@ -55,7 +63,15 @@ def _select_layout_assist_provider(
     ocr_ai_base_url: str | None,
     ocr_ai_model: str | None,
 ) -> OpenAiProvider | AnthropicProvider | None:
-    provider_id = (clean_str(provider) or "openai").lower()
+    raw_provider = (clean_str(provider) or "").lower()
+    if raw_provider and raw_provider not in LAYOUT_PROVIDER_ALIASES:
+        raise AppException(
+            code=ErrorCode.VALIDATION_ERROR,
+            message="Unsupported layout assist provider",
+            details={"provider": provider},
+            status_code=400,
+        )
+    provider_id = normalize_layout_provider(provider)
 
     # Primary: main AI credentials.
     key = clean_str(api_key)
@@ -135,7 +151,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
     scanned_image_region_max_area_ratio: float | None = None,
     scanned_image_region_max_aspect_ratio: float | None = None,
     ocr_ai_linebreak_assist: bool | None = None,
-    ocr_strict_mode: bool | None = False,
+    ocr_strict_mode: bool | None = True,
     job_timeout: str | None = None,
 ) -> None:
     """RQ job handler: process a single PDF-to-PPT conversion job."""
@@ -228,17 +244,8 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             )
         return selected
 
-    normalized_text_erase_mode = (clean_str(text_erase_mode) or "fill").lower()
-    if normalized_text_erase_mode not in {"smart", "fill"}:
-        normalized_text_erase_mode = "fill"
-
-    normalized_scanned_page_mode = (clean_str(scanned_page_mode) or "fullpage").lower()
-    if normalized_scanned_page_mode in {"chunk", "chunked", "split", "blocks"}:
-        normalized_scanned_page_mode = "segmented"
-    if normalized_scanned_page_mode in {"page", "full", "full_page"}:
-        normalized_scanned_page_mode = "fullpage"
-    if normalized_scanned_page_mode not in {"segmented", "fullpage"}:
-        normalized_scanned_page_mode = "segmented"
+    normalized_text_erase_mode = normalize_text_erase_mode(text_erase_mode)
+    normalized_scanned_page_mode = normalize_scanned_page_mode(scanned_page_mode)
 
     def _normalize_float(
         value: float | None,
@@ -318,7 +325,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 status_code=400,
             )
 
-        parse_provider_id = (clean_str(parse_provider) or "local").lower()
+        parse_provider_id = normalize_parse_provider(parse_provider)
         if parse_provider_id not in {"local", "mineru", "v2"}:
             raise AppException(
                 code=ErrorCode.VALIDATION_ERROR,
@@ -369,6 +376,14 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
 
         def _refresh_job_ttl() -> None:
             redis_service.refresh_job_ttl(job_id)
+
+        def _write_ocr_debug_artifact(payload: dict[str, Any]) -> None:
+            ocr_dir = artifacts_dir / "ocr"
+            ocr_dir.mkdir(parents=True, exist_ok=True)
+            (ocr_dir / "ocr_debug.json").write_text(
+                json.dumps(payload, ensure_ascii=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
 
         _set_processing_progress(
             JobStage.parsing,
@@ -474,50 +489,19 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         )
         _abort_if_cancelled(stage=JobStage.parsing, message="Job cancelled")
 
-        if parse_provider_id == "mineru" and bool(mineru_hybrid_ocr):
-            _set_processing_progress(
-                JobStage.ocr,
-                26,
-                "正在执行 MinerU 混合 OCR 定位…",
-            )
-            _abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
-            ir = _apply_mineru_hybrid_ocr_alignment(
-                ir,
-                source_pdf=input_pdf,
-                artifacts_dir=artifacts_dir,
-                ocr_render_dpi=int(ocr_render_dpi),
-                ocr_provider=ocr_provider,
-                ocr_baidu_app_id=ocr_baidu_app_id,
-                ocr_baidu_api_key=ocr_baidu_api_key,
-                ocr_baidu_secret_key=ocr_baidu_secret_key,
-                ocr_tesseract_min_confidence=ocr_tesseract_min_confidence,
-                ocr_tesseract_language=ocr_tesseract_language,
-                ocr_ai_provider=ocr_ai_provider,
-                ocr_strict_mode=bool(
-                    False if ocr_strict_mode is None else ocr_strict_mode
-                ),
-            )
-            _abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
-            _set_processing_progress(
-                JobStage.ocr,
-                32,
-                "MinerU 混合 OCR 定位完成",
-            )
-            (job_path / "ir.mineru_hybrid_ocr.json").write_text(
-                json.dumps(ir, ensure_ascii=True, indent=2) + "\n",
-                encoding="utf-8",
-            )
-
-        # For pages without text layer, only run local OCR when no OCR output
-        # already exists in IR (for example from an external parser like MinerU).
+        # For pages without text layer, run the OCR stage only for the local
+        # pipeline. MinerU now stays on its own OCR/parse path and no longer
+        # layers an extra OCR pass on top.
         scanned_pages_exist = any(
             isinstance(page, dict)
             and not page.get("has_text_layer")
             and not page.get("ocr_used")
             for page in (ir.get("pages") or [])
         )
-        should_attempt_ocr = scanned_pages_exist and (
-            bool(enable_ocr) or bool(enable_layout_assist)
+        should_attempt_ocr = (
+            parse_provider_id != "mineru"
+            and scanned_pages_exist
+            and (bool(enable_ocr) or bool(enable_layout_assist))
         )
         ocr_setup = None
         ocr_manager = None
@@ -525,17 +509,16 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         linebreak_refiner = None
         linebreak_enabled = False
         auto_linebreak_enabled = False
-        effective_ocr_provider = (clean_str(ocr_provider) or "auto").lower()
-        effective_ocr_ai_provider = (clean_str(ocr_ai_provider) or "auto").lower()
-        if effective_ocr_ai_provider in {"openai_compatible", "openai-compatible"}:
-            effective_ocr_ai_provider = "openai"
+        ocr_debug_payload: dict[str, Any] | None = None
+        effective_ocr_provider = normalize_requested_ocr_provider(ocr_provider)
+        effective_ocr_ai_provider = normalize_ai_ocr_provider(ocr_ai_provider)
         effective_ocr_ai_base_url = clean_str(ocr_ai_base_url)
         effective_ocr_ai_model = clean_str(ocr_ai_model)
         effective_tesseract_language = (
             clean_str(ocr_tesseract_language) or "chi_sim+eng"
         )
         effective_tesseract_min_conf: float | None = None
-        strict_ocr_mode = bool(False if ocr_strict_mode is None else ocr_strict_mode)
+        strict_ocr_mode = bool(True if ocr_strict_mode is None else ocr_strict_mode)
 
         if not scanned_pages_exist:
             _set_processing_progress(
@@ -593,6 +576,14 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             strict_ocr_mode = ocr_setup.strict_ocr_mode
             linebreak_enabled = ocr_setup.linebreak_enabled
             auto_linebreak_enabled = ocr_setup.auto_linebreak_enabled
+            ocr_debug_payload = build_ocr_debug_payload(
+                provider_requested=(ocr_provider or "auto"),
+                ocr_render_dpi=int(ocr_render_dpi),
+                scanned_render_dpi=int(scanned_render_dpi),
+                ocr_ai_linebreak_assist=ocr_ai_linebreak_assist,
+                setup=ocr_setup,
+            )
+            ocr_debug_payload["env_PATH"] = os.environ.get("PATH")
 
             if ocr_setup.setup_warning:
                 logger.warning(
@@ -601,22 +592,45 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 ir.setdefault("warnings", []).append(
                     f"ocr_setup_failed_best_effort: error={ocr_setup.setup_warning}"
                 )
+            if (
+                ocr_ai_linebreak_assist is True
+                and ocr_setup.linebreak_enabled
+                and ocr_setup.linebreak_mode != "ai_refiner"
+            ):
+                ir.setdefault("warnings", []).append(
+                    "ocr_linebreak_assist_heuristic_only:"
+                    f" mode={ocr_setup.linebreak_mode}"
+                    f" reason={ocr_setup.linebreak_unavailable_reason or 'ai_refiner_unavailable'}"
+                )
 
             if ocr_manager is None:
+                if ocr_debug_payload is not None:
+                    ocr_debug_payload["runtime"] = {
+                        "configured_provider": ocr_setup.effective_ocr_provider,
+                        "runtime_provider": "unavailable",
+                        "provider_chain": [],
+                        "setup_warning": ocr_setup.setup_warning,
+                    }
+                    ocr_debug_payload["pages"] = []
+                    ocr_debug_payload["page_runtime_summary"] = {
+                        "provider_counts": {},
+                        "distinct_provider_count": 0,
+                        "pages_with_elements": 0,
+                        "pages_with_errors": 0,
+                        "fallback_pages": 0,
+                        "fallback_reason_counts": {},
+                        "ai_provider_disabled": False,
+                        "ai_provider_disabled_reason": None,
+                    }
+                    _write_ocr_debug_artifact(ocr_debug_payload)
                 # No OCR possible; continue conversion as image-only.
                 scanned_pages_exist = False
 
         if scanned_pages_exist and should_attempt_ocr and ocr_manager:
             if ocr_setup is None:
                 raise RuntimeError("internal error: OCR runtime setup missing")
-            ocr_debug = build_ocr_debug_payload(
-                provider_requested=(ocr_provider or "auto"),
-                ocr_render_dpi=int(ocr_render_dpi),
-                scanned_render_dpi=int(scanned_render_dpi),
-                ocr_ai_linebreak_assist=ocr_ai_linebreak_assist,
-                setup=ocr_setup,
-            )
-            ocr_debug["env_PATH"] = os.environ.get("PATH")
+            if ocr_debug_payload is None:
+                raise RuntimeError("internal error: OCR debug payload missing")
             linebreak_assist_effective = (
                 False
                 if ocr_ai_linebreak_assist is False
@@ -635,7 +649,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 strict_no_fallback=bool(strict_ocr_mode),
                 effective_ocr_provider=effective_ocr_provider,
                 ocr_render_dpi=int(ocr_render_dpi),
-                ocr_debug=ocr_debug,
+                ocr_debug=ocr_debug_payload,
                 set_processing_progress=_set_processing_progress,
                 abort_if_cancelled=_abort_if_cancelled,
             )
@@ -661,7 +675,6 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             output_pptx=output_pptx,
             artifacts_dir=artifacts_dir,
             scanned_render_dpi=int(scanned_render_dpi),
-            ppt_text_fit_workers=int(settings.ppt_text_fit_workers),
             normalized_text_erase_mode=normalized_text_erase_mode,
             normalized_scanned_page_mode=normalized_scanned_page_mode,
             normalized_image_bg_clear_expand_min_pt=normalized_image_bg_clear_expand_min_pt,
@@ -692,6 +705,18 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 user_warnings.append("部分页面 OCR 失败，已降级为图片模式")
             elif "ocr_empty_result" in w_str:
                 user_warnings.append("部分页面 OCR 未识别到文字")
+            elif "ocr_linebreak_assist_heuristic_only" in w_str:
+                user_warnings.append("OCR 行拆分未使用 AI 模型，已改为启发式模式")
+            elif "ocr_page_provider_switches" in w_str:
+                user_warnings.append("OCR 在任务内发生了 provider 切换，请检查调试产物")
+            elif "ocr_page_fallbacks" in w_str:
+                user_warnings.append("部分页面 OCR 发生了回退，请检查调试产物")
+            elif "ocr_ai_provider_disabled" in w_str:
+                user_warnings.append("AI OCR 在任务中途被停用，后续页面改走本地链路")
+            elif "paddle_vl_sparse_slide_layout" in w_str:
+                user_warnings.append(
+                    "PaddleOCR-VL 当前页识别结果偏粗，可能漏掉流程图小字；这类页面更建议用 DeepSeek OCR / Qwen"
+                )
             elif "layout_assist_status=failed" in w_str:
                 user_warnings.append("AI 版式辅助失败，使用原始布局")
             elif "layout_assist_status=skipped_missing_provider" in w_str:

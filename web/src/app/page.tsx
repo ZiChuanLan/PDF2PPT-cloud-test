@@ -8,8 +8,6 @@ import {
   ChevronRightIcon,
   DownloadIcon,
   FileTextIcon,
-  ListChecksIcon,
-  Settings2Icon,
   UploadCloudIcon,
   XCircleIcon,
 } from "lucide-react"
@@ -18,7 +16,29 @@ import { toast } from "sonner"
 
 import { cn } from "@/lib/utils"
 import { apiFetch, normalizeFetchError } from "@/lib/api"
-import { SILICONFLOW_BASE_URL, defaultSettings, loadStoredSettings, type Settings } from "@/lib/settings"
+import { defaultSettings, loadStoredSettings, type Settings } from "@/lib/settings"
+import {
+  createJobFormData,
+  getOcrConfigSourceLabel,
+  getRunModelLabel,
+  resolveRunConfig,
+  validateRunConfig,
+} from "@/lib/run-config"
+import {
+  getJobStageFlowStage,
+  getJobStageFlowIndex,
+  JOB_STAGE_COMPACT_LABELS,
+  JOB_STAGE_FLOW,
+  JOB_STAGE_LABELS,
+  JOB_STATUS_LABELS,
+  normalizeJobListResponse,
+  normalizeJobStatusResponse,
+  TERMINAL_JOB_STATUSES,
+  type JobListItem,
+  type JobListResponse,
+  type JobStatusResponse,
+  type JobStatusValue,
+} from "@/lib/job-status"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -34,39 +54,6 @@ import { Progress } from "@/components/ui/progress"
 import { PdfCanvasPreview } from "@/components/pdf-canvas-preview"
 import { useUploadSession } from "@/components/upload-session-provider"
 
-type JobStatusValue = "pending" | "processing" | "completed" | "failed" | "cancelled"
-type JobQueueState = "queued" | "running" | "waiting" | "done"
-
-type JobListItem = {
-  job_id: string
-  status: JobStatusValue
-  stage: string
-  progress: number
-  created_at: string
-  expires_at: string
-  message?: string | null
-  error?: { code?: string; message?: string } | null
-  queue_position?: number | null
-  queue_state?: JobQueueState | string | null
-}
-
-type JobListResponse = {
-  jobs: JobListItem[]
-  queue_size: number
-  returned: number
-}
-
-type JobStatusResponse = {
-  job_id: string
-  status: JobStatusValue
-  stage: string
-  progress: number
-  created_at: string
-  expires_at: string
-  message?: string | null
-  error?: { code?: string; message?: string } | null
-}
-
 type JobApiErrorBody = {
   code?: string
   message?: string
@@ -77,76 +64,32 @@ type JobStatusFetchError = Error & {
   errorCode?: string
 }
 
-type RunConfig = {
-  parseProvider: "local" | "mineru"
-  llmProvider: "openai" | "claude"
-  mainApiKey: string
-  mainBaseUrl: string
-  mainModel: string
-  effectiveOcrProvider: string
-  effectiveOcrAiKey: string
-  effectiveOcrAiBaseUrl: string
-  effectiveOcrAiModel: string
-  effectiveOcrAiProvider: string
+const parseProviderLabels: Record<"local" | "mineru", string> = {
+  local: "本地",
+  mineru: "MinerU",
 }
 
-type ValidationResult = {
-  ok: boolean
-  message?: string
+const ocrProviderLabels: Record<Settings["ocrProvider"], string> = {
+  auto: "自动",
+  aiocr: "AI OCR",
+  baidu: "百度 OCR",
+  tesseract: "Tesseract",
+  paddle_local: "PaddleOCR",
 }
 
-const TERMINAL_STATUSES = new Set<JobStatusValue>(["completed", "failed", "cancelled"])
-
-const jobStatusLabels: Record<JobStatusValue, string> = {
-  pending: "排队中",
-  processing: "处理中",
-  completed: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
+const layoutAssistModeLabels: Record<"off" | "on" | "auto", string> = {
+  off: "关闭",
+  on: "开启",
+  auto: "自动",
 }
 
-const jobStageLabels: Record<string, string> = {
-  upload_received: "上传接收",
-  queued: "队列等待",
-  parsing: "解析 PDF",
-  ocr: "OCR 识别",
-  layout_assist: "版式辅助",
-  pptx_generating: "生成 PPTX",
-  packaging: "打包",
-  cleanup: "清理",
-  done: "已完成",
+const ocrLinebreakModeLabels: Record<Settings["ocrAiLinebreakAssistMode"], string> = {
+  auto: "自动",
+  on: "开启",
+  off: "关闭",
 }
 
-const jobStageFlow = [
-  "queued",
-  "parsing",
-  "ocr",
-  "layout_assist",
-  "pptx_generating",
-  "packaging",
-  "done",
-] as const
-
-const homeTickerItems = [
-  "结构优先：先排版，再装饰",
-  "单任务单状态：避免多重反馈噪音",
-  "高级配置全部收敛到设置页",
-  "跟踪中心负责可观测性与排障",
-]
 const HOME_ACTIVE_JOB_STORAGE_KEY = "ppt-opencode:home:active-job-id"
-
-function toJobStatusResponse(row: JobListItem): JobStatusResponse {
-  return {
-    job_id: row.job_id,
-    status: row.status,
-    stage: row.stage,
-    progress: row.progress,
-    created_at: row.created_at,
-    expires_at: row.expires_at,
-    message: row.message ?? null,
-    error: row.error ?? null,
-  }
-}
 
 function formatDateTime(iso: string) {
   const date = new Date(iso)
@@ -169,97 +112,6 @@ function formatBytes(bytes: number) {
   return `${value.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`
 }
 
-function getMainProviderConfig(settings: Settings) {
-  if (settings.provider === "siliconflow") {
-    return {
-      provider: "openai" as const,
-      apiKey: settings.siliconflowApiKey.trim(),
-      baseUrl: settings.siliconflowBaseUrl.trim() || SILICONFLOW_BASE_URL,
-      model: settings.siliconflowModel.trim(),
-    }
-  }
-  if (settings.provider === "claude") {
-    return {
-      provider: "claude" as const,
-      apiKey: settings.claudeApiKey.trim(),
-      baseUrl: "",
-      model: "",
-    }
-  }
-  return {
-    provider: "openai" as const,
-    apiKey: settings.openaiApiKey.trim(),
-    baseUrl: settings.openaiBaseUrl.trim(),
-    model: settings.openaiModel.trim(),
-  }
-}
-
-function resolveRunConfig(settings: Settings): RunConfig {
-  const parseProvider: RunConfig["parseProvider"] =
-    settings.provider === "mineru" ? "mineru" : "local"
-  const main = getMainProviderConfig(settings)
-  const canReuseMainForOcr = Boolean(main.apiKey) && main.provider === "openai"
-
-  const rawOcrProvider = (settings.ocrProvider || "auto").trim().toLowerCase()
-  const effectiveOcrProvider =
-    parseProvider === "mineru"
-      ? (rawOcrProvider === "aiocr" ? "auto" : rawOcrProvider)
-      : rawOcrProvider
-
-  const effectiveOcrAiKey =
-    settings.ocrAiApiKey.trim() || (canReuseMainForOcr ? main.apiKey : "")
-  const effectiveOcrAiBaseUrl =
-    settings.ocrAiBaseUrl.trim() || (canReuseMainForOcr ? main.baseUrl : "")
-  const effectiveOcrAiModel =
-    settings.ocrAiModel.trim() || (canReuseMainForOcr ? main.model : "")
-  const effectiveOcrAiProvider = (settings.ocrAiProvider || "auto").trim() || "auto"
-
-
-  return {
-    parseProvider,
-    llmProvider: main.provider,
-    mainApiKey: main.apiKey,
-    mainBaseUrl: main.baseUrl,
-    mainModel: main.model,
-    effectiveOcrProvider,
-    effectiveOcrAiKey,
-    effectiveOcrAiBaseUrl,
-    effectiveOcrAiModel,
-    effectiveOcrAiProvider,
-  }
-}
-
-function validateBeforeRun(settings: Settings): ValidationResult {
-  const run = resolveRunConfig(settings)
-
-  if (run.parseProvider === "mineru" && !settings.mineruApiToken.trim()) {
-    return { ok: false, message: "当前为 MinerU 解析，请先在设置页填写 MinerU API Token。" }
-  }
-
-  if (run.parseProvider === "local") {
-    if (run.effectiveOcrProvider === "baidu") {
-      const ok =
-        Boolean(settings.ocrBaiduAppId.trim()) &&
-        Boolean(settings.ocrBaiduApiKey.trim()) &&
-        Boolean(settings.ocrBaiduSecretKey.trim())
-      if (!ok) {
-        return {
-          ok: false,
-          message: "当前 OCR 提供方为百度，请在设置页补全 app_id / api_key / secret_key。",
-        }
-      }
-    }
-
-    if (run.effectiveOcrProvider === "aiocr") {
-      if (!run.effectiveOcrAiKey) {
-        return { ok: false, message: "当前 OCR 需要 AI Key，请在设置页补充 OCR API Key。" }
-      }
-    }
-  }
-
-  return { ok: true }
-}
-
 function toIntOrUndefined(value: string): number | undefined {
   const trimmed = value.trim()
   if (!trimmed) return undefined
@@ -274,129 +126,6 @@ function clampPositiveInt(value: number, max?: number) {
   const normalized = Number.isFinite(value) ? Math.max(1, Math.floor(value)) : 1
   if (!max || max <= 0) return normalized
   return Math.min(normalized, max)
-}
-
-function toFiniteFloatStringOrUndefined(value: string): string | undefined {
-  const trimmed = value.trim()
-  if (!trimmed) return undefined
-  const n = Number(trimmed)
-  if (!Number.isFinite(n)) return undefined
-  return String(n)
-}
-
-function createFormData(
-  file: File,
-  settings: Settings,
-  pageStart?: number,
-  pageEnd?: number
-): FormData {
-  const run = resolveRunConfig(settings)
-  const form = new FormData()
-
-  form.append("file", file)
-  form.append("parse_provider", run.parseProvider)
-  form.append("provider", run.llmProvider)
-
-  if (run.mainApiKey) form.append("api_key", run.mainApiKey)
-  if (run.mainBaseUrl) form.append("base_url", run.mainBaseUrl)
-  if (run.mainModel) form.append("model", run.mainModel)
-
-  form.append("enable_layout_assist", String(Boolean(settings.enableLayoutAssist)))
-  form.append(
-    "layout_assist_apply_image_regions",
-    String(Boolean(settings.layoutAssistApplyImageRegions))
-  )
-  form.append("enable_ocr", String(Boolean(settings.enableOcr)))
-  form.append("text_erase_mode", settings.textEraseMode)
-  form.append("scanned_page_mode", settings.scannedPageMode)
-  const imageBgClearExpandMinPt = toFiniteFloatStringOrUndefined(settings.imageBgClearExpandMinPt)
-  const imageBgClearExpandMaxPt = toFiniteFloatStringOrUndefined(settings.imageBgClearExpandMaxPt)
-  const imageBgClearExpandRatio = toFiniteFloatStringOrUndefined(settings.imageBgClearExpandRatio)
-  const scannedImageRegionMinAreaRatio = toFiniteFloatStringOrUndefined(
-    settings.scannedImageRegionMinAreaRatio
-  )
-  const scannedImageRegionMaxAreaRatio = toFiniteFloatStringOrUndefined(
-    settings.scannedImageRegionMaxAreaRatio
-  )
-  const scannedImageRegionMaxAspectRatio = toFiniteFloatStringOrUndefined(
-    settings.scannedImageRegionMaxAspectRatio
-  )
-  if (imageBgClearExpandMinPt) {
-    form.append("image_bg_clear_expand_min_pt", imageBgClearExpandMinPt)
-  }
-  if (imageBgClearExpandMaxPt) {
-    form.append("image_bg_clear_expand_max_pt", imageBgClearExpandMaxPt)
-  }
-  if (imageBgClearExpandRatio) {
-    form.append("image_bg_clear_expand_ratio", imageBgClearExpandRatio)
-  }
-  if (scannedImageRegionMinAreaRatio) {
-    form.append("scanned_image_region_min_area_ratio", scannedImageRegionMinAreaRatio)
-  }
-  if (scannedImageRegionMaxAreaRatio) {
-    form.append("scanned_image_region_max_area_ratio", scannedImageRegionMaxAreaRatio)
-  }
-  if (scannedImageRegionMaxAspectRatio) {
-    form.append("scanned_image_region_max_aspect_ratio", scannedImageRegionMaxAspectRatio)
-  }
-  form.append("ocr_strict_mode", String(Boolean(settings.ocrStrictMode)))
-
-  if (run.parseProvider === "mineru") {
-    form.append("mineru_api_token", settings.mineruApiToken.trim())
-    form.append("mineru_model_version", settings.mineruModelVersion)
-    form.append("mineru_enable_formula", String(Boolean(settings.mineruEnableFormula)))
-    form.append("mineru_enable_table", String(Boolean(settings.mineruEnableTable)))
-    form.append("mineru_is_ocr", String(Boolean(settings.mineruIsOcr)))
-    form.append("mineru_hybrid_ocr", String(Boolean(settings.mineruHybridOcr)))
-    if (settings.mineruBaseUrl.trim()) form.append("mineru_base_url", settings.mineruBaseUrl.trim())
-    if (settings.mineruLanguage.trim()) form.append("mineru_language", settings.mineruLanguage.trim())
-  }
-
-  if (run.parseProvider === "local") {
-    form.append("ocr_provider", run.effectiveOcrProvider)
-
-    const shouldAttachOcrAiParams =
-      run.effectiveOcrProvider === "aiocr" ||
-      Boolean(settings.ocrAiLinebreakAssistMode === "on" && run.effectiveOcrAiKey) ||
-      Boolean(settings.enableLayoutAssist && run.effectiveOcrAiKey)
-    if (shouldAttachOcrAiParams) {
-      if (run.effectiveOcrAiKey) form.append("ocr_ai_api_key", run.effectiveOcrAiKey)
-      if (run.effectiveOcrAiBaseUrl) form.append("ocr_ai_base_url", run.effectiveOcrAiBaseUrl)
-      if (run.effectiveOcrAiModel) form.append("ocr_ai_model", run.effectiveOcrAiModel)
-      form.append("ocr_ai_provider", run.effectiveOcrAiProvider)
-    }
-    if (settings.ocrAiLinebreakAssistMode === "on") {
-      form.append("ocr_ai_linebreak_assist", "true")
-    } else if (settings.ocrAiLinebreakAssistMode === "off") {
-      form.append("ocr_ai_linebreak_assist", "false")
-    }
-    if (run.effectiveOcrProvider === "aiocr") {
-      form.append("ocr_geometry_mode", settings.ocrGeometryMode)
-    }
-
-    if (run.effectiveOcrProvider === "baidu") {
-      form.append("ocr_baidu_app_id", settings.ocrBaiduAppId.trim())
-      form.append("ocr_baidu_api_key", settings.ocrBaiduApiKey.trim())
-      form.append("ocr_baidu_secret_key", settings.ocrBaiduSecretKey.trim())
-    }
-
-    if (run.effectiveOcrProvider === "tesseract" || run.effectiveOcrProvider === "auto") {
-      if (settings.ocrTesseractLanguage.trim()) {
-        form.append("ocr_tesseract_language", settings.ocrTesseractLanguage.trim())
-      }
-      const minConf = Number(settings.ocrTesseractMinConfidence)
-      if (Number.isFinite(minConf)) {
-        form.append("ocr_tesseract_min_confidence", String(minConf))
-      }
-    }
-  }
-
-  if (pageStart && pageEnd) {
-    form.append("page_start", String(pageStart))
-    form.append("page_end", String(pageEnd))
-  }
-
-  return form
 }
 
 export default function Home() {
@@ -435,15 +164,11 @@ export default function Home() {
   })
 
   const runConfig = React.useMemo(() => resolveRunConfig(settingsSnapshot), [settingsSnapshot])
-  const runModelLabel = React.useMemo(() => {
-    if (runConfig.parseProvider === "local" && runConfig.effectiveOcrProvider !== "aiocr") {
-      if (settingsSnapshot.ocrAiLinebreakAssistMode === "on" && runConfig.effectiveOcrAiModel) {
-        return `${runConfig.effectiveOcrAiModel}（仅用于行级拆分辅助）`
-      }
-      return "本地 OCR（无需远程模型）"
-    }
-    return runConfig.effectiveOcrAiModel || runConfig.mainModel || "未设置"
-  }, [runConfig, settingsSnapshot.ocrAiLinebreakAssistMode])
+  const runModelLabel = React.useMemo(() => getRunModelLabel(runConfig), [runConfig])
+  const runOcrConfigSourceLabel = React.useMemo(
+    () => getOcrConfigSourceLabel(runConfig.ocrAiConfigSource),
+    [runConfig.ocrAiConfigSource]
+  )
 
   const refreshSettingsSnapshot = React.useCallback(() => {
     setSettingsSnapshot(loadStoredSettings())
@@ -457,16 +182,17 @@ export default function Home() {
         throw new Error("加载任务列表失败")
       }
       const body = (await response.json().catch(() => null)) as JobListResponse | null
-      const rows = Array.isArray(body?.jobs) ? body.jobs : []
+      const normalized = normalizeJobListResponse(body)
+      const rows = normalized.jobs
       setJobs(rows)
-      setQueueSize(typeof body?.queue_size === "number" ? Math.max(0, body.queue_size) : 0)
+      setQueueSize(normalized.queueSize)
 
       const currentJobId = jobIdRef.current
       if (currentJobId) {
         const matched = rows.find((row) => row.job_id === currentJobId)
         if (matched) {
-          setActiveJob(toJobStatusResponse(matched))
-          if (TERMINAL_STATUSES.has(matched.status)) {
+          setActiveJob(normalizeJobStatusResponse(matched))
+          if (TERMINAL_JOB_STATUSES.has(matched.status)) {
             setIsSubmitting(false)
           }
         }
@@ -496,7 +222,7 @@ export default function Home() {
     if (!body || typeof body !== "object") {
       throw new Error("任务状态响应异常")
     }
-    return body as JobStatusResponse
+    return normalizeJobStatusResponse(body)
   }, [])
 
   const onDrop = React.useCallback((accepted: File[]) => {
@@ -529,7 +255,7 @@ export default function Home() {
 
     setActionError(null)
 
-    const validation = validateBeforeRun(settingsSnapshot)
+    const validation = validateRunConfig(settingsSnapshot)
     if (!validation.ok) {
       setActionError(validation.message || "配置校验失败")
       return
@@ -551,7 +277,7 @@ export default function Home() {
     setActiveJob(null)
 
     try {
-      const formData = createFormData(file, settingsSnapshot, pageStart, pageEnd)
+      const formData = createJobFormData(file, settingsSnapshot, pageStart, pageEnd)
       const response = await apiFetch("/jobs", {
         method: "POST",
         body: formData,
@@ -700,7 +426,7 @@ export default function Home() {
         const status = await fetchJobStatus(jobId)
         if (!mounted) return
         setActiveJob(status)
-        if (TERMINAL_STATUSES.has(status.status)) {
+        if (TERMINAL_JOB_STATUSES.has(status.status)) {
           setIsSubmitting(false)
           stopPolling()
           void fetchJobs(true)
@@ -736,7 +462,7 @@ export default function Home() {
 
   React.useEffect(() => {
     if (!activeJob) return
-    if (!TERMINAL_STATUSES.has(activeJob.status)) return
+    if (!TERMINAL_JOB_STATUSES.has(activeJob.status)) return
 
     const hasNotified =
       lastTerminalToastRef.current.jobId === activeJob.job_id &&
@@ -759,16 +485,15 @@ export default function Home() {
   }, [activeJob])
 
   const progressValue = Math.max(0, Math.min(100, Number(activeJob?.progress || 0)))
-  const currentStatus = activeJob?.status || (isSubmitting ? "processing" : "pending")
+  const currentStatus: JobStatusValue | null = activeJob?.status || (isSubmitting ? "processing" : null)
   const currentStageCode = activeJob?.stage || (isSubmitting ? "queued" : "")
+  const currentStageFlowCode = getJobStageFlowStage(currentStageCode)
   const currentStageLabel = activeJob?.stage
-    ? (jobStageLabels[activeJob.stage] ?? activeJob.stage)
+    ? (JOB_STAGE_LABELS[activeJob.stage] ?? activeJob.stage)
     : "等待开始"
-  const stageFlowIndex = currentStageCode
-    ? jobStageFlow.findIndex((stage) => stage === currentStageCode)
-    : -1
+  const stageFlowIndex = getJobStageFlowIndex(currentStageCode)
   const stageLiveText = activeJob
-    ? `任务状态 ${jobStatusLabels[currentStatus as JobStatusValue] || currentStatus}，阶段 ${currentStageLabel}，进度 ${progressValue}%`
+    ? `任务状态 ${JOB_STATUS_LABELS[currentStatus as JobStatusValue] || currentStatus}，阶段 ${currentStageLabel}，进度 ${progressValue}%`
     : "尚无进行中的任务"
   const inFlightJobs = jobs.filter((row) => row.status === "pending" || row.status === "processing").length
   const failedJobs = jobs.filter((row) => row.status === "failed").length
@@ -809,51 +534,49 @@ export default function Home() {
     day: "2-digit",
     timeZone: "Asia/Shanghai",
   }).format(new Date())
+  const currentStatusLabel = currentStatus ? JOB_STATUS_LABELS[currentStatus] || currentStatus : "空闲中"
+  const hasCurrentJob = Boolean(jobId || isSubmitting || activeJob)
 
   return (
     <div className="min-h-dvh bg-background">
       <div className="mx-auto w-full max-w-screen-xl px-4 py-6 md:py-10">
-        <header className="newsprint-texture border border-border bg-background">
-          <div className="grid md:grid-cols-12">
-            <div className="border-b border-border px-4 py-5 md:col-span-8 md:border-b-0 md:border-r md:px-6 md:py-6">
+        <header className="editorial-page-header newsprint-texture page-enter border border-border bg-background">
+          <div className="px-5 py-5 md:px-6 md:py-6">
+            <div className="flex flex-wrap items-center gap-2">
               <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
-                第 1 版 · {editionDate} · PDF 编排台
+                {editionDate} · PDF 工作台
               </div>
-              <h1 className="mt-3 font-serif text-4xl leading-[0.9] tracking-tight md:text-7xl">
-                上传即转换
-              </h1>
-              <p className="mt-3 max-w-3xl text-sm leading-relaxed text-muted-foreground md:text-base">
-                首页仅保留任务启动与状态观察。复杂参数集中在设置页，追踪与排障集中在跟踪中心。
-              </p>
+              <Badge variant="outline" className="font-sans text-[11px] uppercase tracking-[0.12em]">
+                轻量首页
+              </Badge>
             </div>
-            <div className="flex flex-col justify-between gap-3 px-4 py-5 md:col-span-4 md:px-6 md:py-6">
-              <div className="flex flex-wrap gap-2">
-                <Badge variant="outline">任务面板</Badge>
-                <Badge className="border-[#cc0000] bg-[#cc0000] text-[#f9f9f7]">稳定模式</Badge>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button type="button" variant="outline" asChild>
-                  <Link href="/tracking">
-                    <ListChecksIcon className="size-4" />
-                    跟踪中心
-                  </Link>
-                </Button>
-                <Button type="button" asChild>
-                  <Link href="/settings">
-                    <Settings2Icon className="size-4" />
-                    设置页
-                  </Link>
-                </Button>
-              </div>
+            <h1 className="mt-3 max-w-4xl font-serif text-4xl leading-[0.92] tracking-tight md:text-6xl">
+              PDF 处理工作台
+            </h1>
+            <p className="mt-3 max-w-3xl text-sm leading-7 text-muted-foreground md:text-[15px]">
+              上传文件后直接预览、设定范围并开始处理。复杂参数放在设置页，结果核对放在跟踪页，首页只保留最常用的操作。
+            </p>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Badge variant="outline">当前文件：{file ? file.name : "未选择"}</Badge>
+              <Badge variant="outline">默认模型：{runModelLabel}</Badge>
+              {runConfig.effectiveOcrProvider === "aiocr" ||
+              (runConfig.layoutAssistMode !== "off" && runConfig.effectiveOcrAiKey) ? (
+                <Badge variant="outline">AI 配置：{runOcrConfigSourceLabel}</Badge>
+              ) : null}
+              <Badge className="editorial-pill">{hasCurrentJob ? currentStatusLabel : "等待开始"}</Badge>
             </div>
-          </div>
-          <div className="news-ticker relative overflow-hidden border-t border-border bg-muted/40 py-2">
-            <div className="news-ticker-track flex min-w-max gap-8 px-4 font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground md:px-6">
-              {[...homeTickerItems, ...homeTickerItems].map((item, idx) => (
-                <span key={`${item}-${idx}`} className="whitespace-nowrap">
-                  {item}
-                </span>
-              ))}
+
+            <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted-foreground">
+              <span>解析：{parseProviderLabels[runConfig.parseProvider]}</span>
+              <span>
+                OCR：
+                {runConfig.parseProvider === "mineru"
+                  ? "MinerU 自身"
+                  : ocrProviderLabels[runConfig.effectiveOcrProvider]}
+              </span>
+              <span>队列：{queueSize}</span>
+              <span>执行中：{inFlightJobs}</span>
             </div>
           </div>
         </header>
@@ -862,85 +585,63 @@ export default function Home() {
           {stageLiveText}
         </p>
 
-        <main className="mt-6 grid gap-4 lg:grid-cols-2">
-          <Card className="hard-shadow-hover border-border">
-            <CardHeader>
-              <CardTitle className="text-lg">上传与执行</CardTitle>
-              <CardDescription>
-                首页只做核心操作：选文件、选页码、启动转换。
-              </CardDescription>
+        <main className="mt-6 grid gap-5 xl:grid-cols-[minmax(0,1fr)_280px] xl:items-stretch">
+          <Card className="home-card page-enter page-enter-delay-1 border-border xl:h-full">
+            <CardHeader className="pb-3">
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <div className="home-section-kicker">开始处理</div>
+                  <CardTitle className="mt-2 text-[1.3rem]">上传与预览</CardTitle>
+                  <CardDescription className="mt-1 max-w-xl text-sm leading-6">
+                    选择 PDF 后可直接预览当前页，并决定是整份处理还是先做单页验证。
+                  </CardDescription>
+                </div>
+                <Badge variant="outline">支持整份与单页试跑</Badge>
+              </div>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div
-                {...getRootProps()}
-                className={cn(
-                  "cursor-pointer border border-dashed border-border bg-muted/40 p-5 text-center transition-colors",
-                  isDragActive && !isDragReject && "bg-accent/50",
-                  isDragReject && "border-destructive bg-destructive/10",
-                  isSubmitting && "pointer-events-none opacity-60"
-                )}
-              >
-                <input {...getInputProps()} />
-                <UploadCloudIcon className="mx-auto size-8 text-muted-foreground" />
-                <p className="mt-2 text-sm font-medium">
-                  {isDragActive ? "松开以上传 PDF" : "拖拽 PDF 到这里，或点击选择文件"}
-                </p>
-                <p className="mt-1 text-xs text-muted-foreground">仅支持 .pdf</p>
-              </div>
+                <div
+                  {...getRootProps()}
+                  className={cn(
+                    "home-dropzone cursor-pointer text-center",
+                    isDragActive && !isDragReject && "bg-accent/50",
+                    isDragReject && "border-destructive bg-destructive/10",
+                    isSubmitting && "pointer-events-none opacity-60"
+                  )}
+                >
+                  <input {...getInputProps()} />
+                  <UploadCloudIcon className="mx-auto size-8 text-muted-foreground" />
+                  <p className="mt-3 text-sm font-medium">
+                    {isDragActive ? "松开以上传 PDF" : "拖拽 PDF 到这里，或点击选择文件"}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">仅支持 .pdf</p>
+                </div>
 
-              {file ? (
-                <div className="flex items-center justify-between gap-3 border border-border p-3">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">{file.name}</div>
-                    <div className="text-xs text-muted-foreground">{formatBytes(file.size)}</div>
+                {file ? (
+                  <div className="home-inline-panel flex items-center justify-between gap-3 px-4 py-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{file.name}</div>
+                      <div className="text-xs text-muted-foreground">{formatBytes(file.size)}</div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={() => {
+                        clearUpload()
+                        setPreviewPageInput("1")
+                        setPreviewPageCount(0)
+                        setUsePageRange(false)
+                      }}
+                    >
+                      清空
+                    </Button>
                   </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    onClick={() => {
-                      clearUpload()
-                      setPreviewPageInput("1")
-                      setPreviewPageCount(0)
-                      setUsePageRange(false)
-                    }}
-                  >
-                    清空
-                  </Button>
-                </div>
-              ) : null}
+                ) : null}
 
-              <div className="border border-dashed border-border bg-muted/15 p-3 text-xs text-muted-foreground">
-                页码范围与“单页试跑/开始转换”已放到下方 PDF 预览区域，操作路径更连贯。
-              </div>
-
-              <div className="border border-border bg-muted/30 p-3">
-                <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <Badge variant="outline">解析：{runConfig.parseProvider}</Badge>
-                  <Badge variant="outline">OCR：{runConfig.effectiveOcrProvider}</Badge>
-                  <Badge variant="outline">模型：{runModelLabel}</Badge>
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  当前配置已通过基础校验，参数微调请在设置页完成。
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <Button type="button" variant="ghost" asChild>
-                    <Link href="/settings">
-                      进入设置页精调
-                      <ArrowRightIcon className="size-4" />
-                    </Link>
-                  </Button>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {filePreviewUrl ? (
-            <Card className="border-border">
-              <CardHeader className="pb-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <CardTitle className="text-lg">PDF 预览</CardTitle>
-                    <CardDescription>自定义预览器。当前页与“单页试跑”始终保持一致。</CardDescription>
+                    <div className="home-section-kicker">文档预览</div>
+                    <div className="mt-1 text-sm text-muted-foreground">预览页与单页试跑始终保持一致。</div>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <Button
@@ -986,15 +687,21 @@ export default function Home() {
                     </Button>
                   </div>
                 </div>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <PdfCanvasPreview
-                  fileUrl={filePreviewUrl}
-                  page={previewPage}
-                  className="mx-auto max-w-[840px]"
-                  onPageCountChange={handlePreviewPageCountChange}
-                />
-                <div className="grid gap-3 border border-border bg-muted/20 p-3">
+
+                {filePreviewUrl ? (
+                  <div className="home-preview-stage">
+                    <PdfCanvasPreview
+                      fileUrl={filePreviewUrl}
+                      page={previewPage}
+                      className="w-full"
+                      onPageCountChange={handlePreviewPageCountChange}
+                    />
+                  </div>
+                ) : (
+                  <div className="home-preview-stage home-preview-empty">上传 PDF 后会在这里显示预览</div>
+                )}
+
+                <div className="home-inline-panel grid gap-3 px-4 py-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <label className="flex items-center gap-2 text-sm">
                       <input
@@ -1068,12 +775,12 @@ export default function Home() {
                       </div>
                     </div>
                   ) : (
-                    <p className="text-xs text-muted-foreground">
-                      当前将处理整份文档。若只想做快速验证，点击“单页试跑（当前页）”即可。
+                    <p className="text-xs leading-6 text-muted-foreground">
+                      当前将处理整份文档。如果只是想快速确认效果，直接点击“单页试跑（当前页）”即可。
                     </p>
                   )}
 
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-3">
                     <div className="flex gap-2">
                       <Button type="button" onClick={handleConvert} disabled={!canStart}>
                         开始转换
@@ -1082,7 +789,7 @@ export default function Home() {
                         重置
                       </Button>
                     </div>
-                    {jobId && !TERMINAL_STATUSES.has(currentStatus as JobStatusValue) ? (
+                    {jobId && currentStatus && !TERMINAL_JOB_STATUSES.has(currentStatus) ? (
                       <Button type="button" variant="destructive" onClick={handleCancelCurrentJob}>
                         <XCircleIcon className="size-4" />
                         取消当前任务
@@ -1092,118 +799,176 @@ export default function Home() {
                 </div>
               </CardContent>
             </Card>
-          ) : (
-            <Card className="border-border bg-muted/20">
-              <CardHeader>
-                <CardTitle className="text-lg">PDF 预览</CardTitle>
-                <CardDescription>上传 PDF 后可在此预览并执行单页试跑。</CardDescription>
+
+          <div className="grid min-w-0 gap-5 xl:h-full xl:grid-rows-[auto_minmax(0,1fr)]">
+            <Card className="home-card-muted page-enter page-enter-delay-2 min-w-0 border border-border">
+              <CardHeader className="pb-3">
+                <div className="home-section-kicker">当前配置</div>
+                <CardTitle className="mt-2 text-xl">处理参数</CardTitle>
+                <CardDescription className="mt-1 text-sm leading-6">
+                  当前页面只展示必要配置，细调项仍在设置页统一管理。
+                </CardDescription>
               </CardHeader>
-              <CardContent>
-                <div className="flex min-h-[320px] items-center justify-center border border-dashed border-border bg-background px-4 text-sm text-muted-foreground">
-                  暂无可预览文件
+              <CardContent className="min-w-0 space-y-3">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <Badge variant="outline">解析：{parseProviderLabels[runConfig.parseProvider]}</Badge>
+                  <Badge variant="outline">
+                    OCR：
+                    {runConfig.parseProvider === "mineru"
+                      ? "MinerU 自身"
+                      : ocrProviderLabels[runConfig.effectiveOcrProvider]}
+                  </Badge>
+                  <Badge variant="outline">
+                    版式辅助：{layoutAssistModeLabels[runConfig.layoutAssistMode]}
+                  </Badge>
+                  {runConfig.effectiveOcrProvider === "aiocr" ? (
+                    <Badge variant="outline">
+                      行拆分：{ocrLinebreakModeLabels[runConfig.ocrLinebreakAssistMode]}
+                    </Badge>
+                  ) : null}
+                  {runConfig.effectiveOcrProvider === "aiocr" ? (
+                    <Badge variant="outline">AI 配置：{runOcrConfigSourceLabel}</Badge>
+                  ) : null}
+                  <Badge variant="outline" className="max-w-full whitespace-normal break-all">
+                    模型：{runModelLabel}
+                  </Badge>
                 </div>
+                <Button type="button" variant="ghost" asChild>
+                  <Link href="/settings">
+                    前往设置页
+                    <ArrowRightIcon className="size-4" />
+                  </Link>
+                </Button>
               </CardContent>
             </Card>
-          )}
+
+            <Card className="home-card-muted page-enter page-enter-delay-2 min-w-0 border border-border xl:flex xl:min-h-0 xl:flex-col">
+              <CardHeader className="pb-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="home-section-kicker">任务状态</div>
+                    <CardTitle className="mt-2 text-xl">当前任务</CardTitle>
+                    <CardDescription className="mt-1 text-sm leading-6">
+                      处理开始后，这里会持续刷新状态和进度。
+                    </CardDescription>
+                  </div>
+                  <Badge
+                    variant={currentStatus === "failed" ? "destructive" : currentStatus === "completed" ? "secondary" : "outline"}
+                  >
+                    {currentStatusLabel}
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="min-w-0 space-y-3.5 xl:min-h-0 xl:flex-1 xl:overflow-y-auto">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <Badge variant="outline">阶段：{currentStageLabel}</Badge>
+                  {jobId ? (
+                    <Badge variant="outline" className="max-w-full whitespace-normal break-all">
+                      任务号：{jobId}
+                    </Badge>
+                  ) : null}
+                </div>
+
+                <Progress value={progressValue} className="h-2" />
+
+                {hasCurrentJob ? (
+                  <div className="pb-1">
+                    <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-4 xl:grid-cols-4">
+                      {JOB_STAGE_FLOW.map((stage, index) => {
+                        const isDone = stageFlowIndex >= index && stageFlowIndex >= 0
+                        const isCurrent = currentStageFlowCode === stage
+                        return (
+                          <div
+                            key={stage}
+                            title={JOB_STAGE_LABELS[stage] || stage}
+                            aria-label={JOB_STAGE_LABELS[stage] || stage}
+                            className={cn(
+                              "min-w-0 border px-2 py-1 text-center font-sans text-[11px] font-medium leading-tight tracking-[0.02em] transition-colors",
+                              isCurrent
+                                ? "border-[#cc0000] bg-[#cc0000] text-[#f9f9f7]"
+                                : isDone
+                                  ? "border-border bg-muted/60 text-foreground"
+                                  : "border-border/70 bg-background/70 text-muted-foreground"
+                            )}
+                          >
+                            {JOB_STAGE_COMPACT_LABELS[stage] || JOB_STAGE_LABELS[stage] || stage}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="text-sm leading-6 text-muted-foreground">
+                  {activeJob?.message || (isSubmitting ? "任务已提交，正在等待状态更新…" : "尚未开始任务")}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div className="home-stat-cell">
+                    <div className="home-stat-label">队列总数</div>
+                    <div className="home-stat-value">{queueSize}</div>
+                  </div>
+                  <div className="home-stat-cell">
+                    <div className="home-stat-label">执行中</div>
+                    <div className="home-stat-value">{inFlightJobs}</div>
+                  </div>
+                  <div className="home-stat-cell">
+                    <div className="home-stat-label">已完成</div>
+                    <div className="home-stat-value">{completedJobs}</div>
+                  </div>
+                  <div className="home-stat-cell">
+                    <div className="home-stat-label">失败</div>
+                    <div className="home-stat-value">{failedJobs}</div>
+                  </div>
+                </div>
+
+                {!jobId ? (
+                  <div className="home-note">
+                    暂无当前任务。上传 PDF 后点击“开始转换”，这里会自动显示最新进度。
+                  </div>
+                ) : null}
+
+                {activeJob?.error?.message ? (
+                  <div className="border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
+                    {activeJob.error.message}
+                  </div>
+                ) : null}
+
+                {actionError ? (
+                  <div className="border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
+                    {actionError}
+                  </div>
+                ) : null}
+
+                {jobId && currentStatus === "completed" ? (
+                  <Button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await handleDownload(jobId)
+                      } catch (e) {
+                        toast.error(normalizeFetchError(e, "下载失败"))
+                      }
+                    }}
+                  >
+                    <DownloadIcon className="size-4" />
+                    下载 PPTX
+                  </Button>
+                ) : null}
+              </CardContent>
+            </Card>
+          </div>
         </main>
 
-        <Card className="mt-6 hard-shadow-hover border-border">
-          <CardHeader>
-            <CardTitle className="text-lg">当前任务状态</CardTitle>
-            <CardDescription>实时轮询后端状态，稳定且便于排查问题。</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={currentStatus === "failed" ? "destructive" : currentStatus === "completed" ? "secondary" : "outline"}>
-                {jobStatusLabels[currentStatus as JobStatusValue] || currentStatus}
-              </Badge>
-              <Badge variant="outline">阶段：{currentStageLabel}</Badge>
-              {jobId ? <Badge variant="outline">任务号：{jobId}</Badge> : null}
-            </div>
-
-            <Progress value={progressValue} className="h-2" />
-
-            {(jobId || isSubmitting || activeJob) ? (
-              <div className="grid gap-1 sm:grid-cols-2">
-                {jobStageFlow.map((stage, index) => {
-                  const isDone = stageFlowIndex >= index && stageFlowIndex >= 0
-                  const isCurrent = currentStageCode === stage
-                  return (
-                    <div
-                      key={stage}
-                      className={cn(
-                        "border px-2 py-1 text-[11px] font-mono uppercase tracking-[0.12em]",
-                        isCurrent
-                          ? "border-[#cc0000] bg-[#cc0000] text-[#f9f9f7]"
-                          : isDone
-                            ? "border-border bg-muted/60 text-foreground"
-                            : "border-border/70 bg-background text-muted-foreground"
-                      )}
-                    >
-                      {jobStageLabels[stage] || stage}
-                    </div>
-                  )
-                })}
-              </div>
-            ) : null}
-
-            <div className="text-sm text-muted-foreground">
-              {activeJob?.message || (isSubmitting ? "任务已提交，正在等待状态更新…" : "尚未开始任务")}
-            </div>
-
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div className="border border-border bg-muted/30 p-2">队列总数：{queueSize}</div>
-              <div className="border border-border bg-muted/30 p-2">执行中：{inFlightJobs}</div>
-              <div className="border border-border bg-muted/30 p-2">已完成：{completedJobs}</div>
-              <div className="border border-border bg-muted/30 p-2">失败：{failedJobs}</div>
-            </div>
-
-            {!jobId ? (
-              <div className="border border-dashed border-border bg-muted/20 p-3 text-xs text-muted-foreground">
-                暂无当前任务。上传 PDF 后点击“开始转换”，状态会在这里实时更新。
-              </div>
-            ) : null}
-
-            <div className="border border-dashed border-border p-3 text-xs text-muted-foreground">
-              历史任务请查看下方“最近任务”表格，避免信息重复。
-            </div>
-
-            {activeJob?.error?.message ? (
-              <div className="border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
-                {activeJob.error.message}
-              </div>
-            ) : null}
-
-            {actionError ? (
-              <div className="border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
-                {actionError}
-              </div>
-            ) : null}
-
-            {jobId && currentStatus === "completed" ? (
-              <Button
-                type="button"
-                onClick={async () => {
-                  try {
-                    await handleDownload(jobId)
-                  } catch (e) {
-                    toast.error(normalizeFetchError(e, "下载失败"))
-                  }
-                }}
-              >
-                <DownloadIcon className="size-4" />
-                下载 PPTX
-              </Button>
-            ) : null}
-          </CardContent>
-        </Card>
-
-        <Card className="mt-6 border-border">
-          <CardHeader>
+        <Card className="home-card page-enter page-enter-delay-2 mt-6 border-border">
+          <CardHeader className="pb-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <CardTitle className="text-lg">最近任务</CardTitle>
-                <CardDescription>队列总数：{queueSize} · 保留独立跟踪页用于深度排查</CardDescription>
+                <div className="home-section-kicker">任务记录</div>
+                <CardTitle className="mt-2 text-[1.3rem]">最近任务</CardTitle>
+                <CardDescription className="mt-1 text-sm leading-6">
+                  近期任务会保留在这里，需要更细的核对时再进入跟踪页。
+                </CardDescription>
               </div>
               <Button type="button" variant="outline" onClick={() => void fetchJobs(false)} disabled={jobsLoading}>
                 刷新列表
@@ -1211,39 +976,42 @@ export default function Home() {
             </div>
           </CardHeader>
           <CardContent>
-            <div className="overflow-x-auto border border-border">
+            <div className="home-table-shell overflow-x-auto border border-border">
               <table className="w-full min-w-[760px] text-sm">
-                <thead className="bg-muted/40 text-left text-xs uppercase tracking-[0.08em] text-muted-foreground">
+                <thead className="bg-muted/25 text-left text-xs uppercase tracking-[0.08em] text-muted-foreground">
                   <tr>
-                    <th className="px-3 py-2">任务</th>
-                    <th className="px-3 py-2">状态</th>
-                    <th className="px-3 py-2">进度</th>
-                    <th className="px-3 py-2">阶段</th>
-                    <th className="px-3 py-2">时间</th>
-                    <th className="px-3 py-2 text-right">操作</th>
+                    <th className="px-4 py-3">任务</th>
+                    <th className="px-4 py-3">状态</th>
+                    <th className="px-4 py-3">进度</th>
+                    <th className="px-4 py-3">阶段</th>
+                    <th className="px-4 py-3">时间</th>
+                    <th className="px-4 py-3 text-right">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {jobs.length ? (
                     jobs.map((row) => {
-                      const stageLabel = jobStageLabels[row.stage] || row.stage
+                      const stageLabel = JOB_STAGE_LABELS[row.stage] || row.stage
                       const canCancel = row.status === "pending" || row.status === "processing"
                       const canDownload = row.status === "completed"
                       return (
                         <tr
                           key={row.job_id}
-                          className={cn("border-t border-border", row.job_id === jobId && "bg-muted/35")}
+                          className={cn(
+                            "border-t border-border/80 transition-colors hover:bg-muted/20",
+                            row.job_id === jobId && "bg-muted/35"
+                          )}
                         >
-                          <td className="px-3 py-2 font-mono text-xs">{row.job_id}</td>
-                          <td className="px-3 py-2">
+                          <td className="px-4 py-3 font-mono text-xs">{row.job_id}</td>
+                          <td className="px-4 py-3">
                             <Badge variant={row.status === "failed" ? "destructive" : row.status === "completed" ? "secondary" : "outline"}>
-                              {jobStatusLabels[row.status]}
+                              {JOB_STATUS_LABELS[row.status]}
                             </Badge>
                           </td>
-                          <td className="px-3 py-2">{Math.max(0, Math.min(100, row.progress || 0))}%</td>
-                          <td className="px-3 py-2">{stageLabel}</td>
-                          <td className="px-3 py-2 text-muted-foreground">{formatDateTime(row.created_at)}</td>
-                          <td className="px-3 py-2">
+                          <td className="px-4 py-3">{Math.max(0, Math.min(100, row.progress || 0))}%</td>
+                          <td className="px-4 py-3">{stageLabel}</td>
+                          <td className="px-4 py-3 text-muted-foreground">{formatDateTime(row.created_at)}</td>
+                          <td className="px-4 py-3">
                             <div className="flex justify-end gap-2">
                               <Button type="button" variant="ghost" asChild>
                                 <Link href={`/tracking?job=${encodeURIComponent(row.job_id)}`}>跟踪</Link>
@@ -1279,7 +1047,7 @@ export default function Home() {
                     })
                   ) : (
                     <tr>
-                      <td colSpan={6} className="px-3 py-8 text-center text-sm text-muted-foreground">
+                      <td colSpan={6} className="px-4 py-10 text-center text-sm text-muted-foreground">
                         暂无任务记录
                       </td>
                     </tr>
@@ -1288,9 +1056,9 @@ export default function Home() {
               </table>
             </div>
           </CardContent>
-          <CardFooter className="border-t border-border text-xs text-muted-foreground">
+          <CardFooter className="border-t border-border/80 text-xs text-muted-foreground">
             <FileTextIcon className="mr-2 size-4" />
-            首页专注执行；高级参数与模型切换请在设置页管理。
+            首页保持轻量入口；需要更细的参数管理或结果核查时，再进入对应页面继续处理。
           </CardFooter>
         </Card>
       </div>

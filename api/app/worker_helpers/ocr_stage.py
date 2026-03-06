@@ -31,6 +31,51 @@ def _progress_in_span(
     return int(round(float(start) + (float(end - start) * ratio)))
 
 
+def _summarize_ocr_page_runtime(
+    *, page_entries: list[dict[str, Any]], ocr_manager: Any
+) -> dict[str, Any]:
+    provider_counts: dict[str, int] = {}
+    fallback_reason_counts: dict[str, int] = {}
+    pages_with_elements = 0
+    pages_with_errors = 0
+    pages_with_fallback = 0
+
+    for entry in page_entries:
+        if not isinstance(entry, dict):
+            continue
+        if "error" in entry or "warning" in entry:
+            pages_with_errors += 1
+        if int(entry.get("elements") or 0) > 0:
+            pages_with_elements += 1
+
+        used_provider = str(entry.get("used_provider") or "").strip()
+        if used_provider:
+            provider_counts[used_provider] = provider_counts.get(used_provider, 0) + 1
+
+        fallback_reason = str(entry.get("fallback_reason") or "").strip()
+        if fallback_reason:
+            pages_with_fallback += 1
+            fallback_reason_counts[fallback_reason] = (
+                fallback_reason_counts.get(fallback_reason, 0) + 1
+            )
+
+    ai_provider_disabled = bool(getattr(ocr_manager, "ai_provider_disabled", False))
+    ai_provider_disabled_reason = getattr(
+        ocr_manager, "ai_provider_disabled_reason", None
+    )
+
+    return {
+        "provider_counts": provider_counts,
+        "distinct_provider_count": len(provider_counts),
+        "pages_with_elements": pages_with_elements,
+        "pages_with_errors": pages_with_errors,
+        "fallback_pages": pages_with_fallback,
+        "fallback_reason_counts": fallback_reason_counts,
+        "ai_provider_disabled": ai_provider_disabled,
+        "ai_provider_disabled_reason": ai_provider_disabled_reason,
+    }
+
+
 def run_ocr_stage(
     *,
     ir: dict[str, Any],
@@ -303,6 +348,19 @@ def run_ocr_stage(
                 "last_fallback_reason",
                 fallback_reason,
             )
+            quality_notes_raw = getattr(ocr_manager, "last_quality_notes", [])
+            quality_notes = [
+                str(note).strip()
+                for note in (
+                    quality_notes_raw if isinstance(quality_notes_raw, list) else []
+                )
+                if str(note).strip()
+            ]
+            for note in quality_notes:
+                page.setdefault("warnings", []).append(note)
+                ir.setdefault("warnings", []).append(
+                    f"{note}:page={page_index + 1}"
+                )
 
             # Strict policy: do not switch to local Tesseract geometry
             # unless the user explicitly selected `tesseract/local`.
@@ -398,6 +456,7 @@ def run_ocr_stage(
                         "elements": len(ocr_elements),
                         "used_provider": used_provider,
                         "fallback_reason": fallback_reason,
+                        "quality_notes": quality_notes,
                         "overlay_image": str(overlay_path) if overlay_path else None,
                         "bbox_stats": bbox_stats,
                     }
@@ -409,6 +468,7 @@ def run_ocr_stage(
                         "elements": 0,
                         "used_provider": used_provider,
                         "fallback_reason": fallback_reason,
+                        "quality_notes": quality_notes,
                         "overlay_image": str(overlay_path) if overlay_path else None,
                         "bbox_stats": bbox_stats,
                     }
@@ -421,10 +481,35 @@ def run_ocr_stage(
         abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
     finally:
         doc.close()
-        ocr_debug["runtime"] = _build_ocr_effective_runtime_debug(
+        page_runtime_summary = _summarize_ocr_page_runtime(
+            page_entries=ocr_debug.get("pages") if isinstance(ocr_debug.get("pages"), list) else [],
+            ocr_manager=ocr_manager,
+        )
+        ocr_debug["page_runtime_summary"] = page_runtime_summary
+        runtime_debug = _build_ocr_effective_runtime_debug(
             ocr_manager=ocr_manager,
             fallback_provider=ocr_debug.get("provider_effective"),
         )
+        runtime_debug["page_summary"] = page_runtime_summary
+        ocr_debug["runtime"] = runtime_debug
+
+        if page_runtime_summary["distinct_provider_count"] > 1:
+            providers = ",".join(sorted(page_runtime_summary["provider_counts"]))
+            ir.setdefault("warnings", []).append(
+                f"ocr_page_provider_switches: providers={providers}"
+            )
+        if page_runtime_summary["fallback_pages"] > 0:
+            ir.setdefault("warnings", []).append(
+                "ocr_page_fallbacks:"
+                f" pages={page_runtime_summary['fallback_pages']}"
+                f" reasons={json.dumps(page_runtime_summary['fallback_reason_counts'], ensure_ascii=True, sort_keys=True)}"
+            )
+        if page_runtime_summary["ai_provider_disabled"]:
+            ir.setdefault("warnings", []).append(
+                "ocr_ai_provider_disabled:"
+                f" reason={page_runtime_summary['ai_provider_disabled_reason'] or 'unknown'}"
+            )
+
         (ocr_dir / "ocr_debug.json").write_text(
             json.dumps(ocr_debug, ensure_ascii=True, indent=2) + "\n",
             encoding="utf-8",

@@ -19,14 +19,12 @@ from .layout import (
     _to_page_map,
 )
 from .layout_assist_stage import run_layout_assist_stage
-from .mineru_alignment import _apply_mineru_hybrid_ocr_alignment
 from .ocr_runtime import build_ocr_debug_payload, setup_ocr_runtime
 from .ocr_stage import run_ocr_stage
 from .ppt_stage import run_ppt_stage
 
 __all__ = [
     "_apply_ai_tables",
-    "_apply_mineru_hybrid_ocr_alignment",
     "_bbox_center_distance_ratio",
     "_bbox_overlap_ratio",
     "_bbox_pt_to_px",

@@ -1,4 +1,5 @@
-export type Provider = "openai" | "claude" | "siliconflow" | "mineru"
+export type MainProvider = "openai" | "claude" | "siliconflow"
+export type Provider = MainProvider | "mineru"
 export type OcrProvider =
   | "auto"
   | "aiocr"
@@ -7,6 +8,8 @@ export type OcrProvider =
   | "paddle_local"
 export type OcrAiProvider = "auto" | "openai" | "siliconflow" | "deepseek" | "ppio" | "novita"
 export type OcrAiLinebreakAssistMode = "auto" | "on" | "off"
+export type LayoutAssistMode = "off" | "on" | "auto"
+export type VisionAssistMode = LayoutAssistMode
 export type OcrGeometryMode = "auto" | "local_tesseract" | "direct_ai"
 export type ScannedPageMode = "segmented" | "fullpage"
 export type MineruModelVersion = "pipeline" | "vlm" | "MinerU-HTML"
@@ -14,6 +17,7 @@ export type TextEraseMode = "smart" | "fill"
 
 export type Settings = {
   provider: Provider
+  preferredMainProvider: MainProvider
   openaiApiKey: string
   openaiBaseUrl: string
   openaiModel: string
@@ -31,6 +35,9 @@ export type Settings = {
   mineruHybridOcr: boolean
   enableLayoutAssist: boolean
   layoutAssistApplyImageRegions: boolean
+  visualAssistModeLocal: LayoutAssistMode
+  visualAssistModeRemote: LayoutAssistMode
+  visualAssistModeMineru: LayoutAssistMode
   enableOcr: boolean
   textEraseMode: TextEraseMode
   scannedPageMode: ScannedPageMode
@@ -61,6 +68,7 @@ export const SETTINGS_STORAGE_KEY = "pdf-to-ppt.settings.v1"
 
 export const defaultSettings: Settings = {
   provider: "openai",
+  preferredMainProvider: "openai",
   openaiApiKey: "",
   openaiBaseUrl: "",
   openaiModel: "",
@@ -80,6 +88,10 @@ export const defaultSettings: Settings = {
   enableLayoutAssist: false,
   // Keep off by default: some pages may over-match and hide decorative images.
   layoutAssistApplyImageRegions: false,
+  // AI layout-assist policy for the three parse chains. Keep all off by default.
+  visualAssistModeLocal: "off",
+  visualAssistModeRemote: "off",
+  visualAssistModeMineru: "off",
   // Most real-world PDFs are scans. Default to OCR-on so output is editable.
   enableOcr: true,
   // smart: current adaptive erase; fill: fast rectangle background fill.
@@ -93,9 +105,9 @@ export const defaultSettings: Settings = {
   scannedImageRegionMinAreaRatio: "0.0025",
   scannedImageRegionMaxAreaRatio: "0.72",
   scannedImageRegionMaxAspectRatio: "4.8",
-  // Non-strict is more open-source friendly: it enables fallbacks/downgrades
-  // and keeps conversion running even if OCR fails on some pages.
-  ocrStrictMode: false,
+  // Default on. Strict mode keeps OCR benchmarking and production runs honest
+  // by surfacing provider/setup failures instead of silently downgrading.
+  ocrStrictMode: true,
   // Local mode now defaults to pure local OCR (no auto fallback).
   ocrProvider: "tesseract",
   ocrBaiduAppId: "",
@@ -108,8 +120,8 @@ export const defaultSettings: Settings = {
   ocrAiProvider: "auto",
   ocrAiBaseUrl: "",
   ocrAiModel: "",
-  // Optional OCR visual line-break split for coarse block boxes.
-  // auto: backend decides based on OCR provider capabilities.
+  // AI OCR line-break post-process policy. `auto` lets the backend decide
+  // based on the selected OCR model instead of piggybacking on layout assist.
   ocrAiLinebreakAssistMode: "auto",
   // OCR geometry strategy for AI OCR models.
   // auto: use stable local geometry for generic VL, keep direct AI geometry for OCR-specialized models.
@@ -134,6 +146,9 @@ export function loadStoredSettings(): Settings {
   const parsed = safeParseSettings(localStorage.getItem(SETTINGS_STORAGE_KEY))
   const merged = { ...defaultSettings, ...(parsed ?? {}) } as Settings
   const parsedProvider = (parsed as { provider?: string } | null)?.provider
+  const parsedPreferredMainProvider = (
+    parsed as { preferredMainProvider?: string } | null
+  )?.preferredMainProvider
   const parsedParseProvider = (parsed as { parseProvider?: string } | null)?.parseProvider
   if (parsedProvider === "domestic" || parsedParseProvider === "mineru") {
     merged.provider = "mineru"
@@ -175,6 +190,23 @@ export function loadStoredSettings(): Settings {
   const validProviders: Provider[] = ["openai", "claude", "siliconflow", "mineru"]
   if (!validProviders.includes(merged.provider)) {
     merged.provider = "openai"
+  }
+  const validMainProviders: MainProvider[] = ["openai", "claude", "siliconflow"]
+  if (!validMainProviders.includes(merged.preferredMainProvider)) {
+    if (parsedPreferredMainProvider && validMainProviders.includes(parsedPreferredMainProvider as MainProvider)) {
+      merged.preferredMainProvider = parsedPreferredMainProvider as MainProvider
+    } else if (merged.provider !== "mineru") {
+      merged.preferredMainProvider = merged.provider
+    } else if (parsedProvider === "claude") {
+      merged.preferredMainProvider = "claude"
+    } else if (parsedProvider === "siliconflow") {
+      merged.preferredMainProvider = "siliconflow"
+    } else {
+      merged.preferredMainProvider = "openai"
+    }
+  }
+  if (merged.provider !== "mineru") {
+    merged.preferredMainProvider = merged.provider
   }
   if (!merged.siliconflowBaseUrl.trim()) {
     merged.siliconflowBaseUrl = SILICONFLOW_BASE_URL
@@ -262,7 +294,7 @@ export function loadStoredSettings(): Settings {
     merged.layoutAssistApplyImageRegions = false
   }
   if (typeof merged.ocrStrictMode !== "boolean") {
-    merged.ocrStrictMode = false
+    merged.ocrStrictMode = true
   }
   const validLinebreakAssistModes: OcrAiLinebreakAssistMode[] = ["auto", "on", "off"]
   const legacyLinebreakAssist = (parsed as { ocrAiLinebreakAssist?: unknown } | null)
@@ -278,8 +310,21 @@ export function loadStoredSettings(): Settings {
     merged.ocrAiLinebreakAssistMode = legacyLinebreakAssist ? "on" : "off"
   }
   if (!validLinebreakAssistModes.includes(merged.ocrAiLinebreakAssistMode)) {
-    merged.ocrAiLinebreakAssistMode = "auto"
+    merged.ocrAiLinebreakAssistMode = "off"
   }
+
+  const validLayoutAssistModes: LayoutAssistMode[] = ["off", "on", "auto"]
+  const legacyLayoutAssistMode: LayoutAssistMode = merged.enableLayoutAssist ? "auto" : "off"
+  if (!validLayoutAssistModes.includes(merged.visualAssistModeLocal)) {
+    merged.visualAssistModeLocal = legacyLayoutAssistMode
+  }
+  if (!validLayoutAssistModes.includes(merged.visualAssistModeRemote)) {
+    merged.visualAssistModeRemote = legacyLayoutAssistMode
+  }
+  if (!validLayoutAssistModes.includes(merged.visualAssistModeMineru)) {
+    merged.visualAssistModeMineru = merged.enableLayoutAssist ? "auto" : "off"
+  }
+
   const validOcrGeometryModes: OcrGeometryMode[] = ["auto", "local_tesseract", "direct_ai"]
   if (!validOcrGeometryModes.includes(merged.ocrGeometryMode)) {
     merged.ocrGeometryMode = "auto"

@@ -18,7 +18,6 @@ from .base import (
     _ACRONYM_ALLOWLIST,
     _DEFAULT_PADDLE_OCR_VL_MODEL,
     _clean_str,
-    _env_flag,
     _normalize_paddle_language,
     _normalize_tesseract_language,
     _split_tesseract_languages,
@@ -1403,6 +1402,7 @@ class OcrManager:
         self.last_provider_name: str | None = None
         self.last_provider_error: str | None = None
         self.last_fallback_reason: str | None = None
+        self.last_quality_notes: list[str] = []
         self.provider_id: str = "auto"
         self.strict_no_fallback: bool = bool(strict_no_fallback)
         self.allow_paddle_model_downgrade: bool = bool(allow_paddle_model_downgrade)
@@ -1432,25 +1432,6 @@ class OcrManager:
         }:
             raise ValueError(f"Unsupported OCR provider: {provider_id}")
         self.provider_id = provider_id
-
-        # For explicit remote AI OCR providers, hidden local fallback makes
-        # model capability testing misleading (appears "successful" but output
-        # actually comes from local OCR). Default to fail-fast unless explicitly
-        # overridden for compatibility.
-        allow_explicit_ai_fallback = _env_flag(
-            "OCR_ALLOW_EXPLICIT_AI_FALLBACK",
-            default=False,
-        )
-        if (
-            provider_id in {"aiocr", "paddle"}
-            and (not self.strict_no_fallback)
-            and (not allow_explicit_ai_fallback)
-        ):
-            self.strict_no_fallback = True
-            logger.info(
-                "Force strict OCR mode for explicit provider=%s (set OCR_ALLOW_EXPLICIT_AI_FALLBACK=1 to re-enable fallback)",
-                provider_id,
-            )
 
         tesseract_min_conf = (
             float(tesseract_min_confidence)
@@ -1693,6 +1674,7 @@ class OcrManager:
 
         W = int(image_width)
         H = int(image_height)
+        self.last_quality_notes = []
         if W <= 0 or H <= 0:
             return []
 
@@ -1705,6 +1687,18 @@ class OcrManager:
             if self.provider_id in {"aiocr", "paddle"}:
                 normalized = _normalize_ocr_items_as_lines(
                     raw, image_width=W, image_height=H
+                )
+                primary_model = None
+                if self.provider_id == "aiocr" and self.ai_provider is not None:
+                    primary_model = getattr(self.ai_provider, "model", None)
+                elif self.provider_id == "paddle" and self.paddle_provider is not None:
+                    primary_model = getattr(self.paddle_provider, "model", None)
+                self.last_quality_notes = _build_primary_ocr_quality_notes(
+                    normalized,
+                    image_width=W,
+                    image_height=H,
+                    provider_name=self.last_provider_name,
+                    model_name=primary_model,
                 )
 
                 # Defensive: some remote OCR models still return word-level
@@ -1999,6 +1993,7 @@ class OcrManager:
         last_error: Exception | None = None
         self.last_provider_error = None
         self.last_fallback_reason = None
+        self.last_quality_notes = []
         for provider in self.providers:
             if self.ai_provider_disabled and isinstance(provider, AiOcrClient):
                 continue
@@ -2694,6 +2689,91 @@ def _normalize_ocr_items_as_lines(
 
     out.sort(key=lambda it: ((it["bbox"][1] + it["bbox"][3]) / 2.0, it["bbox"][0]))
     return out
+
+
+def _build_primary_ocr_quality_notes(
+    items: list[dict],
+    *,
+    image_width: int,
+    image_height: int,
+    provider_name: str | None,
+    model_name: str | None,
+) -> list[str]:
+    """Emit lightweight quality notes when OCR output looks suspiciously coarse."""
+
+    if str(provider_name or "") != "AiOcrClient":
+        return []
+    lowered_model = str(model_name or "").strip().lower()
+    if "paddleocr-vl" not in lowered_model:
+        return []
+    if not items:
+        return []
+
+    W = max(1, int(image_width))
+    H = max(1, int(image_height))
+    if float(W) < (1.18 * float(H)):
+        return []
+
+    valid: list[tuple[tuple[float, float, float, float], str]] = []
+    heights: list[float] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        bbox_n = _normalize_bbox_px(item.get("bbox"))
+        if not text or bbox_n is None:
+            continue
+        x0, y0, x1, y1 = bbox_n
+        if x1 <= x0 or y1 <= y0:
+            continue
+        compact = re.sub(r"\s+", "", text)
+        valid.append((bbox_n, compact))
+        heights.append(max(1.0, float(y1 - y0)))
+
+    count = len(valid)
+    if count < 4 or count > 18:
+        return []
+
+    heights.sort()
+    median_h = heights[len(heights) // 2] if heights else max(10.0, 0.02 * float(H))
+    median_h = max(8.0, float(median_h))
+
+    large_boxes = 0
+    small_boxes = 0
+    right_boxes = 0
+    for bbox_n, compact in valid:
+        x0, y0, x1, y1 = bbox_n
+        w = max(1.0, float(x1 - x0))
+        h = max(1.0, float(y1 - y0))
+        cx = (float(x0) + float(x1)) / 2.0
+
+        if (
+            h >= max(1.7 * median_h, 0.075 * float(H))
+            or (w >= 0.22 * float(W) and len(compact) >= 20)
+        ):
+            large_boxes += 1
+        if (
+            w <= 0.18 * float(W)
+            and h <= 0.08 * float(H)
+            and len(compact) <= 24
+        ):
+            small_boxes += 1
+        if cx >= 0.58 * float(W):
+            right_boxes += 1
+
+    if (
+        large_boxes >= max(4, count - 2)
+        and small_boxes <= 1
+        and right_boxes <= 1
+    ):
+        return [
+            "paddle_vl_sparse_slide_layout:"
+            f" items={count}"
+            f" large_boxes={large_boxes}"
+            f" small_boxes={small_boxes}"
+            f" right_boxes={right_boxes}"
+        ]
+    return []
 
 
 def _bbox_iou(
@@ -3654,7 +3734,11 @@ def ocr_image_to_elements(
             merged_items = effective_linebreak_refiner.assist_line_breaks(
                 image_path,
                 items=merged_items,
-                allow_heuristic_fallback=not bool(strict_no_fallback),
+                # Heuristic line splitting is a local layout post-process, not
+                # an OCR provider fallback. Keep it available even in strict
+                # mode so coarse boxes from doc-oriented OCR models do not slip
+                # through unchanged when the visual refiner returns no splits.
+                allow_heuristic_fallback=True,
             )
         except Exception as e:
             logger.warning("AI OCR line-break assist failed: %s", e)

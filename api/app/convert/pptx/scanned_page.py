@@ -656,6 +656,52 @@ def _sample_pixmap_rgb(
     return (v, v, v)
 
 
+_PIX_RGB_ARRAY_CACHE: dict[int, tuple[int, int, int, Any]] = {}
+
+
+def _pix_to_rgb_array(pix: Any) -> Any | None:
+    """Return cached HxWx3 uint8 array for a PyMuPDF pixmap."""
+
+    try:
+        import numpy as np  # type: ignore
+    except Exception:
+        return None
+
+    try:
+        w = int(getattr(pix, "width", 0) or 0)
+        h = int(getattr(pix, "height", 0) or 0)
+        n = int(getattr(pix, "n", 0) or 0)
+    except Exception:
+        return None
+
+    if w <= 0 or h <= 0 or n <= 0:
+        return None
+
+    cache_key = id(pix)
+    cached = _PIX_RGB_ARRAY_CACHE.get(cache_key)
+    if cached is not None:
+        cw, ch, cn, carr = cached
+        if cw == w and ch == h and cn == n:
+            return carr
+
+    try:
+        raw = np.frombuffer(pix.samples, dtype=np.uint8)
+        expected = int(w) * int(h) * int(n)
+        if raw.size < expected:
+            return None
+        arr = raw[:expected].reshape((h, w, n))
+        if n == 1:
+            rgb = np.repeat(arr[:, :, :1], 3, axis=2)
+        else:
+            rgb = arr[:, :, :3]
+        _PIX_RGB_ARRAY_CACHE[cache_key] = (w, h, n, rgb)
+        if len(_PIX_RGB_ARRAY_CACHE) > 24:
+            _PIX_RGB_ARRAY_CACHE.clear()
+        return rgb
+    except Exception:
+        return None
+
+
 def _sample_bbox_background_rgb(
     pix: Any,
     *,
@@ -750,6 +796,48 @@ def _sample_bbox_text_rgb(
     area = max(1, width * height)
     step = max(1, int(round((float(area) / float(max_samples)) ** 0.5)))
 
+    rgb_arr = _pix_to_rgb_array(pix)
+    if rgb_arr is not None:
+        try:
+            import numpy as np  # type: ignore
+
+            ys = np.arange(top, bottom, step, dtype=np.int32)
+            xs = np.arange(left, right, step, dtype=np.int32)
+            if ys.size >= 1 and xs.size >= 1:
+                yy, xx = np.meshgrid(ys, xs, indexing="ij")
+                sampled = rgb_arr[yy, xx]
+                sampled_flat = sampled.reshape(-1, 3).astype(np.float32, copy=False)
+
+                bg_luma = float(_rgb_luma(bg_rgb))
+                luma = (
+                    0.299 * sampled_flat[:, 0]
+                    + 0.587 * sampled_flat[:, 1]
+                    + 0.114 * sampled_flat[:, 2]
+                )
+                contrast = np.abs(luma - float(bg_luma))
+                keep = contrast >= 14.0
+                if int(np.count_nonzero(keep)) >= 6:
+                    kept_rgb = sampled_flat[keep]
+                    kept_contrast = contrast[keep]
+                    top_k = max(6, int(round(0.25 * kept_rgb.shape[0])))
+                    if kept_rgb.shape[0] > top_k:
+                        idx = np.argpartition(kept_contrast, -top_k)[-top_k:]
+                        selected = kept_rgb[idx]
+                    else:
+                        selected = kept_rgb
+
+                    med = np.median(selected, axis=0)
+                    estimated = (
+                        int(max(0, min(255, round(float(med[0]))))),
+                        int(max(0, min(255, round(float(med[1]))))),
+                        int(max(0, min(255, round(float(med[2]))))),
+                    )
+                    if _rgb_sq_distance(estimated, bg_rgb) < (24 * 24):
+                        return None
+                    return estimated
+        except Exception:
+            pass
+
     bg_luma = _rgb_luma(bg_rgb)
     candidates: list[tuple[float, tuple[int, int, int]]] = []
     for yp in range(top, bottom, step):
@@ -774,6 +862,98 @@ def _sample_bbox_text_rgb(
     if _rgb_sq_distance(estimated, bg_rgb) < (24 * 24):
         return None
     return estimated
+
+
+def _estimate_bbox_ink_line_count(
+    pix: Any,
+    *,
+    bbox_pt: Any,
+    page_height_pt: float,
+    dpi: int,
+    max_lines: int = 3,
+) -> int | None:
+    """Estimate visible text line count in a bbox from source-page pixels.
+
+    This is a lightweight visual signal used by OCR text rendering to choose
+    single-line vs wrapped layout when AI/heuristic split metadata is absent.
+    """
+
+    try:
+        import numpy as np  # type: ignore
+    except Exception:
+        return None
+
+    try:
+        x0, y0, x1, y1 = _coerce_bbox_pt(bbox_pt)
+    except Exception:
+        return None
+
+    x0p, y0p = _pdf_pt_to_pix_px(
+        float(x0), float(y0), page_height_pt=page_height_pt, dpi=int(dpi)
+    )
+    x1p, y1p = _pdf_pt_to_pix_px(
+        float(x1), float(y1), page_height_pt=page_height_pt, dpi=int(dpi)
+    )
+    left = max(0, min(int(x0p), int(x1p)))
+    right = max(0, max(int(x0p), int(x1p)))
+    top = max(0, min(int(y0p), int(y1p)))
+    bottom = max(0, max(int(y0p), int(y1p)))
+
+    width = max(0, right - left)
+    height = max(0, bottom - top)
+    if width < 8 or height < 8:
+        return 1
+
+    rgb_arr = _pix_to_rgb_array(pix)
+    if rgb_arr is None:
+        return None
+
+    try:
+        patch = rgb_arr[top:bottom, left:right]
+        if patch.size <= 0:
+            return 1
+
+        gray = (
+            0.299 * patch[:, :, 0].astype(np.float32)
+            + 0.587 * patch[:, :, 1].astype(np.float32)
+            + 0.114 * patch[:, :, 2].astype(np.float32)
+        )
+
+        bg = float(np.percentile(gray, 92.0))
+        threshold = max(0.0, bg - 18.0)
+        ink = gray < threshold
+        if float(np.mean(ink)) < 0.004:
+            return 1
+
+        row_density = np.mean(ink, axis=1)
+        if row_density.size < 3:
+            return 1
+
+        kernel = np.array([0.2, 0.6, 0.2], dtype=np.float32)
+        row_density = np.convolve(row_density, kernel, mode="same")
+
+        active_th = float(np.percentile(row_density, 72.0)) * 0.58
+        active_th = max(0.018, min(0.22, active_th))
+        active = row_density >= active_th
+
+        runs = 0
+        run_len = 0
+        min_run = max(2, int(round(0.015 * float(height))))
+        for flag in active.tolist():
+            if flag:
+                run_len += 1
+            else:
+                if run_len >= min_run:
+                    runs += 1
+                run_len = 0
+        if run_len >= min_run:
+            runs += 1
+
+        if runs <= 0:
+            return 1
+        return max(1, min(int(max_lines), int(runs)))
+    except Exception:
+        return None
 
 
 def _pdf_pt_to_pix_px(
@@ -2683,7 +2863,8 @@ def _build_scanned_image_region_infos(
             float(
                 max(
                     0.0,
-                    float(cand_bbox[2] - cand_bbox[0]) * float(cand_bbox[3] - cand_bbox[1]),
+                    float(cand_bbox[2] - cand_bbox[0])
+                    * float(cand_bbox[3] - cand_bbox[1]),
                 )
             ),
         )
@@ -2738,7 +2919,9 @@ def _build_scanned_image_region_infos(
             continue
 
         aspect = max(w_pt / max(1.0, h_pt), h_pt / max(1.0, w_pt))
-        if aspect >= max_aspect_ratio_id and area_ratio < (0.05 if is_ai_hint else 0.08):
+        if aspect >= max_aspect_ratio_id and area_ratio < (
+            0.05 if is_ai_hint else 0.08
+        ):
             continue
 
         min_dim_pt = max(18.0, 1.8 * float(baseline_ocr_h_pt))
@@ -2832,7 +3015,11 @@ def _build_scanned_image_region_infos(
                 continue
             # Large text overlap can indicate mixed text panels, but screenshots may
             # legitimately contain some embedded text. Keep this gate conservative.
-            if area_ratio >= 0.020 and large_line_inside >= 2 and large_line_cov >= 0.10:
+            if (
+                area_ratio >= 0.020
+                and large_line_inside >= 2
+                and large_line_cov >= 0.10
+            ):
                 continue
             if large_line_inside >= 4 and (cov >= 0.08 or large_line_cov >= 0.10):
                 continue
@@ -3075,7 +3262,11 @@ def _filter_scanned_ocr_text_elements(
                 if overlap_ratio >= 0.86:
                     inside_image = True
                     break
-                if (not keep_as_text_preferred) and center_inside and overlap_ratio >= 0.52:
+                if (
+                    (not keep_as_text_preferred)
+                    and center_inside
+                    and overlap_ratio >= 0.52
+                ):
                     inside_image = True
                     break
 

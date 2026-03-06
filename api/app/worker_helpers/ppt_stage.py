@@ -34,7 +34,6 @@ def run_ppt_stage(
     output_pptx: Path,
     artifacts_dir: Path,
     scanned_render_dpi: int,
-    ppt_text_fit_workers: int = 1,
     normalized_text_erase_mode: str,
     normalized_scanned_page_mode: str,
     normalized_image_bg_clear_expand_min_pt: float,
@@ -77,8 +76,6 @@ def run_ppt_stage(
         "artifacts_dir": artifacts_dir,
         "scanned_render_dpi": int(scanned_render_dpi),
     }
-    if "text_fit_workers" in generator_params:
-        generator_kwargs["text_fit_workers"] = max(1, int(ppt_text_fit_workers))
     if "text_erase_mode" in generator_params:
         generator_kwargs["text_erase_mode"] = normalized_text_erase_mode
     if "scanned_page_mode" in generator_params:

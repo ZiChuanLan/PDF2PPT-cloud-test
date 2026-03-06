@@ -188,8 +188,8 @@ export function PdfCanvasPreview({
 
         const baseViewport = pdfPage.getViewport({ scale: 1 })
         const safeWidth = containerWidth > 0 ? containerWidth : container.clientWidth
-        const availableWidth = Math.max(280, safeWidth - 32)
-        const maxCanvasWidth = Math.min(availableWidth, 760)
+        const availableWidth = Math.max(320, safeWidth - 12)
+        const maxCanvasWidth = Math.min(availableWidth, 1040)
         const scale = Math.max(0.1, maxCanvasWidth / baseViewport.width)
         const viewport = pdfPage.getViewport({ scale })
 
@@ -251,7 +251,7 @@ export function PdfCanvasPreview({
       )}
     >
       {!loadingError ? (
-        <div className="flex min-h-[300px] items-start justify-center overflow-auto p-3 md:p-4">
+        <div className="flex min-h-[300px] items-start justify-center overflow-auto p-1.5 md:p-2">
           <canvas ref={canvasRef} className="block border border-[#c8c8c8] bg-white shadow-sm max-w-full" />
         </div>
       ) : null}

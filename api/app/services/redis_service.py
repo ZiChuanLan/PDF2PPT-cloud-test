@@ -135,6 +135,18 @@ class RedisService:
         """Generate Redis key for cancellation flag."""
         return f"job:{job_id}:cancel"
 
+    def _persist_job(self, job: Job) -> Job:
+        """Persist job metadata while keeping the exposed expiry aligned with TTL."""
+        job.expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=self.ttl_seconds
+        )
+        self.redis_client.setex(
+            self._job_key(job.job_id),
+            self.ttl_seconds,
+            job.model_dump_json(),
+        )
+        return job
+
     def create_job(self, job_id: str) -> Job:
         """Create a new job in Redis."""
         now = datetime.now(timezone.utc)
@@ -153,13 +165,7 @@ class RedisService:
         )
 
         # Store job metadata with TTL
-        self.redis_client.setex(
-            self._job_key(job_id),
-            self.ttl_seconds,
-            job.model_dump_json(),
-        )
-
-        return job
+        return self._persist_job(job)
 
     def get_job(self, job_id: str) -> Optional[Job]:
         """Retrieve job metadata from Redis."""
@@ -202,14 +208,7 @@ class RedisService:
         if error is not None:
             job.error = error
 
-        # Save back to Redis with TTL
-        self.redis_client.setex(
-            self._job_key(job_id),
-            self.ttl_seconds,
-            job.model_dump_json(),
-        )
-
-        return job
+        return self._persist_job(job)
 
     def refresh_job_ttl(self, job_id: str) -> Optional[Job]:
         """Refresh TTL and expiration timestamp without changing job state."""
@@ -217,15 +216,7 @@ class RedisService:
         if not job:
             return None
 
-        job.expires_at = datetime.now(timezone.utc) + timedelta(
-            seconds=self.ttl_seconds
-        )
-        self.redis_client.setex(
-            self._job_key(job_id),
-            self.ttl_seconds,
-            job.model_dump_json(),
-        )
-        return job
+        return self._persist_job(job)
 
     def set_cancel_flag(self, job_id: str) -> None:
         """Set cancellation flag for a job."""
