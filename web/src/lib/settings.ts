@@ -43,6 +43,7 @@ export type Settings = {
   visualAssistModeBaiduDoc: LayoutAssistMode
   visualAssistModeMineru: LayoutAssistMode
   enableOcr: boolean
+  removeFooterNotebooklm: boolean
   textEraseMode: TextEraseMode
   scannedPageMode: ScannedPageMode
   imageBgClearExpandMinPt: string
@@ -113,6 +114,8 @@ export const defaultSettings: Settings = {
   visualAssistModeMineru: "off",
   // Most real-world PDFs are scans. Default to OCR-on so output is editable.
   enableOcr: true,
+  // Keep off by default: only enable when exported decks contain NotebookLM footer branding.
+  removeFooterNotebooklm: false,
   // smart: current adaptive erase; fill: fast rectangle background fill.
   textEraseMode: "fill",
   // segmented: keep some images as editable blocks; fullpage: keep a single page background.

@@ -1296,6 +1296,24 @@ export default function SettingsPage() {
                 </Select>
               </div>
 
+              <div className="flex items-center gap-1.5">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-[#111111]"
+                    checked={settings.removeFooterNotebooklm}
+                    onChange={(e) =>
+                      setSettings((s) => ({
+                        ...s,
+                        removeFooterNotebooklm: e.target.checked,
+                      }))
+                    }
+                  />
+                  <span>删除页脚 NotebookLM</span>
+                </label>
+                <HoverHint text="仅删除页脚区域识别到的“NotebookLM”品牌字样；默认关闭，避免误删正文内容。" />
+              </div>
+
               <AdvancedReveal show={showAdvanced}>
                 <div className="grid gap-3 rounded-md border border-border/70 p-3">
                   <div className="flex items-center justify-between gap-2">

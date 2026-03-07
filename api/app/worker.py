@@ -116,6 +116,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
     job_id: str,
     *,
     enable_ocr: bool = False,
+    remove_footer_notebooklm: bool = False,
     text_erase_mode: str | None = None,
     enable_layout_assist: bool = True,
     layout_assist_apply_image_regions: bool = False,
@@ -162,6 +163,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
 
     _ = (
         enable_ocr,
+        remove_footer_notebooklm,
         text_erase_mode,
         enable_layout_assist,
         layout_assist_apply_image_regions,
@@ -736,6 +738,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             output_pptx=output_pptx,
             artifacts_dir=artifacts_dir,
             scanned_render_dpi=int(scanned_render_dpi),
+            remove_footer_notebooklm=bool(remove_footer_notebooklm),
             normalized_text_erase_mode=normalized_text_erase_mode,
             normalized_scanned_page_mode=normalized_scanned_page_mode,
             normalized_image_bg_clear_expand_min_pt=normalized_image_bg_clear_expand_min_pt,

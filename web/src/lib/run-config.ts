@@ -555,6 +555,7 @@ export function createJobFormData(
     String(Boolean(run.layoutAssistEnabled && settings.layoutAssistApplyImageRegions))
   )
   form.append("enable_ocr", String(run.parseProvider === "local" ? Boolean(settings.enableOcr) : false))
+  form.append("remove_footer_notebooklm", String(Boolean(settings.removeFooterNotebooklm)))
   form.append("text_erase_mode", settings.textEraseMode)
   form.append("scanned_page_mode", settings.scannedPageMode)
   const imageBgClearExpandMinPt = toFiniteFloatStringOrUndefined(settings.imageBgClearExpandMinPt)

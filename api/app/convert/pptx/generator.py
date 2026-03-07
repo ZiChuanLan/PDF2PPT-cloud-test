@@ -105,6 +105,44 @@ def _sanitize_markdown_text(text: str) -> str:
     return "\n".join(cleaned_lines).strip()
 
 
+def _normalize_footer_brand_text(text: str) -> str:
+    return "".join(ch.lower() for ch in str(text or "") if ch.isalnum())
+
+
+def _is_notebooklm_footer_text_element(
+    el: dict[str, Any],
+    *,
+    page_w_pt: float,
+    page_h_pt: float,
+) -> bool:
+    raw_text = str(el.get("text") or "").strip()
+    if not raw_text:
+        return False
+
+    normalized = _normalize_footer_brand_text(raw_text)
+    if normalized != "notebooklm":
+        return False
+
+    try:
+        x0, y0, x1, y1 = _coerce_bbox_pt(el.get("bbox_pt"))
+    except Exception:
+        return False
+
+    if x1 <= x0 or y1 <= y0 or page_w_pt <= 0.0 or page_h_pt <= 0.0:
+        return False
+
+    cx = (x0 + x1) / 2.0
+    cy = (y0 + y1) / 2.0
+    width_ratio = float(x1 - x0) / float(page_w_pt)
+    height_ratio = float(y1 - y0) / float(page_h_pt)
+    return (
+        cy >= (0.84 * float(page_h_pt))
+        and cx >= (0.72 * float(page_w_pt))
+        and width_ratio <= 0.22
+        and height_ratio <= 0.08
+    )
+
+
 def generate_pptx_from_ir(
     ir: dict[str, Any],
     output_pptx_path: str | Path,
@@ -112,6 +150,7 @@ def generate_pptx_from_ir(
     artifacts_dir: str | Path | None = None,
     force_16x9: bool = False,
     scanned_render_dpi: int = 200,
+    remove_footer_notebooklm: bool = False,
     scanned_page_mode: str = "fullpage",
     text_erase_mode: str = "fill",
     image_bg_clear_expand_min_pt: float = 0.35,
@@ -130,6 +169,8 @@ def generate_pptx_from_ir(
         artifacts_dir: Directory for any intermediate artifacts (e.g. scanned page renders).
         force_16x9: If True, use a 16:9 slide size and letterbox PDF content.
         scanned_render_dpi: DPI used when rendering scanned pages to images.
+        remove_footer_notebooklm: Whether to drop detected bottom-right
+            NotebookLM footer branding text from the exported PPT.
         text_erase_mode: Erase strategy for background cleanup (smart, fill).
         image_bg_clear_expand_min_pt: Min outward expansion (pt) when clearing
             background under overlaid image crops.
@@ -315,11 +356,35 @@ def generate_pptx_from_ir(
         page_elements = [
             el for el in (page.get("elements") or []) if isinstance(el, dict)
         ]
+        page_text_elements_all = [
+            el for el in _iter_page_elements(page, type_name="text") if isinstance(el, dict)
+        ]
+        page_text_elements_render = [
+            el
+            for el in page_text_elements_all
+            if not (
+                bool(remove_footer_notebooklm)
+                and _is_notebooklm_footer_text_element(
+                    el,
+                    page_w_pt=float(page_w_pt),
+                    page_h_pt=float(page_h_pt),
+                )
+            )
+        ]
+        page_text_elements_footer_removed = [
+            el
+            for el in page_text_elements_all
+            if bool(remove_footer_notebooklm)
+            and _is_notebooklm_footer_text_element(
+                el,
+                page_w_pt=float(page_w_pt),
+                page_h_pt=float(page_h_pt),
+            )
+        ]
         page_ocr_text_elements = [
             el
-            for el in page_elements
-            if str(el.get("type") or "").strip().lower() == "text"
-            and str(el.get("source") or "").strip().lower() == "ocr"
+            for el in page_text_elements_render
+            if str(el.get("source") or "").strip().lower() == "ocr"
         ]
         baseline_ocr_h_pt = (
             _estimate_baseline_ocr_line_height_pt(
@@ -349,9 +414,14 @@ def generate_pptx_from_ir(
             bg_h = int(round(page_h_pt * _EMU_PER_PT * transform.scale))
 
             # Collect OCR text blocks + stats for heuristics.
+            removed_footer_ocr_text_elements = [
+                el
+                for el in page_text_elements_footer_removed
+                if str(el.get("source") or "").strip().lower() == "ocr"
+            ]
             ocr_text_elements = [
                 el
-                for el in _iter_page_elements(page, type_name="text")
+                for el in page_text_elements_render
                 if str(el.get("source") or "") == "ocr"
             ]
             baseline_ocr_h_pt = _estimate_baseline_ocr_line_height_pt(
@@ -498,6 +568,21 @@ def generate_pptx_from_ir(
                 tuple[dict[str, Any], list[float], str, tuple[int, int, int]]
             ] = []
             is_fill_mode = text_erase_mode_id == "fill"
+
+            for el in removed_footer_ocr_text_elements:
+                bbox_pt = el.get("bbox_pt")
+                try:
+                    x0, y0, x1, y1 = _coerce_bbox_pt(bbox_pt)
+                except Exception:
+                    continue
+                bbox_h_pt = max(1.0, y1 - y0)
+                pad_x_pt, pad_y_pt = _compute_text_erase_padding_pt(
+                    bbox_h_pt=bbox_h_pt,
+                    text_erase_mode=text_erase_mode_id,
+                )
+                text_erase_bboxes_pt.append(
+                    [x0 - pad_x_pt, y0 - pad_y_pt, x1 + pad_x_pt, y1 + pad_y_pt]
+                )
 
             for el in ocr_text_elements:
                 bbox_pt = el.get("bbox_pt")
@@ -988,7 +1073,7 @@ def generate_pptx_from_ir(
                 protect_bboxes_pt: list[list[float]] = []
                 mineru_image_regions_pt: list[list[float]] = []
 
-                for el in _iter_page_elements(page, type_name="text"):
+                for el in page_text_elements_all:
                     if not _is_layout_parse_source(el.get("source")):
                         continue
                     try:
@@ -1061,7 +1146,7 @@ def generate_pptx_from_ir(
         if ocr_sampling_pix is None and source_pdf.exists():
             has_ocr_text_elements = any(
                 str(el.get("source") or "").strip().lower() == "ocr"
-                for el in _iter_page_elements(page, type_name="text")
+                for el in page_text_elements_render
             )
             if has_ocr_text_elements:
                 try:
@@ -1178,7 +1263,7 @@ def generate_pptx_from_ir(
                 # No structured cells; leave empty for now.
                 pass
 
-        for el in _iter_page_elements(page, type_name="text"):
+        for el in page_text_elements_render:
             bbox_pt = el.get("bbox_pt")
             try:
                 left, top, width, height = _bbox_pt_to_slide_emu(

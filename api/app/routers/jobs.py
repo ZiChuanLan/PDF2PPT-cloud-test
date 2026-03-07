@@ -18,6 +18,12 @@ from fastapi import APIRouter, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image, ImageDraw
 from rq import Queue
+from rq.job import Job as RqJob
+
+try:
+    from rq.command import send_stop_job_command
+except Exception:  # pragma: no cover - compatibility with older RQ builds
+    send_stop_job_command = None
 
 from ..config import get_settings
 from ..job_options import validate_and_normalize_job_options
@@ -59,6 +65,47 @@ from ..worker import get_redis_connection, process_pdf_job
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
+
+
+def _sync_rq_cancel_state(*, job_id: str, status: JobStatus) -> None:
+    """Mirror API-level cancellation into RQ so queued/running jobs unblock quickly."""
+    redis_service = get_redis_service()
+    if redis_service.is_memory_backend():
+        return
+
+    try:
+        redis_conn = get_redis_connection()
+    except Exception as e:
+        logger.warning(
+            "Failed to acquire Redis connection for job %s cancel: %s", job_id, e
+        )
+        return
+
+    normalized_status = str(
+        status.value if isinstance(status, JobStatus) else status
+    ).strip().lower()
+    try:
+        if normalized_status == JobStatus.pending.value:
+            rq_job = RqJob.fetch(job_id, connection=redis_conn)
+            rq_job.cancel()
+            logger.info("Cancelled queued RQ job %s", job_id)
+            return
+
+        if (
+            normalized_status == JobStatus.processing.value
+            and send_stop_job_command is not None
+        ):
+            send_stop_job_command(redis_conn, job_id)
+            logger.info("Sent stop command to running RQ job %s", job_id)
+            return
+
+        if normalized_status == JobStatus.processing.value:
+            logger.warning(
+                "RQ stop command unavailable while cancelling running job %s",
+                job_id,
+            )
+    except Exception as e:
+        logger.warning("Failed to sync RQ cancel state for job %s: %s", job_id, e)
 
 
 @router.post("/ocr/local/check", response_model=LocalOcrCheckResponse)
@@ -392,6 +439,10 @@ async def list_jobs(
 async def create_job(
     file: UploadFile = File(..., description="PDF file to convert"),
     enable_ocr: bool = Form(False, description="Enable OCR for scanned PDFs"),
+    remove_footer_notebooklm: bool = Form(
+        False,
+        description="Remove detected NotebookLM footer branding text from the output",
+    ),
     text_erase_mode: str | None = Form(
         "fill", description="Text erase mode for scanned/mineru pages (smart, fill)"
     ),
@@ -630,6 +681,7 @@ async def create_job(
                 kwargs={
                     "job_id": job_id,
                     "enable_ocr": enable_ocr,
+                    "remove_footer_notebooklm": remove_footer_notebooklm,
                     "enable_layout_assist": enable_layout_assist,
                     "layout_assist_apply_image_regions": layout_assist_apply_image_regions,
                     "provider": normalized_options.provider,
@@ -685,6 +737,7 @@ async def create_job(
                 # and also set the RQ job id to match for easier debugging.
                 job_id,
                 enable_ocr=enable_ocr,
+                remove_footer_notebooklm=remove_footer_notebooklm,
                 enable_layout_assist=enable_layout_assist,
                 layout_assist_apply_image_regions=layout_assist_apply_image_regions,
                 provider=normalized_options.provider,
@@ -890,8 +943,8 @@ async def cancel_job(job_id: str):
     """
     Cancel a running job.
 
-    Sets a cancellation flag that the worker will check.
-    The worker should stop processing within 10 seconds.
+    Mirrors cancellation into Redis and RQ so queued/running jobs can release
+    worker capacity promptly.
     """
     redis_service = get_redis_service()
 
@@ -910,6 +963,8 @@ async def cancel_job(job_id: str):
             message=f"Cannot cancel job in {job.status} state",
             details={"status": job.status},
         )
+
+    _sync_rq_cancel_state(job_id=job_id, status=job.status)
 
     # Set cancellation flag
     redis_service.set_cancel_flag(job_id)
