@@ -1,6 +1,9 @@
 """AI OCR client and text refinement utilities."""
 
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import copy
 import contextvars
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -48,9 +51,17 @@ from .result_parsing import (
     _derive_paddle_doc_predict_max_pixels,
     _extract_deepseek_image_regions,
     _extract_image_regions_json,
+    _is_image_like_layout_label,
+    _normalize_layout_label,
     _extract_paddle_doc_parser_output,
     _normalize_bbox_px,
     _scale_paddle_doc_parser_output,
+)
+from .routing import (
+    ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR,
+    ROUTE_KIND_REMOTE_DOC_PARSER,
+    ROUTE_KIND_REMOTE_PROMPT_OCR,
+    normalize_ocr_route_kind,
 )
 from .utils import (
     _coerce_bbox_xyxy,
@@ -77,8 +88,395 @@ def _env_int(name: str, default: int) -> int:
     return int(value)
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _compact_debug_text(value: Any, *, limit: int = 160) -> str:
+    compact = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 3)] + "..."
+
+
+def _sanitize_debug_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key).startswith("_"):
+                continue
+            sanitized[str(key)] = _sanitize_debug_value(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_debug_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_debug_value(item) for item in value]
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return round(float(value), 4)
+    return value
+
+
+def _normalize_ai_layout_model_name(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {
+        "",
+        "pp_doclayout_v3",
+        "pp-doclayout-v3",
+        "pp_doclayout",
+        "pp-doclayoutv3",
+        "pp_doclayoutv3",
+    }:
+        return "pp_doclayout_v3"
+    return "pp_doclayout_v3"
+
+
+def _resolve_paddlex_layout_model_name(value: Any) -> str:
+    normalized = _normalize_ai_layout_model_name(value)
+    if normalized == "pp_doclayout_v3":
+        return "PP-DocLayoutV3"
+    return "PP-DocLayoutV3"
+
+
+def _coerce_int_in_range(
+    value: Any,
+    *,
+    low: int,
+    high: int,
+    default: int | None = None,
+) -> int | None:
+    try:
+        if value is None:
+            raise ValueError("value is none")
+        parsed = int(value)
+    except Exception:
+        return default
+    if parsed < low:
+        return low
+    if parsed > high:
+        return high
+    return int(parsed)
+
+
+class _AiRequestReservation:
+    def __init__(self, limiter: "_AiRequestRateLimiter", event: dict[str, Any]) -> None:
+        self._limiter = limiter
+        self._event = event
+        self._finalized = False
+
+    def finalize(self, *, actual_tokens: int | None) -> None:
+        if self._finalized:
+            return
+        self._finalized = True
+        self._limiter.finalize(self._event, actual_tokens=actual_tokens)
+
+
+class _AiRequestRateLimiter:
+    def __init__(
+        self,
+        *,
+        key: str,
+        requests_per_minute: int | None,
+        tokens_per_minute: int | None,
+    ) -> None:
+        self.key = key
+        self.requests_per_minute = requests_per_minute
+        self.tokens_per_minute = tokens_per_minute
+        self._events: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+
+    def _prune(self, *, now_monotonic: float) -> None:
+        cutoff = float(now_monotonic) - 60.0
+        self._events = [
+            event
+            for event in self._events
+            if float(event.get("at_monotonic") or 0.0) >= cutoff
+        ]
+
+    def acquire(self, *, estimated_tokens: int) -> _AiRequestReservation:
+        estimated = max(1, int(estimated_tokens or 1))
+        if (
+            self.tokens_per_minute is not None
+            and estimated > int(self.tokens_per_minute)
+        ):
+            estimated = int(self.tokens_per_minute)
+
+        while True:
+            with self._lock:
+                now_monotonic = time.monotonic()
+                self._prune(now_monotonic=now_monotonic)
+                wait_s = 0.0
+
+                if (
+                    self.requests_per_minute is not None
+                    and len(self._events) >= int(self.requests_per_minute)
+                    and self._events
+                ):
+                    oldest = float(self._events[0].get("at_monotonic") or now_monotonic)
+                    wait_s = max(wait_s, max(0.0, 60.0 - (now_monotonic - oldest)))
+
+                if (
+                    self.tokens_per_minute is not None
+                    and self._events
+                ):
+                    token_budget = int(self.tokens_per_minute)
+                    used_tokens = sum(int(event.get("tokens") or 0) for event in self._events)
+                    if used_tokens + estimated > token_budget:
+                        reclaimed = 0
+                        for event in self._events:
+                            reclaimed += int(event.get("tokens") or 0)
+                            candidate_wait = max(
+                                0.0,
+                                60.0
+                                - (
+                                    now_monotonic
+                                    - float(event.get("at_monotonic") or now_monotonic)
+                                ),
+                            )
+                            if used_tokens - reclaimed + estimated <= token_budget:
+                                wait_s = max(wait_s, candidate_wait)
+                                break
+
+                if wait_s <= 0.0:
+                    event = {
+                        "at_monotonic": now_monotonic,
+                        "tokens": estimated,
+                    }
+                    self._events.append(event)
+                    return _AiRequestReservation(self, event)
+
+            time.sleep(max(0.05, min(wait_s, 5.0)))
+
+    def finalize(self, event: dict[str, Any], *, actual_tokens: int | None) -> None:
+        if actual_tokens is None:
+            return
+        finalized_tokens = max(1, int(actual_tokens))
+        if (
+            self.tokens_per_minute is not None
+            and finalized_tokens > int(self.tokens_per_minute)
+        ):
+            finalized_tokens = int(self.tokens_per_minute)
+        with self._lock:
+            event["tokens"] = finalized_tokens
+
+
+_AI_REQUEST_LIMITERS_LOCK = threading.Lock()
+_AI_REQUEST_LIMITERS: dict[str, _AiRequestRateLimiter] = {}
+
+
+def _get_shared_ai_request_limiter(
+    *,
+    api_key: str | None,
+    provider_id: str | None,
+    base_url: str | None,
+    model: str | None,
+    requests_per_minute: int | None,
+    tokens_per_minute: int | None,
+) -> _AiRequestRateLimiter | None:
+    if requests_per_minute is None and tokens_per_minute is None:
+        return None
+    api_key_hash = hashlib.sha1(str(api_key or "").encode("utf-8")).hexdigest()[:12]
+    key_payload = {
+        "api_key_hash": api_key_hash,
+        "base_url": str(base_url or "").strip().lower(),
+        "model": str(model or "").strip().lower(),
+        "provider": str(provider_id or "").strip().lower(),
+        "rpm": requests_per_minute,
+        "tpm": tokens_per_minute,
+    }
+    key = json.dumps(key_payload, ensure_ascii=True, sort_keys=True)
+    with _AI_REQUEST_LIMITERS_LOCK:
+        limiter = _AI_REQUEST_LIMITERS.get(key)
+        if limiter is None:
+            limiter = _AiRequestRateLimiter(
+                key=key,
+                requests_per_minute=requests_per_minute,
+                tokens_per_minute=tokens_per_minute,
+            )
+            _AI_REQUEST_LIMITERS[key] = limiter
+        return limiter
+
+
+def _estimate_chat_completion_tokens(*, messages: Any, max_tokens: int | None) -> int:
+    text_chars = 0
+    image_items = 0
+
+    def _walk(value: Any) -> None:
+        nonlocal image_items, text_chars
+        if isinstance(value, str):
+            text_chars += len(value)
+            return
+        if isinstance(value, list):
+            for item in value:
+                _walk(item)
+            return
+        if not isinstance(value, dict):
+            return
+
+        item_type = str(value.get("type") or "").strip().lower()
+        if item_type in {"image_url", "input_image"}:
+            image_items += 1
+            return
+        if item_type == "text":
+            _walk(value.get("text"))
+            return
+        if "text" in value:
+            _walk(value.get("text"))
+        if "content" in value:
+            _walk(value.get("content"))
+
+    _walk(messages)
+    prompt_tokens = int(math.ceil(float(text_chars) / 4.0))
+    image_tokens = int(image_items) * 512
+    completion_budget = max(0, int(max_tokens or 0))
+    return max(1, prompt_tokens + image_tokens + completion_budget)
+
+
+def _extract_completion_total_tokens(completion: Any) -> int | None:
+    usage = getattr(completion, "usage", None)
+    if usage is None and isinstance(completion, dict):
+        usage = completion.get("usage")
+    total_tokens = None
+    if isinstance(usage, dict):
+        total_tokens = usage.get("total_tokens")
+    elif usage is not None:
+        total_tokens = getattr(usage, "total_tokens", None)
+    try:
+        if total_tokens is None:
+            return None
+        parsed = int(total_tokens)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _extract_error_status_code(error: BaseException) -> int | None:
+    for attr in ("status_code", "status"):
+        try:
+            value = getattr(error, attr)
+        except Exception:
+            value = None
+        if isinstance(value, int) and value > 0:
+            return value
+    response = getattr(error, "response", None)
+    if response is not None:
+        for attr in ("status_code", "status"):
+            try:
+                value = getattr(response, attr)
+            except Exception:
+                value = None
+            if isinstance(value, int) and value > 0:
+                return value
+    return None
+
+
+def _is_retryable_chat_completion_error(error: BaseException) -> bool:
+    status_code = _extract_error_status_code(error)
+    if status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
+        return True
+    lowered = str(error or "").strip().lower()
+    retry_markers = (
+        "timed out",
+        "timeout",
+        "rate limit",
+        "too many requests",
+        "temporarily unavailable",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "remote protocol error",
+        "server disconnected",
+        "service unavailable",
+        "gateway",
+        "try again",
+        "overloaded",
+    )
+    return any(marker in lowered for marker in retry_markers)
+
+
+def _retry_delay_s_for_chat_completion(
+    *,
+    attempt_index: int,
+    error: BaseException,
+) -> float:
+    status_code = _extract_error_status_code(error)
+    base_delay = min(8.0, 0.75 * (2 ** max(0, int(attempt_index))))
+    if status_code == 429:
+        return max(2.0, base_delay)
+    return max(0.25, base_delay)
+
+
+def _run_chat_completion_request(
+    *,
+    client: Any,
+    provider_id: str | None,
+    model: str,
+    timeout_s: float,
+    max_retries: int,
+    request_limiter: _AiRequestRateLimiter | None,
+    request_label: str,
+    logger_obj: logging.Logger,
+    messages: Any,
+    max_tokens: int | None,
+    **kwargs: Any,
+) -> Any:
+    estimated_tokens = _estimate_chat_completion_tokens(
+        messages=messages,
+        max_tokens=max_tokens,
+    )
+    total_attempts = max(0, int(max_retries))
+    attempt_index = 0
+    while True:
+        reservation: _AiRequestReservation | None = None
+        try:
+            if request_limiter is not None:
+                reservation = request_limiter.acquire(
+                    estimated_tokens=estimated_tokens
+                )
+            completion = client.with_options(
+                timeout=timeout_s,
+                max_retries=0,
+            ).chat.completions.create(
+                model=model,
+                messages=messages,  # type: ignore[arg-type]
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+            if reservation is not None:
+                reservation.finalize(
+                    actual_tokens=_extract_completion_total_tokens(completion)
+                )
+            return completion
+        except Exception as exc:
+            if reservation is not None:
+                reservation.finalize(actual_tokens=None)
+            if attempt_index >= total_attempts or not _is_retryable_chat_completion_error(exc):
+                raise
+            delay_s = _retry_delay_s_for_chat_completion(
+                attempt_index=attempt_index,
+                error=exc,
+            )
+            logger_obj.warning(
+                "AI OCR request retrying (label=%s, provider=%s, model=%s, attempt=%s/%s, delay_s=%.2f): %s",
+                request_label,
+                provider_id or "",
+                model or "",
+                attempt_index + 1,
+                total_attempts,
+                delay_s,
+                exc,
+            )
+            time.sleep(delay_s)
+            attempt_index += 1
+
+
 class AiOcrClient(OcrProvider):
     """AI OCR using OpenAI-compatible vision models."""
+
+    _local_layout_model_lock = threading.Lock()
+    _local_layout_model: Any | None = None
+    _local_layout_model_name: str | None = None
 
     def __init__(
         self,
@@ -87,7 +485,13 @@ class AiOcrClient(OcrProvider):
         base_url: str | None = None,
         model: str | None = None,
         provider: str | None = None,
+        layout_model: str | None = None,
         paddle_doc_max_side_px: int | None = None,
+        layout_block_max_concurrency: int | None = None,
+        request_rpm_limit: int | None = None,
+        request_tpm_limit: int | None = None,
+        request_max_retries: int | None = None,
+        route_kind: str | None = None,
     ):
         import openai
 
@@ -106,6 +510,11 @@ class AiOcrClient(OcrProvider):
         self._last_layout_image_path: str | None = None
         self._image_region_cache_path: str | None = None
         self._image_region_cache_ready: bool = False
+        self._paddle_doc_trace_lock = threading.Lock()
+        self._paddle_doc_trace_serial: int = 0
+        self._paddle_doc_active_predict_trace: dict[str, Any] | None = None
+        self._paddle_doc_last_predict_debug: dict[str, Any] | None = None
+        self._paddle_doc_recent_predict_debug: list[dict[str, Any]] = []
 
         self.vendor_adapter = _create_ai_ocr_vendor_adapter(
             provider=provider,
@@ -126,6 +535,12 @@ class AiOcrClient(OcrProvider):
         )
         self.provider_id = self.vendor_adapter.provider_id
         self.base_url = resolved_base_url
+        self.layout_model = _normalize_ai_layout_model_name(layout_model)
+        self.requested_route_kind = normalize_ocr_route_kind(
+            route_kind,
+            default="auto",
+        )
+        self.route_kind = ROUTE_KIND_REMOTE_PROMPT_OCR
         self.allow_model_downgrade: bool = _env_flag(
             "OCR_PADDLE_ALLOW_MODEL_DOWNGRADE",
             default=False,
@@ -144,15 +559,61 @@ class AiOcrClient(OcrProvider):
                 self._paddle_doc_max_side_px_override = max(
                     0, min(6000, int(normalized_max_side))
                 )
+        self._layout_block_max_concurrency_override = _coerce_int_in_range(
+            layout_block_max_concurrency,
+            low=1,
+            high=8,
+            default=None,
+        )
+        self.request_rpm_limit = _coerce_int_in_range(
+            request_rpm_limit,
+            low=1,
+            high=2000,
+            default=None,
+        )
+        self.request_tpm_limit = _coerce_int_in_range(
+            request_tpm_limit,
+            low=1,
+            high=2_000_000,
+            default=None,
+        )
+        self.request_max_retries = int(
+            _coerce_int_in_range(
+                request_max_retries,
+                low=0,
+                high=8,
+                default=0,
+            )
+            or 0
+        )
+        self._request_limiter = _get_shared_ai_request_limiter(
+            api_key=self.api_key,
+            provider_id=self.provider_id,
+            base_url=self.base_url,
+            model=self.model,
+            requests_per_minute=self.request_rpm_limit,
+            tokens_per_minute=self.request_tpm_limit,
+        )
 
-        if _is_paddleocr_vl_model(self.model):
+        if self.requested_route_kind == ROUTE_KIND_REMOTE_DOC_PARSER and not _is_paddleocr_vl_model(
+            self.model
+        ):
+            raise ValueError(
+                "remote_doc_parser route requires a PaddleOCR-VL model"
+            )
+
+        if (
+            _is_paddleocr_vl_model(self.model)
+            and self.requested_route_kind != ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR
+        ):
             should_use_doc_parser = self._should_use_paddle_doc_parser()
             if not should_use_doc_parser and not self.allow_paddle_prompt_fallback:
+                reason = self._describe_paddle_doc_parser_unavailable_reason()
                 raise ValueError(
-                    "Selected PaddleOCR-VL model requires dedicated structured OCR channel, "
-                    f"but provider/base_url is not supported (provider={self.provider_id}). "
-                    "Supported remote providers: siliconflow, novita. "
-                    "To force prompt mode explicitly, set OCR_PADDLE_VL_ALLOW_PROMPT_FALLBACK=1."
+                    "Selected PaddleOCR-VL model cannot use the current OCR chain. "
+                    f"Reason: {reason}. "
+                    "Choose `内置文档解析（PaddleOCR-VL）` / `doc_parser`, "
+                    "or set OCR_PADDLE_VL_ALLOW_PROMPT_FALLBACK=1 to force prompt mode explicitly."
                 )
             if should_use_doc_parser:
                 if not _clean_str(self.base_url):
@@ -165,10 +626,15 @@ class AiOcrClient(OcrProvider):
                     raise ValueError(
                         "PaddleOCR-VL requires `paddleocr` package. Install with: pip install paddleocr"
                     ) from e
+        self._refresh_route_kind()
 
     def _should_use_paddle_doc_parser(self) -> bool:
         if self._paddle_doc_parser_disabled:
             return False
+        if self.requested_route_kind == ROUTE_KIND_REMOTE_PROMPT_OCR:
+            return False
+        if self.requested_route_kind == ROUTE_KIND_REMOTE_DOC_PARSER:
+            return True
         # Explicit env switch takes highest priority for debugging/rollout.
         explicit_env = os.getenv("OCR_PADDLE_VL_USE_DOCPARSER")
         if explicit_env is not None:
@@ -178,8 +644,482 @@ class AiOcrClient(OcrProvider):
             model_name=self.model,
         )
 
+    def _describe_paddle_doc_parser_unavailable_reason(self) -> str:
+        if self._paddle_doc_parser_disabled:
+            return "doc_parser was disabled after a previous dedicated-channel failure"
+        if self.requested_route_kind == ROUTE_KIND_REMOTE_PROMPT_OCR:
+            return "current chain mode is direct/prompt, not doc_parser"
+        explicit_env = os.getenv("OCR_PADDLE_VL_USE_DOCPARSER")
+        if explicit_env is not None and not _env_flag(
+            "OCR_PADDLE_VL_USE_DOCPARSER",
+            default=True,
+        ):
+            return "OCR_PADDLE_VL_USE_DOCPARSER=0 disables doc_parser routing"
+        return (
+            "current provider/base_url does not advertise PaddleOCR-VL doc_parser support "
+            f"(provider={self.provider_id}, base_url={self.base_url or 'unset'})"
+        )
+
+    def _uses_remote_doc_parser(self) -> bool:
+        return _is_paddleocr_vl_model(self.model) and self._should_use_paddle_doc_parser()
+
+    def _uses_local_layout_block_ocr(self) -> bool:
+        return self.requested_route_kind == ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR
+
+    def _refresh_route_kind(self) -> str:
+        if self._uses_local_layout_block_ocr():
+            self.route_kind = ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR
+            return self.route_kind
+        self.route_kind = (
+            ROUTE_KIND_REMOTE_DOC_PARSER
+            if self._uses_remote_doc_parser()
+            else ROUTE_KIND_REMOTE_PROMPT_OCR
+        )
+        return self.route_kind
+
+    def _extract_paddle_doc_block_query_text(self, messages: Any) -> str:
+        texts: list[str] = []
+
+        def _collect(content: Any) -> None:
+            if isinstance(content, str):
+                compact = _compact_debug_text(content, limit=400)
+                if compact:
+                    texts.append(compact)
+                return
+            if isinstance(content, list):
+                for item in content:
+                    _collect(item)
+                return
+            if not isinstance(content, dict):
+                return
+            item_type = str(content.get("type") or "").strip().lower()
+            if item_type == "text":
+                _collect(content.get("text"))
+                return
+            if item_type == "image_url":
+                return
+            if "text" in content:
+                _collect(content.get("text"))
+                return
+            if "content" in content:
+                _collect(content.get("content"))
+
+        if isinstance(messages, list):
+            for message in messages:
+                if isinstance(message, dict):
+                    _collect(message.get("content"))
+        else:
+            _collect(messages)
+
+        return _compact_debug_text(" ".join(texts), limit=240)
+
+    def _extract_paddle_doc_block_label(self, query_text: str) -> str | None:
+        if not query_text:
+            return None
+        prompt_match = re.match(
+            r"^\s*([A-Za-z][A-Za-z ]{0,64}?)(?:\s+Recognition)?\s*:\s*$",
+            query_text,
+            flags=re.IGNORECASE,
+        )
+        if prompt_match:
+            label = _compact_debug_text(prompt_match.group(1), limit=64).strip()
+            if label:
+                return label
+        patterns = (
+            r"<label>\s*([^<]{1,64})\s*</label>",
+            r"(?:label|type|category)\s*(?:is|:)\s*['\"]?([a-zA-Z0-9_./-]{1,64})",
+            r"text block\s+(?:is|labelled|labeled)\s+['\"]?([a-zA-Z0-9_./-]{1,64})",
+            r"block\s+(?:type|label)\s*(?:is|:)\s*['\"]?([a-zA-Z0-9_./-]{1,64})",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, query_text, flags=re.IGNORECASE)
+            if match:
+                label = _compact_debug_text(match.group(1), limit=64).strip(" .,:;")
+                if label:
+                    return label
+        return None
+
+    def _extract_paddle_doc_pixel_bucket(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        mm_processor_kwargs: dict[str, Any] = {}
+        extra_body = kwargs.get("extra_body")
+        if isinstance(extra_body, dict):
+            raw_mm_processor_kwargs = extra_body.get("mm_processor_kwargs")
+            if isinstance(raw_mm_processor_kwargs, dict):
+                mm_processor_kwargs = raw_mm_processor_kwargs
+
+        def _coerce_int(value: Any) -> int | None:
+            try:
+                if value is None:
+                    return None
+                parsed = int(value)
+            except Exception:
+                return None
+            return parsed if parsed > 0 else None
+
+        min_pixels = _coerce_int(mm_processor_kwargs.get("min_pixels"))
+        max_pixels = _coerce_int(mm_processor_kwargs.get("max_pixels"))
+        bucket_parts: list[str] = []
+        if min_pixels is not None:
+            bucket_parts.append(f"min={min_pixels}")
+        if max_pixels is not None:
+            bucket_parts.append(f"max={max_pixels}")
+        return {
+            "min_pixels": min_pixels,
+            "max_pixels": max_pixels,
+            "bucket": ",".join(bucket_parts) if bucket_parts else None,
+        }
+
+    def _begin_paddle_doc_predict_trace(
+        self,
+        *,
+        image_path: str,
+        predict_image_path: str,
+        predict_kwargs: dict[str, Any],
+        timeout_s: float,
+        label: str,
+        max_side_px: int,
+        scale_x: float,
+        scale_y: float,
+    ) -> dict[str, Any]:
+        with self._paddle_doc_trace_lock:
+            trace = {
+                "attempt_label": str(label),
+                "status": "running",
+                "provider": str(self.provider_id or ""),
+                "requested_model": str(self.model or ""),
+                "effective_model": str(
+                    self._paddle_doc_effective_model or self.model or ""
+                ),
+                "pipeline_version": self._paddle_doc_pipeline_version,
+                "image_path": str(image_path),
+                "predict_image_path": str(predict_image_path),
+                "predict_kwargs": _sanitize_debug_value(dict(predict_kwargs)),
+                "timeout_s": float(timeout_s),
+                "max_side_px": int(max_side_px),
+                "scale_x": float(scale_x),
+                "scale_y": float(scale_y),
+                "started_at": _utc_now_iso(),
+                "blocks": [],
+                "_started_monotonic": time.monotonic(),
+                "_last_progress_log_monotonic": 0.0,
+            }
+            self._paddle_doc_active_predict_trace = trace
+            return trace
+
+    def _register_paddle_doc_block_request(
+        self,
+        *,
+        messages: Any,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        query_text = self._extract_paddle_doc_block_query_text(messages)
+        pixel_bucket = self._extract_paddle_doc_pixel_bucket(kwargs)
+        with self._paddle_doc_trace_lock:
+            trace = self._paddle_doc_active_predict_trace
+            if not isinstance(trace, dict):
+                return None
+            self._paddle_doc_trace_serial += 1
+            entry = {
+                "seq": int(self._paddle_doc_trace_serial),
+                "status": "pending",
+                "label": self._extract_paddle_doc_block_label(query_text),
+                "query_preview": query_text or None,
+                "pixel_bucket": pixel_bucket.get("bucket"),
+                "min_pixels": pixel_bucket.get("min_pixels"),
+                "max_pixels": pixel_bucket.get("max_pixels"),
+                "started_at": _utc_now_iso(),
+                "_started_monotonic": time.monotonic(),
+            }
+            trace.setdefault("blocks", []).append(entry)
+            return entry
+
+    def _complete_paddle_doc_block_request(
+        self,
+        entry: dict[str, Any] | None,
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        if not isinstance(entry, dict):
+            return
+        with self._paddle_doc_trace_lock:
+            if str(entry.get("status") or "") != "pending":
+                return
+            elapsed_ms = int(
+                round(
+                    max(
+                        0.0,
+                        time.monotonic() - float(entry.get("_started_monotonic") or 0.0),
+                    )
+                    * 1000.0
+                )
+            )
+            entry["finished_at"] = _utc_now_iso()
+            entry["elapsed_ms"] = elapsed_ms
+            if error is None:
+                entry["status"] = "success"
+                return
+            entry["status"] = "error"
+            entry["error"] = _compact_debug_text(error, limit=240)
+
+    def _summarize_paddle_doc_unfinished_blocks(
+        self, blocks: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        now_monotonic = time.monotonic()
+        summaries: list[dict[str, Any]] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if str(block.get("status") or "") != "pending":
+                continue
+            age_ms = int(
+                round(
+                    max(
+                        0.0,
+                        now_monotonic - float(block.get("_started_monotonic") or 0.0),
+                    )
+                    * 1000.0
+                )
+            )
+            summaries.append(
+                {
+                    "seq": block.get("seq"),
+                    "label": block.get("label"),
+                    "pixel_bucket": block.get("pixel_bucket"),
+                    "started_at": block.get("started_at"),
+                    "age_ms": age_ms,
+                    "query_preview": block.get("query_preview"),
+                }
+            )
+        return summaries
+
+    def _finalize_paddle_doc_predict_trace(
+        self,
+        trace: dict[str, Any] | None,
+        *,
+        status: str,
+        error: BaseException | str | None = None,
+        raw_element_count: int | None = None,
+        image_region_count: int | None = None,
+        layout_block_count: int | None = None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(trace, dict):
+            return None
+        with self._paddle_doc_trace_lock:
+            elapsed_ms = int(
+                round(
+                    max(
+                        0.0,
+                        time.monotonic() - float(trace.get("_started_monotonic") or 0.0),
+                    )
+                    * 1000.0
+                )
+            )
+            trace["status"] = str(status or "unknown")
+            trace["finished_at"] = _utc_now_iso()
+            trace["elapsed_ms"] = elapsed_ms
+            if error is not None:
+                trace["error"] = _compact_debug_text(error, limit=320)
+
+            blocks = [
+                block
+                for block in (trace.get("blocks") or [])
+                if isinstance(block, dict)
+            ]
+            success_count = sum(
+                1 for block in blocks if str(block.get("status") or "") == "success"
+            )
+            error_count = sum(
+                1 for block in blocks if str(block.get("status") or "") == "error"
+            )
+            pending_count = sum(
+                1 for block in blocks if str(block.get("status") or "") == "pending"
+            )
+            trace["block_counts"] = {
+                "total": len(blocks),
+                "success": success_count,
+                "error": error_count,
+                "pending": pending_count,
+            }
+            trace["unfinished_blocks"] = self._summarize_paddle_doc_unfinished_blocks(
+                blocks
+            )
+            if raw_element_count is not None:
+                trace["raw_element_count"] = int(raw_element_count)
+            if image_region_count is not None:
+                trace["image_region_count"] = int(image_region_count)
+            if layout_block_count is not None:
+                trace["layout_block_count"] = int(layout_block_count)
+
+            sanitized = _sanitize_debug_value(copy.deepcopy(trace))
+            self._paddle_doc_last_predict_debug = sanitized
+            history = list(self._paddle_doc_recent_predict_debug)
+            history.append(sanitized)
+            self._paddle_doc_recent_predict_debug = history[-3:]
+            if self._paddle_doc_active_predict_trace is trace:
+                self._paddle_doc_active_predict_trace = None
+            return copy.deepcopy(sanitized)
+
+    def _log_paddle_doc_timeout_trace(
+        self,
+        trace_debug: dict[str, Any] | None,
+        *,
+        timeout_s: float,
+    ) -> None:
+        if not isinstance(trace_debug, dict):
+            return
+        blocks = trace_debug.get("unfinished_blocks")
+        if not isinstance(blocks, list):
+            blocks = []
+        payload = {
+            "attempt_label": trace_debug.get("attempt_label"),
+            "timeout_s": float(timeout_s),
+            "requested_model": trace_debug.get("requested_model"),
+            "effective_model": trace_debug.get("effective_model"),
+            "predict_image_path": trace_debug.get("predict_image_path"),
+            "predict_image_name": Path(
+                str(trace_debug.get("predict_image_path") or "")
+            ).name
+            or None,
+            "block_counts": trace_debug.get("block_counts"),
+            "unfinished_blocks": blocks[:12],
+        }
+        logger.warning(
+            "PaddleOCR-VL doc_parser timeout diagnostics: %s",
+            json.dumps(payload, ensure_ascii=True, sort_keys=True),
+        )
+
+    def _resolve_paddle_doc_progress_log_interval_s(self) -> float:
+        return max(
+            0.0,
+            _env_float("OCR_PADDLE_VL_DOCPARSER_PROGRESS_LOG_INTERVAL_S", 10.0),
+        )
+
+    def _maybe_log_paddle_doc_progress_trace(self, *, force: bool = False) -> None:
+        interval_s = self._resolve_paddle_doc_progress_log_interval_s()
+        if interval_s <= 0.0 and not force:
+            return
+        with self._paddle_doc_trace_lock:
+            trace = self._paddle_doc_active_predict_trace
+            if not isinstance(trace, dict):
+                return
+            now_monotonic = time.monotonic()
+            last_logged = float(
+                trace.get("_last_progress_log_monotonic")
+                or trace.get("_started_monotonic")
+                or 0.0
+            )
+            if not force and (now_monotonic - last_logged) < interval_s:
+                return
+            blocks = [
+                block
+                for block in (trace.get("blocks") or [])
+                if isinstance(block, dict)
+            ]
+            payload = {
+                "attempt_label": trace.get("attempt_label"),
+                "elapsed_ms": int(
+                    round(
+                        max(
+                            0.0,
+                            now_monotonic
+                            - float(trace.get("_started_monotonic") or now_monotonic),
+                        )
+                        * 1000.0
+                    )
+                ),
+                "requested_model": trace.get("requested_model"),
+                "effective_model": trace.get("effective_model"),
+                "predict_image_name": Path(
+                    str(trace.get("predict_image_path") or "")
+                ).name
+                or None,
+                "block_counts": {
+                    "total": len(blocks),
+                    "success": sum(
+                        1
+                        for block in blocks
+                        if str(block.get("status") or "") == "success"
+                    ),
+                    "error": sum(
+                        1
+                        for block in blocks
+                        if str(block.get("status") or "") == "error"
+                    ),
+                    "pending": sum(
+                        1
+                        for block in blocks
+                        if str(block.get("status") or "") == "pending"
+                    ),
+                },
+                "unfinished_blocks": self._summarize_paddle_doc_unfinished_blocks(
+                    blocks
+                )[:12],
+            }
+            trace["_last_progress_log_monotonic"] = now_monotonic
+        logger.info(
+            "PaddleOCR-VL doc_parser progress: %s",
+            json.dumps(payload, ensure_ascii=True, sort_keys=True),
+        )
+
+    def _ensure_paddle_doc_block_instrumentation(self, parser_local: Any) -> None:
+        paddlex_pipeline = getattr(parser_local, "paddlex_pipeline", None)
+        vl_rec_model = getattr(paddlex_pipeline, "vl_rec_model", None)
+        genai_client = getattr(vl_rec_model, "_genai_client", None)
+        if genai_client is None:
+            return
+        if bool(getattr(genai_client, "_ppt_block_trace_installed", False)):
+            return
+
+        original_create = getattr(genai_client, "create_chat_completion", None)
+        if not callable(original_create):
+            return
+
+        def _wrapped_create_chat_completion(
+            messages: Any, *, return_future: bool = False, **kwargs: Any
+        ) -> Any:
+            entry = self._register_paddle_doc_block_request(
+                messages=messages,
+                kwargs=kwargs,
+            )
+            try:
+                result = original_create(
+                    messages,
+                    return_future=return_future,
+                    **kwargs,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._complete_paddle_doc_block_request(entry, error=exc)
+                raise
+            if entry is None:
+                return result
+            if return_future and hasattr(result, "add_done_callback"):
+                def _on_done(future: Any, block_entry: dict[str, Any] = entry) -> None:
+                    try:
+                        future.result()
+                    except BaseException as exc:  # noqa: BLE001
+                        self._complete_paddle_doc_block_request(
+                            block_entry,
+                            error=exc,
+                        )
+                    else:
+                        self._complete_paddle_doc_block_request(block_entry)
+
+                result.add_done_callback(_on_done)
+                return result
+            self._complete_paddle_doc_block_request(entry)
+            return result
+
+        setattr(genai_client, "create_chat_completion", _wrapped_create_chat_completion)
+        setattr(genai_client, "_ppt_block_trace_installed", True)
+        logger.info(
+            "Enabled PaddleOCR-VL doc_parser block tracing (provider=%s, model=%s)",
+            self.provider_id,
+            self._paddle_doc_effective_model or self.model,
+        )
+
     def _get_paddle_doc_parser(self) -> Any:
         if self._paddle_doc_parser is not None:
+            self._ensure_paddle_doc_block_instrumentation(self._paddle_doc_parser)
             return self._paddle_doc_parser
 
         try:
@@ -253,6 +1193,7 @@ class AiOcrClient(OcrProvider):
             kwargs.get("vl_rec_max_concurrency"),
             kwargs.get("use_queues"),
         )
+        self._ensure_paddle_doc_block_instrumentation(self._paddle_doc_parser)
         return self._paddle_doc_parser
 
     def _resolve_paddle_doc_parser_tuning_kwargs(
@@ -281,12 +1222,20 @@ class AiOcrClient(OcrProvider):
             # reasonable without reopening the 200-way burst.
             kwargs["vl_rec_max_concurrency"] = 4
 
-        raw_use_queues = os.getenv("OCR_PADDLE_VL_DOCPARSER_USE_QUEUES")
+        raw_use_queues = _clean_str(os.getenv("OCR_PADDLE_VL_DOCPARSER_USE_QUEUES"))
         if raw_use_queues is not None:
             kwargs["use_queues"] = _env_flag(
                 "OCR_PADDLE_VL_DOCPARSER_USE_QUEUES",
                 default=True,
             )
+        elif (
+            "paddleocr-vl-1.5" in lowered_model
+            and str(self.provider_id or "").strip().lower() == "siliconflow"
+        ):
+            # SiliconFlow already handles remote request fan-out. Keeping PaddleX
+            # internal queues enabled adds another scheduling layer and, in our
+            # direct repros, increased end-to-end latency on the same page.
+            kwargs["use_queues"] = False
         return kwargs
 
     def _resolve_paddle_doc_predict_timeout_s(self) -> float:
@@ -298,13 +1247,14 @@ class AiOcrClient(OcrProvider):
         provider_id = str(self.provider_id or "").strip().lower()
         if "paddleocr-vl-1.5" in lowered_model:
             if provider_id == "siliconflow":
+                v15_siliconflow_default_timeout = max(default_timeout, 180.0)
                 return max(
                     10.0,
                     _env_float(
                         "OCR_PADDLE_VL_DOCPARSER_PREDICT_TIMEOUT_S_V15_SILICONFLOW",
                         _env_float(
                             "OCR_PADDLE_VL_DOCPARSER_PREDICT_TIMEOUT_S_V15",
-                            60.0,
+                            v15_siliconflow_default_timeout,
                         ),
                     ),
                 )
@@ -385,7 +1335,10 @@ class AiOcrClient(OcrProvider):
         return _env_flag("OCR_PADDLE_VL_DOCPARSER_SINGLEFLIGHT", default=False)
 
     def _resolve_paddle_doc_singleflight_wait_s(self) -> float:
-        default_wait_s = 1.0 if self._is_siliconflow_paddle_doc_v15() else 3.0
+        # SiliconFlow PaddleOCR-VL-1.5 can briefly keep the shared doc_parser
+        # lock occupied between sequential pages, so a 1s wait is too eager
+        # for multi-page OCR jobs.
+        default_wait_s = 10.0 if self._is_siliconflow_paddle_doc_v15() else 3.0
         return max(
             0.0,
             _env_float("OCR_PADDLE_VL_DOCPARSER_SINGLEFLIGHT_WAIT_S", default_wait_s),
@@ -406,6 +1359,36 @@ class AiOcrClient(OcrProvider):
         )
         digest = hashlib.sha1(lock_key.encode("utf-8")).hexdigest()[:24]
         return lock_dir / f"paddleocr-vl-docparser-{digest}.lock"
+
+    def _describe_paddle_doc_predict_target(self) -> str:
+        with self._paddle_doc_trace_lock:
+            trace = self._paddle_doc_active_predict_trace
+            if not isinstance(trace, dict):
+                return "<unknown>"
+            raw_path = (
+                trace.get("predict_image_path")
+                or trace.get("image_path")
+                or trace.get("attempt_label")
+            )
+        raw_text = str(raw_path or "").strip()
+        if not raw_text:
+            return "<unknown>"
+        try:
+            return Path(raw_text).name or raw_text
+        except Exception:
+            return raw_text
+
+    def _release_paddle_doc_singleflight_lock(self, lock_file: Any | None) -> None:
+        if lock_file is None or fcntl is None:
+            return
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            lock_file.close()
+        except Exception:
+            pass
 
     def _resolve_paddle_doc_max_side_px(self) -> int:
         if self._paddle_doc_max_side_px_override is not None:
@@ -483,6 +1466,7 @@ class AiOcrClient(OcrProvider):
         wait_timeout_s = self._resolve_paddle_doc_singleflight_wait_s()
         wait_deadline = time.monotonic() + float(wait_timeout_s)
         lock_file = None
+        wait_logged = False
 
         while True:
             candidate = lock_path.open("a+b")
@@ -492,7 +1476,17 @@ class AiOcrClient(OcrProvider):
                 break
             except BlockingIOError:
                 candidate.close()
+                if not wait_logged:
+                    logger.warning(
+                        "PaddleOCR-VL doc_parser waiting for singleflight lock (label=%s, wait_timeout_s=%.1f, lock=%s, target=%s)",
+                        label,
+                        wait_timeout_s,
+                        lock_path,
+                        self._describe_paddle_doc_predict_target(),
+                    )
+                    wait_logged = True
                 if time.monotonic() >= wait_deadline:
+                    self._maybe_log_paddle_doc_progress_trace(force=True)
                     raise TimeoutError(
                         f"{label} blocked by another in-flight PaddleOCR-VL doc_parser request "
                         f"after {wait_timeout_s:.1f}s"
@@ -511,14 +1505,7 @@ class AiOcrClient(OcrProvider):
                 except BaseException as exc:  # noqa: BLE001
                     error["error"] = exc
                 finally:
-                    try:
-                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)  # type: ignore[arg-type]
-                    except Exception:
-                        pass
-                    try:
-                        lock_file.close()  # type: ignore[union-attr]
-                    except Exception:
-                        pass
+                    self._release_paddle_doc_singleflight_lock(lock_file)
                     done.set()
 
             ctx.run(_run_with_context)
@@ -526,8 +1513,23 @@ class AiOcrClient(OcrProvider):
         thread = threading.Thread(target=_runner, name=f"timeout:{label}", daemon=True)
         thread.start()
 
-        if not done.wait(timeout=effective_timeout):
-            raise TimeoutError(f"{label} timed out after {effective_timeout:.0f}s")
+        deadline = time.monotonic() + effective_timeout
+        while True:
+            remaining_s = max(0.0, deadline - time.monotonic())
+            if remaining_s <= 0.0:
+                self._maybe_log_paddle_doc_progress_trace(force=True)
+                logger.warning(
+                    "PaddleOCR-VL doc_parser timed out; releasing singleflight lock for follow-up requests (label=%s, timeout_s=%.0f, target=%s)",
+                    label,
+                    effective_timeout,
+                    self._describe_paddle_doc_predict_target(),
+                )
+                self._release_paddle_doc_singleflight_lock(lock_file)
+                lock_file = None
+                raise TimeoutError(f"{label} timed out after {effective_timeout:.0f}s")
+            if done.wait(timeout=min(1.0, remaining_s)):
+                break
+            self._maybe_log_paddle_doc_progress_trace()
         if "error" in error:
             raise error["error"]
         return result.get("value")
@@ -538,6 +1540,7 @@ class AiOcrClient(OcrProvider):
             self._prepare_paddle_doc_predict_image(image_path)
         )
         predict_kwargs: dict[str, Any] = {}
+        predict_trace: dict[str, Any] | None = None
         predict_max_pixels = _derive_paddle_doc_predict_max_pixels(
             max_side_px=max_side_px,
             did_downscale=temp_image_path is not None,
@@ -567,6 +1570,16 @@ class AiOcrClient(OcrProvider):
         try:
             try:
                 predict_timeout_s = self._resolve_paddle_doc_predict_timeout_s()
+                predict_trace = self._begin_paddle_doc_predict_trace(
+                    image_path=str(image_path),
+                    predict_image_path=str(predict_image_path),
+                    predict_kwargs=predict_kwargs,
+                    timeout_s=predict_timeout_s,
+                    label="paddleocr-vl:predict",
+                    max_side_px=max_side_px,
+                    scale_x=scale_x,
+                    scale_y=scale_y,
+                )
                 output = self._run_paddle_doc_predict_with_timeout(
                     _predict_once,
                     timeout_s=predict_timeout_s,
@@ -579,6 +1592,18 @@ class AiOcrClient(OcrProvider):
                 )
                 can_downgrade = bool(self.allow_model_downgrade)
                 error_to_raise: Exception | None = first_error
+                first_trace_debug = self._finalize_paddle_doc_predict_trace(
+                    predict_trace,
+                    status="timeout"
+                    if isinstance(first_error, TimeoutError)
+                    else "error",
+                    error=first_error,
+                )
+                if isinstance(first_error, TimeoutError):
+                    self._log_paddle_doc_timeout_trace(
+                        first_trace_debug,
+                        timeout_s=predict_timeout_s,
+                    )
                 if (
                     isinstance(first_error, TimeoutError)
                     and wants_v15
@@ -594,14 +1619,37 @@ class AiOcrClient(OcrProvider):
                     )
                     self._paddle_doc_parser = None
                     self._paddle_doc_parser_disabled = False
+                    retry_trace = self._begin_paddle_doc_predict_trace(
+                        image_path=str(image_path),
+                        predict_image_path=str(predict_image_path),
+                        predict_kwargs=predict_kwargs,
+                        timeout_s=retry_timeout_s,
+                        label="paddleocr-vl:predict:retry",
+                        max_side_px=max_side_px,
+                        scale_x=scale_x,
+                        scale_y=scale_y,
+                    )
                     try:
                         output = self._run_paddle_doc_predict_with_timeout(
                             _predict_once,
                             timeout_s=retry_timeout_s,
                             label="paddleocr-vl:predict:retry",
                         )
+                        predict_trace = retry_trace
                         error_to_raise = None
                     except Exception as retry_error:
+                        retry_trace_debug = self._finalize_paddle_doc_predict_trace(
+                            retry_trace,
+                            status="timeout"
+                            if isinstance(retry_error, TimeoutError)
+                            else "error",
+                            error=retry_error,
+                        )
+                        if isinstance(retry_error, TimeoutError):
+                            self._log_paddle_doc_timeout_trace(
+                                retry_trace_debug,
+                                timeout_s=retry_timeout_s,
+                            )
                         error_to_raise = retry_error
                 if (
                     error_to_raise is not None
@@ -648,35 +1696,52 @@ class AiOcrClient(OcrProvider):
                     if error_to_raise is not None:
                         raise error_to_raise
 
-            raw_elements, image_regions, layout_blocks = _extract_paddle_doc_parser_output(
-                output
-            )
-            raw_elements, image_regions, layout_blocks = _scale_paddle_doc_parser_output(
-                raw_elements,
-                image_regions,
-                layout_blocks,
-                scale_x=scale_x,
-                scale_y=scale_y,
-            )
-            self.last_layout_blocks = list(layout_blocks)
-            self.last_image_regions_px = [list(region) for region in image_regions]
-            self._last_layout_image_path = str(image_path)
-            self._image_region_cache_path = str(image_path)
-            self._image_region_cache_ready = True
-
-            if not raw_elements:
-                logger.warning(
-                    "PaddleOCR-VL doc_parser produced no usable text blocks "
-                    "(provider=%s, requested_model=%s, effective_model=%s, pipeline_version=%s)",
-                    self.provider_id,
-                    self.model,
-                    self._paddle_doc_effective_model or self.model,
-                    self._paddle_doc_pipeline_version or "<default>",
+            try:
+                raw_elements, image_regions, layout_blocks = (
+                    _extract_paddle_doc_parser_output(output)
                 )
-                raise RuntimeError(
-                    "PaddleOCR-VL doc_parser returned no valid text blocks in parsing_res_list"
+                raw_elements, image_regions, layout_blocks = (
+                    _scale_paddle_doc_parser_output(
+                        raw_elements,
+                        image_regions,
+                        layout_blocks,
+                        scale_x=scale_x,
+                        scale_y=scale_y,
+                    )
                 )
+                self.last_layout_blocks = list(layout_blocks)
+                self.last_image_regions_px = [list(region) for region in image_regions]
+                self._last_layout_image_path = str(image_path)
+                self._image_region_cache_path = str(image_path)
+                self._image_region_cache_ready = True
 
+                if not raw_elements:
+                    logger.warning(
+                        "PaddleOCR-VL doc_parser produced no usable text blocks "
+                        "(provider=%s, requested_model=%s, effective_model=%s, pipeline_version=%s)",
+                        self.provider_id,
+                        self.model,
+                        self._paddle_doc_effective_model or self.model,
+                        self._paddle_doc_pipeline_version or "<default>",
+                    )
+                    raise RuntimeError(
+                        "PaddleOCR-VL doc_parser returned no valid text blocks in parsing_res_list"
+                    )
+            except Exception as parse_error:
+                self._finalize_paddle_doc_predict_trace(
+                    predict_trace,
+                    status="error",
+                    error=parse_error,
+                )
+                raise
+
+            self._finalize_paddle_doc_predict_trace(
+                predict_trace,
+                status="success",
+                raw_element_count=len(raw_elements),
+                image_region_count=len(self.last_image_regions_px),
+                layout_block_count=len(self.last_layout_blocks),
+            )
             logger.info(
                 "PaddleOCR-VL doc_parser parsed %s text blocks and %s image-like regions",
                 len(raw_elements),
@@ -689,6 +1754,677 @@ class AiOcrClient(OcrProvider):
                     temp_image_path.unlink(missing_ok=True)
                 except Exception:
                     pass
+
+    def _get_local_layout_model(self) -> Any:
+        normalized_layout_model = _normalize_ai_layout_model_name(self.layout_model)
+        paddlex_model_name = _resolve_paddlex_layout_model_name(normalized_layout_model)
+        with self.__class__._local_layout_model_lock:
+            cached_model = self.__class__._local_layout_model
+            cached_name = self.__class__._local_layout_model_name
+            if cached_model is not None and cached_name == normalized_layout_model:
+                return cached_model
+
+            try:
+                import paddlex
+            except Exception as e:
+                raise RuntimeError(
+                    "Local layout_block OCR requires `paddlex` package"
+                ) from e
+
+            init_timeout_s = max(
+                5.0,
+                _env_float("OCR_AI_LAYOUT_MODEL_INIT_TIMEOUT_S", 30.0),
+            )
+            model = _run_in_daemon_thread_with_timeout(
+                lambda: paddlex.create_model(paddlex_model_name),
+                timeout_s=init_timeout_s,
+                label=f"{normalized_layout_model}:init",
+            )
+            self.__class__._local_layout_model = model
+            self.__class__._local_layout_model_name = normalized_layout_model
+            logger.info(
+                "Initialized local layout model for AI OCR (layout_model=%s, paddlex_model=%s)",
+                normalized_layout_model,
+                paddlex_model_name,
+            )
+            return model
+
+    def _extract_local_layout_blocks(
+        self,
+        output: Any,
+    ) -> tuple[list[dict[str, Any]], list[list[float]]]:
+        layout_blocks: list[dict[str, Any]] = []
+        image_regions: list[list[float]] = []
+
+        def _result_payloads(result_obj: Any) -> list[Any]:
+            payloads: list[Any] = []
+
+            json_payload = getattr(result_obj, "json", None)
+            if callable(json_payload):
+                try:
+                    payloads.append(json_payload())
+                except Exception:
+                    pass
+            elif json_payload is not None:
+                payloads.append(json_payload)
+
+            to_dict_payload = getattr(result_obj, "to_dict", None)
+            if callable(to_dict_payload):
+                try:
+                    payloads.append(to_dict_payload())
+                except Exception:
+                    pass
+
+            payloads.append(result_obj)
+            return payloads
+
+        if isinstance(output, dict):
+            results_iter = [output]
+        elif isinstance(output, list):
+            results_iter = output
+        elif isinstance(output, tuple):
+            results_iter = list(output)
+        else:
+            try:
+                results_iter = list(output)
+            except Exception:
+                results_iter = [output]
+
+        for result in results_iter:
+            for payload in _result_payloads(result):
+                if not isinstance(payload, dict):
+                    continue
+                root = payload.get("res") if isinstance(payload.get("res"), dict) else payload
+                if not isinstance(root, dict):
+                    continue
+                boxes = root.get("boxes")
+                if not isinstance(boxes, list):
+                    continue
+                for raw_box in boxes:
+                    if not isinstance(raw_box, dict):
+                        continue
+                    bbox = _coerce_bbox_xyxy(
+                        raw_box.get("coordinate")
+                        or raw_box.get("bbox")
+                        or raw_box.get("box")
+                        or raw_box.get("polygon_points")
+                    )
+                    if bbox is None:
+                        continue
+                    x0, y0, x1, y1 = (
+                        float(bbox[0]),
+                        float(bbox[1]),
+                        float(bbox[2]),
+                        float(bbox[3]),
+                    )
+                    if x1 - x0 < 3.0 or y1 - y0 < 3.0:
+                        continue
+
+                    label = _normalize_layout_label(raw_box.get("label") or raw_box.get("type"))
+                    try:
+                        score = float(raw_box.get("score")) if raw_box.get("score") is not None else None
+                    except Exception:
+                        score = None
+                    try:
+                        order = (
+                            int(raw_box.get("order"))
+                            if raw_box.get("order") is not None
+                            else None
+                        )
+                    except Exception:
+                        order = None
+
+                    block = {
+                        "label": label,
+                        "bbox": [x0, y0, x1, y1],
+                        "score": score,
+                        "order": order,
+                        "text": "",
+                    }
+                    layout_blocks.append(block)
+                    if _is_image_like_layout_label(label):
+                        image_regions.append([x0, y0, x1, y1])
+                break
+
+        layout_blocks.sort(
+            key=lambda block: (
+                block.get("order") is None,
+                int(block.get("order") or 0),
+                float(((block.get("bbox") or [0, 0, 0, 0])[1])),
+                float(((block.get("bbox") or [0, 0, 0, 0])[0])),
+            )
+        )
+        return layout_blocks, image_regions
+
+    def _run_local_layout_analysis(
+        self,
+        image_path: str,
+    ) -> tuple[list[dict[str, Any]], list[list[float]]]:
+        requested_path = str(image_path)
+        if (
+            self._image_region_cache_ready
+            and str(self._image_region_cache_path or "") == requested_path
+            and str(self._last_layout_image_path or "") == requested_path
+        ):
+            return (
+                [dict(block) for block in self.last_layout_blocks],
+                [list(region) for region in self.last_image_regions_px],
+            )
+
+        layout_model = self._get_local_layout_model()
+        predict_timeout_s = max(
+            5.0,
+            _env_float("OCR_AI_LAYOUT_MODEL_PREDICT_TIMEOUT_S", 45.0),
+        )
+
+        def _predict_once() -> Any:
+            try:
+                return layout_model.predict(input=image_path)
+            except TypeError:
+                return layout_model.predict(image_path)
+
+        output = _run_in_daemon_thread_with_timeout(
+            _predict_once,
+            timeout_s=predict_timeout_s,
+            label=f"{self.layout_model}:predict",
+        )
+        layout_blocks, image_regions = self._extract_local_layout_blocks(output)
+        self.last_layout_blocks = [dict(block) for block in layout_blocks]
+        self.last_image_regions_px = [list(region) for region in image_regions]
+        self._last_layout_image_path = requested_path
+        self._image_region_cache_path = requested_path
+        self._image_region_cache_ready = True
+        logger.info(
+            "Local layout analysis produced %s blocks and %s image-like regions (layout_model=%s)",
+            len(layout_blocks),
+            len(image_regions),
+            self.layout_model,
+        )
+        return (
+            [dict(block) for block in layout_blocks],
+            [list(region) for region in image_regions],
+        )
+
+    def _image_to_data_uri(self, image: Image.Image) -> str:
+        import base64
+        import io
+
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return f"data:image/png;base64,{b64}"
+
+    def _clean_plain_text_ocr_output(self, content: Any) -> str:
+        text = _extract_message_text(content or "")
+        stripped = str(text or "").strip()
+        if not stripped:
+            return ""
+
+        try:
+            parsed = json.loads(stripped)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            candidate = parsed.get("text") or parsed.get("content") or parsed.get("value")
+            if isinstance(candidate, str):
+                stripped = candidate.strip()
+        elif isinstance(parsed, list):
+            lines: list[str] = []
+            for item in parsed:
+                if isinstance(item, str) and item.strip():
+                    lines.append(item.strip())
+                elif isinstance(item, dict):
+                    candidate = item.get("text") or item.get("content") or item.get("value")
+                    if isinstance(candidate, str) and candidate.strip():
+                        lines.append(candidate.strip())
+            if lines:
+                stripped = "\n".join(lines)
+
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            if lines:
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            stripped = "\n".join(lines).strip()
+
+        lowered = stripped.lower()
+        if lowered in {
+            "",
+            "none",
+            "null",
+            "n/a",
+            "no text",
+            "no readable text",
+            "empty",
+        }:
+            return ""
+
+        cleaned_lines = [line.rstrip() for line in stripped.replace("\r\n", "\n").split("\n")]
+        return "\n".join(line for line in cleaned_lines if line.strip()).strip()
+
+    def _crop_layout_block(
+        self,
+        *,
+        image: Image.Image,
+        bbox: list[float],
+    ) -> Image.Image | None:
+        width, height = image.size
+        if width <= 0 or height <= 0:
+            return None
+        bbox_n = _normalize_bbox_px(bbox)
+        if bbox_n is None:
+            return None
+        x0, y0, x1, y1 = bbox_n
+        block_w = max(1.0, float(x1 - x0))
+        block_h = max(1.0, float(y1 - y0))
+        pad_x = min(24, max(2, int(round(block_w * 0.03))))
+        pad_y = min(24, max(2, int(round(block_h * 0.18))))
+        xi0 = max(0, min(width - 1, int(math.floor(x0)) - pad_x))
+        yi0 = max(0, min(height - 1, int(math.floor(y0)) - pad_y))
+        xi1 = max(0, min(width, int(math.ceil(x1)) + pad_x))
+        yi1 = max(0, min(height, int(math.ceil(y1)) + pad_y))
+        if xi1 - xi0 < 6 or yi1 - yi0 < 6:
+            return None
+        return image.crop((xi0, yi0, xi1, yi1)).convert("RGB")
+
+    def _min_side_px_for_layout_block_model(self, effective_model: str) -> int:
+        min_side_px = max(0, _env_int("OCR_AI_LAYOUT_BLOCK_MIN_SIDE_PX", 0))
+        normalized_model = (
+            _normalize_ai_ocr_model_name(
+                effective_model,
+                provider_id=self.provider_id,
+            )
+            or effective_model
+            or ""
+        )
+        normalized_key = re.sub(r"[\s_]+", "-", str(normalized_model).strip().lower())
+        if "qwen3-vl" in normalized_key:
+            return max(min_side_px, 32)
+        return min_side_px
+
+    def _resolve_local_layout_block_max_workers(self, *, effective_model: str) -> int:
+        if self._layout_block_max_concurrency_override is not None:
+            return int(self._layout_block_max_concurrency_override)
+        raw_override = _clean_str(os.getenv("OCR_AI_LAYOUT_BLOCK_MAX_CONCURRENCY"))
+        if raw_override is not None:
+            try:
+                parsed = int(raw_override)
+            except Exception:
+                parsed = 0
+            return max(1, min(8, parsed or 4))
+
+        provider_id = str(self.provider_id or "").strip().lower()
+        lowered_model = str(effective_model or "").strip().lower()
+        if provider_id == "siliconflow" and "qwen3-vl" in lowered_model:
+            # Qwen3-VL on SiliconFlow is stable for single pages, but 4-way block
+            # fan-out can trigger long-tail retries on multi-page jobs.
+            return 2
+        return 4
+
+    def _resolve_local_layout_block_progress_log_interval_s(self) -> float:
+        return max(
+            0.0,
+            _env_float("OCR_AI_LAYOUT_BLOCK_PROGRESS_LOG_INTERVAL_S", 10.0),
+        )
+
+    def _prepare_layout_block_crop_for_model(
+        self,
+        *,
+        crop: Image.Image,
+        effective_model: str,
+    ) -> Image.Image:
+        min_side_px = self._min_side_px_for_layout_block_model(effective_model)
+        if min_side_px <= 0:
+            return crop
+        crop_width, crop_height = crop.size
+        if crop_width >= min_side_px and crop_height >= min_side_px:
+            return crop
+        scale = max(
+            float(min_side_px) / max(1.0, float(crop_width)),
+            float(min_side_px) / max(1.0, float(crop_height)),
+        )
+        target_width = max(min_side_px, int(math.ceil(float(crop_width) * scale)))
+        target_height = max(min_side_px, int(math.ceil(float(crop_height) * scale)))
+        if target_width == crop_width and target_height == crop_height:
+            return crop
+        return crop.resize((target_width, target_height), Image.Resampling.LANCZOS)
+
+    def _ocr_local_layout_block_crop(
+        self,
+        *,
+        data_uri: str,
+        label: str,
+        crop_width: int,
+        crop_height: int,
+        effective_model: str,
+    ) -> str:
+        is_deepseek_model = _is_deepseek_ocr_model(effective_model)
+        request_timeout_s = self._resolve_model_request_timeout_s(model_name=effective_model)
+        prompt = (
+            "Read all visible text in this cropped document block and return plain text only. "
+            f"Block label: {label or 'text'}. Crop size: {int(crop_width)}x{int(crop_height)} px. "
+            "Preserve obvious line breaks. Do not return JSON, markdown, or explanations. "
+            "If the crop contains no readable text, return an empty string."
+        )
+        user_content = self.vendor_adapter.build_user_content(
+            prompt=prompt,
+            image_data_uri=data_uri,
+            image_first=_should_send_image_first_for_ai_ocr(
+                provider_id=self.provider_id,
+                model_name=effective_model,
+            ),
+        )
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": "You are an OCR engine. Return plain text only.",
+            },
+            {
+                "role": "user",
+                "content": user_content,
+            },
+        ]
+        if is_deepseek_model:
+            messages = [{"role": "user", "content": user_content}]
+
+        completion = self._chat_completion(
+            model=effective_model,
+            timeout_s=request_timeout_s,
+            request_label="layout_block_crop",
+            temperature=0,
+            max_tokens=self.vendor_adapter.clamp_max_tokens(768, kind="ocr"),
+            messages=messages,
+        )
+        content_obj = (
+            completion.choices[0].message.content
+            if getattr(completion, "choices", None)
+            else ""
+        )
+        return self._clean_plain_text_ocr_output(content_obj)
+
+    def _ocr_image_with_local_layout_blocks(
+        self,
+        image_path: str,
+        *,
+        image: Image.Image,
+    ) -> List[Dict]:
+        layout_blocks, image_regions = self._run_local_layout_analysis(image_path)
+        self.last_layout_blocks = [dict(block) for block in layout_blocks]
+        self.last_image_regions_px = [list(region) for region in image_regions]
+        self._last_layout_image_path = str(image_path)
+        self._image_region_cache_path = str(image_path)
+        self._image_region_cache_ready = True
+
+        effective_model = str(self.model)
+        text_tasks: list[dict[str, Any]] = []
+        for index, block in enumerate(layout_blocks):
+            label = str(block.get("label") or "")
+            if _is_image_like_layout_label(label):
+                continue
+            bbox = block.get("bbox")
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                continue
+            crop = self._crop_layout_block(image=image, bbox=bbox)
+            if crop is None:
+                continue
+            crop = self._prepare_layout_block_crop_for_model(
+                crop=crop,
+                effective_model=effective_model,
+            )
+            text_tasks.append(
+                {
+                    "index": index,
+                    "bbox": [float(v) for v in bbox],
+                    "label": label,
+                    "score": block.get("score"),
+                    "order": block.get("order"),
+                    "crop_width": int(crop.size[0]),
+                    "crop_height": int(crop.size[1]),
+                    "data_uri": self._image_to_data_uri(crop),
+                }
+            )
+
+        if not text_tasks:
+            logger.info(
+                "Local layout_block OCR found no text-like blocks (layout_model=%s, image_regions=%s)",
+                self.layout_model,
+                len(self.last_image_regions_px),
+            )
+            return []
+
+        image_name = Path(image_path).name
+        max_workers = self._resolve_local_layout_block_max_workers(
+            effective_model=effective_model
+        )
+        progress_interval_s = self._resolve_local_layout_block_progress_log_interval_s()
+        raw_elements: list[dict[str, Any]] = []
+        failures: list[str] = []
+        task_lock = threading.Lock()
+        last_progress_log_monotonic = 0.0
+
+        for seq, task in enumerate(text_tasks, start=1):
+            task["seq"] = seq
+            task["status"] = "pending"
+            task["submitted_at"] = _utc_now_iso()
+            task["_submitted_monotonic"] = time.monotonic()
+
+        logger.info(
+            "Submitting local layout_block OCR page (image=%s, text_blocks=%s, image_like_regions=%s, layout_model=%s, provider=%s, model=%s, max_workers=%s)",
+            image_name,
+            len(text_tasks),
+            len(self.last_image_regions_px),
+            self.layout_model,
+            self.provider_id,
+            effective_model,
+            max_workers,
+        )
+
+        def _summarize_task(task: dict[str, Any], *, now_monotonic: float) -> dict[str, Any]:
+            started_monotonic = float(
+                task.get("_started_monotonic") or task.get("_submitted_monotonic") or 0.0
+            )
+            age_ms = int(round(max(0.0, now_monotonic - started_monotonic) * 1000.0))
+            return {
+                "seq": int(task.get("seq") or 0),
+                "index": int(task.get("index") or 0),
+                "label": task.get("label") or None,
+                "status": str(task.get("status") or "pending"),
+                "crop": [
+                    int(task.get("crop_width") or 0),
+                    int(task.get("crop_height") or 0),
+                ],
+                "age_ms": age_ms,
+            }
+
+        def _maybe_log_local_layout_progress(*, force: bool = False) -> None:
+            nonlocal last_progress_log_monotonic
+            now_monotonic = time.monotonic()
+            if (
+                not force
+                and progress_interval_s > 0.0
+                and (now_monotonic - last_progress_log_monotonic) < progress_interval_s
+            ):
+                return
+            with task_lock:
+                snapshots = [
+                    _summarize_task(task, now_monotonic=now_monotonic)
+                    for task in text_tasks
+                ]
+            payload = {
+                "image": image_name,
+                "provider": self.provider_id,
+                "model": effective_model,
+                "max_workers": max_workers,
+                "block_counts": {
+                    "total": len(snapshots),
+                    "success": sum(1 for item in snapshots if item["status"] == "success"),
+                    "error": sum(1 for item in snapshots if item["status"] == "error"),
+                    "pending": sum(
+                        1
+                        for item in snapshots
+                        if item["status"] in {"pending", "running"}
+                    ),
+                },
+                "unfinished_blocks": [
+                    item
+                    for item in snapshots
+                    if item["status"] in {"pending", "running"}
+                ][:12],
+            }
+            last_progress_log_monotonic = now_monotonic
+            logger.info(
+                "Local layout_block OCR progress: %s",
+                json.dumps(payload, ensure_ascii=True, sort_keys=True),
+            )
+
+        def _mark_task_started(task: dict[str, Any]) -> None:
+            with task_lock:
+                task["status"] = "running"
+                task["started_at"] = _utc_now_iso()
+                task["_started_monotonic"] = time.monotonic()
+            logger.info(
+                "Local layout_block OCR started block (image=%s, block=%s/%s, index=%s, label=%s, crop=%sx%s)",
+                image_name,
+                int(task.get("seq") or 0),
+                len(text_tasks),
+                int(task.get("index") or 0),
+                task.get("label") or "",
+                int(task.get("crop_width") or 0),
+                int(task.get("crop_height") or 0),
+            )
+
+        def _mark_task_finished(
+            task: dict[str, Any],
+            *,
+            error: BaseException | None = None,
+            text: str | None = None,
+        ) -> None:
+            now_monotonic = time.monotonic()
+            with task_lock:
+                started_monotonic = float(
+                    task.get("_started_monotonic") or task.get("_submitted_monotonic") or 0.0
+                )
+                elapsed_ms = int(
+                    round(max(0.0, now_monotonic - started_monotonic) * 1000.0)
+                )
+                task["finished_at"] = _utc_now_iso()
+                task["elapsed_ms"] = elapsed_ms
+                if error is None:
+                    task["status"] = "success"
+                    task["text_len"] = len(str(text or ""))
+                else:
+                    task["status"] = "error"
+                    task["error"] = _compact_debug_text(error, limit=240)
+            if error is None:
+                logger.info(
+                    "Local layout_block OCR finished block (image=%s, block=%s/%s, index=%s, label=%s, elapsed_ms=%s, text_len=%s)",
+                    image_name,
+                    int(task.get("seq") or 0),
+                    len(text_tasks),
+                    int(task.get("index") or 0),
+                    task.get("label") or "",
+                    int(task.get("elapsed_ms") or 0),
+                    int(task.get("text_len") or 0),
+                )
+            else:
+                logger.warning(
+                    "Local layout_block OCR failed block (image=%s, block=%s/%s, index=%s, label=%s, elapsed_ms=%s): %s",
+                    image_name,
+                    int(task.get("seq") or 0),
+                    len(text_tasks),
+                    int(task.get("index") or 0),
+                    task.get("label") or "",
+                    int(task.get("elapsed_ms") or 0),
+                    error,
+                )
+
+        def _run_task(task: dict[str, Any]) -> dict[str, Any]:
+            _mark_task_started(task)
+            try:
+                text = self._ocr_local_layout_block_crop(
+                    data_uri=str(task["data_uri"]),
+                    label=str(task.get("label") or ""),
+                    crop_width=int(task.get("crop_width") or 0),
+                    crop_height=int(task.get("crop_height") or 0),
+                    effective_model=effective_model,
+                )
+            except Exception as exc:
+                _mark_task_finished(task, error=exc)
+                raise
+            _mark_task_finished(task, text=text)
+            result = dict(task)
+            result["text"] = text
+            return result
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(_run_task, task): task
+                for task in text_tasks
+            }
+            pending_futures = set(future_map)
+            while pending_futures:
+                done_futures, pending_futures = wait(
+                    pending_futures,
+                    timeout=1.0,
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in done_futures:
+                    task = future_map[future]
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        failures.append(f"block={task.get('index')} error={e}")
+                        continue
+                    text = str(result.get("text") or "").strip()
+                    if not text or _looks_like_ocr_prompt_echo_text(text):
+                        continue
+                    raw_elements.append(
+                        {
+                            "text": text,
+                            "bbox": list(result["bbox"]),
+                            "confidence": max(
+                                0.55,
+                                min(
+                                    0.98,
+                                    float(result.get("score"))
+                                    if result.get("score") is not None
+                                    else 0.82,
+                                ),
+                            ),
+                            "provider": self.provider_id,
+                            "model": effective_model,
+                            "ocr_layout_label": result.get("label") or None,
+                        }
+                    )
+                    self.last_layout_blocks[int(result["index"])]["text"] = text
+                if pending_futures:
+                    _maybe_log_local_layout_progress()
+
+        _maybe_log_local_layout_progress(force=True)
+
+        raw_elements.sort(
+            key=lambda item: (
+                float(((item.get("bbox") or [0, 0, 0, 0])[1])),
+                float(((item.get("bbox") or [0, 0, 0, 0])[0])),
+            )
+        )
+        if raw_elements:
+            logger.info(
+                "Local layout_block OCR parsed %s text blocks and %s image-like regions (layout_model=%s, model=%s, failures=%s)",
+                len(raw_elements),
+                len(self.last_image_regions_px),
+                self.layout_model,
+                effective_model,
+                len(failures),
+            )
+            return raw_elements
+
+        failure_preview = "; ".join(failures[:3]).strip()
+        raise RuntimeError(
+            "Local layout block OCR returned no usable text blocks"
+            + (f" ({failure_preview})" if failure_preview else "")
+        )
 
     def _detect_image_regions_with_prompt(self, image_path: str) -> list[list[float]]:
         from ..llm_adapter import _validate_image_regions_px
@@ -759,14 +2495,13 @@ class AiOcrClient(OcrProvider):
                 }
             ]
 
-        completion = self.client.with_options(
-            timeout=request_timeout_s,
-            max_retries=0,
-        ).chat.completions.create(
+        completion = self._chat_completion(
             model=effective_model,
+            timeout_s=request_timeout_s,
+            request_label="image_region_detection",
             temperature=0,
             max_tokens=max_tokens_image_regions,
-            messages=messages,  # type: ignore[arg-type]
+            messages=messages,
         )
         content_obj = (
             completion.choices[0].message.content
@@ -836,9 +2571,21 @@ class AiOcrClient(OcrProvider):
         self._image_region_cache_path = requested_path
         self._image_region_cache_ready = False
 
-        if _is_paddleocr_vl_model(self.model) and self._should_use_paddle_doc_parser():
+        if self._uses_local_layout_block_ocr():
+            try:
+                _, image_regions = self._run_local_layout_analysis(image_path)
+                self._refresh_route_kind()
+                return [list(region) for region in image_regions]
+            except Exception as e:
+                logger.warning(
+                    "Local layout_block image-region extraction failed; falling back to prompt detection: %s",
+                    e,
+                )
+
+        if self._uses_remote_doc_parser():
             try:
                 self._ocr_image_with_paddle_doc_parser(image_path)
+                self._refresh_route_kind()
                 return [list(region) for region in self.last_image_regions_px]
             except Exception as e:
                 logger.warning(
@@ -851,6 +2598,7 @@ class AiOcrClient(OcrProvider):
                 list(region)
                 for region in self._detect_image_regions_with_prompt(image_path)
             ]
+            self._refresh_route_kind()
         except Exception as e:
             logger.warning("AI OCR image-region detection failed: %s", e)
             self.last_image_regions_px = []
@@ -1171,6 +2919,30 @@ class AiOcrClient(OcrProvider):
 
         return default_timeout
 
+    def _chat_completion(
+        self,
+        *,
+        model: str,
+        timeout_s: float,
+        messages: Any,
+        max_tokens: int,
+        request_label: str,
+        **kwargs: Any,
+    ) -> Any:
+        return _run_chat_completion_request(
+            client=self.client,
+            provider_id=self.provider_id,
+            model=model,
+            timeout_s=timeout_s,
+            max_retries=self.request_max_retries,
+            request_limiter=self._request_limiter,
+            request_label=request_label,
+            logger_obj=logger,
+            messages=messages,
+            max_tokens=max_tokens,
+            **kwargs,
+        )
+
     def ocr_image(self, image_path: str) -> List[Dict]:
         self.last_image_regions_px = []
         self.last_layout_blocks = []
@@ -1182,11 +2954,21 @@ class AiOcrClient(OcrProvider):
         if width <= 0 or height <= 0:
             return []
 
+        if self._uses_local_layout_block_ocr():
+            result = self._ocr_image_with_local_layout_blocks(
+                image_path,
+                image=image,
+            )
+            self._refresh_route_kind()
+            return result
+
         is_paddle_model = _is_paddleocr_vl_model(self.model)
-        should_use_doc_parser = self._should_use_paddle_doc_parser()
-        if is_paddle_model and should_use_doc_parser:
+        should_use_doc_parser = self._uses_remote_doc_parser()
+        if should_use_doc_parser:
             try:
-                return self._ocr_image_with_paddle_doc_parser(image_path)
+                result = self._ocr_image_with_paddle_doc_parser(image_path)
+                self._refresh_route_kind()
+                return result
             except Exception as e:
                 if not self.allow_paddle_prompt_fallback:
                     logger.error(
@@ -1204,7 +2986,7 @@ class AiOcrClient(OcrProvider):
                 )
                 self._paddle_doc_parser_disabled = True
                 self._paddle_doc_parser = None
-                should_use_doc_parser = self._should_use_paddle_doc_parser()
+                should_use_doc_parser = self._uses_remote_doc_parser()
 
         model_candidates: list[str] = [str(self.model)]
         if is_paddle_model and not should_use_doc_parser:
@@ -1326,14 +3108,13 @@ class AiOcrClient(OcrProvider):
                             }
                         ]
 
-                    completion = self.client.with_options(
-                        timeout=request_timeout_s,
-                        max_retries=0,
-                    ).chat.completions.create(
+                    completion = self._chat_completion(
                         model=effective_model,
+                        timeout_s=request_timeout_s,
+                        request_label="page_ocr",
                         temperature=0,
                         max_tokens=max_tokens_ocr,
-                        messages=messages,  # type: ignore[arg-type]
+                        messages=messages,
                     )
 
                     content_obj = (
@@ -1670,6 +3451,9 @@ class AiOcrTextRefiner:
         base_url: str | None = None,
         model: str | None = None,
         provider: str | None = None,
+        request_rpm_limit: int | None = None,
+        request_tpm_limit: int | None = None,
+        request_max_retries: int | None = None,
     ):
         import openai
 
@@ -1695,6 +3479,56 @@ class AiOcrTextRefiner:
         )
         self.provider_id = self.vendor_adapter.provider_id
         self.base_url = resolved_base_url
+        self.request_rpm_limit = _coerce_int_in_range(
+            request_rpm_limit,
+            low=1,
+            high=2000,
+            default=None,
+        )
+        self.request_tpm_limit = _coerce_int_in_range(
+            request_tpm_limit,
+            low=1,
+            high=2_000_000,
+            default=None,
+        )
+        self.request_max_retries = int(
+            _coerce_int_in_range(
+                request_max_retries,
+                low=0,
+                high=8,
+                default=0,
+            )
+            or 0
+        )
+        self._request_limiter = _get_shared_ai_request_limiter(
+            api_key=api_key,
+            provider_id=self.provider_id,
+            base_url=self.base_url,
+            model=self.model,
+            requests_per_minute=self.request_rpm_limit,
+            tokens_per_minute=self.request_tpm_limit,
+        )
+
+    def _chat_completion(
+        self,
+        *,
+        messages: Any,
+        max_tokens: int,
+        request_label: str,
+    ) -> Any:
+        return _run_chat_completion_request(
+            client=self.client,
+            provider_id=self.provider_id,
+            model=str(self.model or ""),
+            timeout_s=60.0,
+            max_retries=self.request_max_retries,
+            request_limiter=self._request_limiter,
+            request_label=request_label,
+            logger_obj=logger,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=0,
+        )
 
     def refine_items(
         self,
@@ -1777,11 +3611,10 @@ class AiOcrTextRefiner:
                     ),
                 },
             ]
-            completion = self.client.with_options(timeout=60).chat.completions.create(
-                model=self.model,
-                temperature=0,
-                max_tokens=self.vendor_adapter.clamp_max_tokens(4096, kind="refiner"),
+            completion = self._chat_completion(
                 messages=messages_payload,
+                max_tokens=self.vendor_adapter.clamp_max_tokens(4096, kind="refiner"),
+                request_label="text_refine",
             )
 
             content = (
@@ -1939,11 +3772,10 @@ class AiOcrTextRefiner:
                     ),
                 },
             ]
-            completion = self.client.with_options(timeout=60).chat.completions.create(
-                model=self.model,
-                temperature=0,
-                max_tokens=self.vendor_adapter.clamp_max_tokens(3072, kind="refiner"),
+            completion = self._chat_completion(
                 messages=messages_payload,
+                max_tokens=self.vendor_adapter.clamp_max_tokens(3072, kind="refiner"),
+                request_label="linebreak_refine",
             )
 
             content = (

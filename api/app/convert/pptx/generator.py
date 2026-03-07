@@ -33,6 +33,7 @@ from .font_utils import (
     _map_font_name,
     _normalize_ocr_text_for_render,
     _prefer_wrap_for_ocr_text,
+    _resolve_visual_wrap_override_for_ocr_text,
 )
 from .preview import _export_final_preview_page_image
 from .scanned_page import (
@@ -66,6 +67,147 @@ _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^\)]+)\)")
 def _is_layout_parse_source(source_id: Any) -> bool:
     normalized = str(source_id or "").strip().lower()
     return normalized in {"mineru", "baidu_doc"}
+
+
+def _maybe_export_final_preview_page_image(
+    *,
+    enabled: bool,
+    page: dict[str, Any],
+    page_index: int,
+    page_w_pt: float,
+    page_h_pt: float,
+    source_pdf: Path,
+    artifacts_dir: Path,
+    dpi: int,
+    scanned_image_region_crops: list[tuple[list[float], Path]] | None = None,
+) -> None:
+    if not enabled:
+        return
+    _export_final_preview_page_image(
+        page=page,
+        page_index=page_index,
+        page_w_pt=page_w_pt,
+        page_h_pt=page_h_pt,
+        source_pdf=source_pdf,
+        artifacts_dir=artifacts_dir,
+        dpi=int(dpi),
+        scanned_image_region_crops=scanned_image_region_crops,
+    )
+
+
+def _should_probe_visual_wrap_for_ocr_text(
+    *,
+    text: str,
+    bbox_w_pt: float,
+    bbox_h_pt: float,
+    baseline_ocr_h_pt: float,
+    is_heading: bool,
+    wrap_hint: bool,
+    ocr_linebreak_assisted: bool,
+) -> bool:
+    """Return whether a text box is worth the expensive pixel line-count probe."""
+
+    if ocr_linebreak_assisted:
+        return False
+
+    normalized = _normalize_ocr_text_for_render(text)
+    if not normalized or "\n" in normalized:
+        return False
+
+    compact_len = _compact_text_length(normalized)
+    if compact_len <= 10:
+        return False
+
+    baseline = max(4.0, float(baseline_ocr_h_pt))
+    h_ratio = max(1.0, float(bbox_h_pt)) / baseline
+    w = max(1.0, float(bbox_w_pt))
+
+    if is_heading:
+        return bool(compact_len >= 12 and w >= 120.0)
+
+    # Clear single-line labels are not worth the probe.
+    if (not wrap_hint) and compact_len <= 28 and h_ratio <= 1.14:
+        return False
+
+    # Clear multi-line / paragraph boxes are already handled well by geometry.
+    if wrap_hint and (
+        h_ratio >= 1.55 or (compact_len >= 48 and h_ratio >= 1.35)
+    ):
+        return False
+
+    return True
+
+
+def _should_sample_local_text_colors(
+    *,
+    source_id: Any,
+    element_color: Any,
+) -> bool:
+    """Return whether local bg/text color resampling is worth the cost."""
+
+    # OCR stage already samples text color upstream. Re-sampling every box on
+    # the PPT side is expensive and rarely changes the final color materially.
+    if _hex_to_rgb(element_color) is not None:
+        return False
+
+    normalized_source = str(source_id or "").strip().lower()
+    return normalized_source in {"ocr", "mineru", "baidu_doc"}
+
+
+def _page_needs_ocr_sampling_render(
+    *,
+    page_elements: list[dict[str, Any]],
+    page_h_pt: float,
+    baseline_ocr_h_pt: float,
+) -> bool:
+    """Return whether this page needs an OCR sampling render for visual probes."""
+
+    for el in page_elements:
+        if str(el.get("source") or "").strip().lower() != "ocr":
+            continue
+
+        raw_text = str(el.get("text") or "")
+        text = _normalize_ocr_text_for_render(_sanitize_markdown_text(raw_text))
+        if not text:
+            continue
+
+        try:
+            x0, y0, x1, y1 = _coerce_bbox_pt(el.get("bbox_pt"))
+        except Exception:
+            continue
+
+        bbox_w_pt = max(1.0, float(x1 - x0))
+        bbox_h_pt = max(1.0, float(y1 - y0))
+        compact_len = _compact_text_length(text)
+        is_heading = bool(
+            y0 <= 0.20 * float(page_h_pt)
+            and bbox_h_pt >= 1.45 * float(baseline_ocr_h_pt)
+            and compact_len <= 56
+        )
+        wrap_hint = _prefer_wrap_for_ocr_text(
+            text=text,
+            bbox_w_pt=bbox_w_pt,
+            bbox_h_pt=bbox_h_pt,
+            baseline_ocr_h_pt=float(baseline_ocr_h_pt),
+        )
+        if _should_probe_visual_wrap_for_ocr_text(
+            text=text,
+            bbox_w_pt=bbox_w_pt,
+            bbox_h_pt=bbox_h_pt,
+            baseline_ocr_h_pt=float(baseline_ocr_h_pt),
+            is_heading=is_heading,
+            wrap_hint=wrap_hint,
+            ocr_linebreak_assisted=bool(el.get("ocr_linebreak_assisted")),
+        ):
+            return True
+
+        if _should_sample_local_text_colors(
+            source_id="ocr",
+            element_color=el.get("color"),
+        ):
+            return True
+
+    return False
 
 
 def _sanitize_markdown_text(text: str) -> str:
@@ -159,6 +301,7 @@ def generate_pptx_from_ir(
     scanned_image_region_min_area_ratio: float = 0.0025,
     scanned_image_region_max_area_ratio: float = 0.72,
     scanned_image_region_max_aspect_ratio: float = 4.8,
+    export_final_preview_images: bool = True,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> Path:
     """Generate a PPTX from the provided IR.
@@ -183,6 +326,8 @@ def generate_pptx_from_ir(
             image-region candidate filtering.
         scanned_image_region_max_aspect_ratio: Max aspect ratio threshold for
             suppressing long narrow scanned-image candidates.
+        export_final_preview_images: Whether to export per-page final preview
+            snapshots into `artifacts/final_preview`.
         progress_callback: Optional callback(done_pages, total_pages), called
             after each IR page is written.
 
@@ -335,6 +480,7 @@ def generate_pptx_from_ir(
     blank_layout = prs.slide_layouts[6]
     source_pdf = _as_path(str(ir.get("source_pdf") or ""))
     total_pages = sum(1 for page in pages if isinstance(page, dict))
+    should_export_final_previews = bool(export_final_preview_images)
     done_pages = 0
 
     for page in pages:
@@ -853,7 +999,15 @@ def generate_pptx_from_ir(
                     baseline_ocr_h_pt=float(baseline_ocr_h_pt),
                 )
                 visual_wrap_override: bool | None = None
-                if not bool(el.get("ocr_linebreak_assisted")):
+                if _should_probe_visual_wrap_for_ocr_text(
+                    text=text,
+                    bbox_w_pt=bbox_w_pt,
+                    bbox_h_pt=bbox_h_pt,
+                    baseline_ocr_h_pt=float(baseline_ocr_h_pt),
+                    is_heading=bool(is_heading),
+                    wrap_hint=bool(wrap_hint),
+                    ocr_linebreak_assisted=bool(el.get("ocr_linebreak_assisted")),
+                ):
                     try:
                         visual_line_count = _estimate_bbox_ink_line_count(
                             pix,
@@ -867,32 +1021,41 @@ def generate_pptx_from_ir(
                             and visual_line_count >= 1
                         ):
                             compact_len = _compact_text_length(text)
-                            if visual_line_count >= 2 and compact_len >= 12:
-                                visual_wrap_override = True
-                            elif visual_line_count <= 1:
-                                visual_wrap_override = False
+                            visual_wrap_override = (
+                                _resolve_visual_wrap_override_for_ocr_text(
+                                    visual_line_count=visual_line_count,
+                                    compact_len=compact_len,
+                                    bbox_h_pt=bbox_h_pt,
+                                    baseline_ocr_h_pt=float(baseline_ocr_h_pt),
+                                    is_heading=bool(is_heading),
+                                )
+                            )
                     except Exception:
                         visual_wrap_override = None
 
                 sampled_bg_rgb: tuple[int, int, int] | None = None
                 sampled_text_rgb: tuple[int, int, int] | None = None
-                try:
-                    sampled_bg_rgb = _sample_bbox_background_rgb(
-                        pix,
-                        bbox_pt=bbox_pt,
-                        page_height_pt=page_h_pt,
-                        dpi=int(scanned_render_dpi),
-                    )
-                    sampled_text_rgb = _sample_bbox_text_rgb(
-                        pix,
-                        bbox_pt=bbox_pt,
-                        page_height_pt=page_h_pt,
-                        dpi=int(scanned_render_dpi),
-                        bg_rgb=sampled_bg_rgb,
-                    )
-                except Exception:
-                    sampled_bg_rgb = None
-                    sampled_text_rgb = None
+                if _should_sample_local_text_colors(
+                    source_id="ocr",
+                    element_color=el.get("color"),
+                ):
+                    try:
+                        sampled_bg_rgb = _sample_bbox_background_rgb(
+                            pix,
+                            bbox_pt=bbox_pt,
+                            page_height_pt=page_h_pt,
+                            dpi=int(scanned_render_dpi),
+                        )
+                        sampled_text_rgb = _sample_bbox_text_rgb(
+                            pix,
+                            bbox_pt=bbox_pt,
+                            page_height_pt=page_h_pt,
+                            dpi=int(scanned_render_dpi),
+                            bg_rgb=sampled_bg_rgb,
+                        )
+                    except Exception:
+                        sampled_bg_rgb = None
+                        sampled_text_rgb = None
 
                 text_to_render, font_size_pt, wrap = _fit_ocr_text_style(
                     text=text,
@@ -1030,7 +1193,8 @@ def generate_pptx_from_ir(
                             )
                         font.color.rgb = RGBColor(*rgb)
 
-            _export_final_preview_page_image(
+            _maybe_export_final_preview_page_image(
+                enabled=should_export_final_previews,
                 page=page,
                 page_index=page_index,
                 page_w_pt=page_w_pt,
@@ -1144,11 +1308,11 @@ def generate_pptx_from_ir(
                 mineru_background_placed = False
 
         if ocr_sampling_pix is None and source_pdf.exists():
-            has_ocr_text_elements = any(
-                str(el.get("source") or "").strip().lower() == "ocr"
-                for el in page_text_elements_render
-            )
-            if has_ocr_text_elements:
+            if _page_needs_ocr_sampling_render(
+                page_elements=page_text_elements_render,
+                page_h_pt=float(page_h_pt),
+                baseline_ocr_h_pt=float(baseline_ocr_h_pt),
+            ):
                 try:
                     ocr_render_path = (
                         artifacts / "page_renders" / f"page-{page_index:04d}.ocr.png"
@@ -1322,7 +1486,24 @@ def generate_pptx_from_ir(
                 wrap_override: bool | None = (
                     False if (ocr_linebreak_assisted and "\n" not in text) else None
                 )
-                if wrap_override is None and ocr_sampling_pix is not None:
+                if (
+                    wrap_override is None
+                    and ocr_sampling_pix is not None
+                    and _should_probe_visual_wrap_for_ocr_text(
+                        text=text,
+                        bbox_w_pt=bbox_w_pt,
+                        bbox_h_pt=bbox_h_pt,
+                        baseline_ocr_h_pt=float(baseline_ocr_h_pt),
+                        is_heading=bool(is_heading),
+                        wrap_hint=_prefer_wrap_for_ocr_text(
+                            text=text,
+                            bbox_w_pt=bbox_w_pt,
+                            bbox_h_pt=bbox_h_pt,
+                            baseline_ocr_h_pt=float(baseline_ocr_h_pt),
+                        ),
+                        ocr_linebreak_assisted=ocr_linebreak_assisted,
+                    )
+                ):
                     try:
                         visual_line_count = _estimate_bbox_ink_line_count(
                             ocr_sampling_pix,
@@ -1335,10 +1516,13 @@ def generate_pptx_from_ir(
                             isinstance(visual_line_count, int)
                             and visual_line_count >= 1
                         ):
-                            if visual_line_count >= 2 and compact_len >= 12:
-                                wrap_override = True
-                            elif visual_line_count <= 1:
-                                wrap_override = False
+                            wrap_override = _resolve_visual_wrap_override_for_ocr_text(
+                                visual_line_count=visual_line_count,
+                                compact_len=compact_len,
+                                bbox_h_pt=bbox_h_pt,
+                                baseline_ocr_h_pt=float(baseline_ocr_h_pt),
+                                is_heading=bool(is_heading),
+                            )
                     except Exception:
                         wrap_override = None
                 text_to_render, font_size_pt, wrap = _fit_ocr_text_style(
@@ -1354,6 +1538,10 @@ def generate_pptx_from_ir(
                     has_text_layer
                     and source_pdf.exists()
                     and (mineru_render_pix is not None)
+                    and _should_sample_local_text_colors(
+                        source_id="ocr",
+                        element_color=el.get("color"),
+                    )
                 ):
                     try:
                         sampled_bg_rgb = _sample_bbox_background_rgb(
@@ -1439,21 +1627,18 @@ def generate_pptx_from_ir(
                     pass
 
             tf.word_wrap = False if is_mineru_text else bool(wrap)
-            if is_mineru_text:
-                tf.auto_size = MSO_AUTO_SIZE.NONE
-                try:
-                    tf.vertical_anchor = MSO_ANCHOR.TOP
-                except Exception:
-                    pass
-            else:
-                tf.auto_size = MSO_AUTO_SIZE.NONE
+            tf.auto_size = MSO_AUTO_SIZE.NONE
+            try:
+                tf.vertical_anchor = MSO_ANCHOR.TOP
+            except Exception:
+                pass
             tf.margin_left = 0
             tf.margin_right = 0
             tf.margin_top = 0
             tf.margin_bottom = 0
             tf.text = text_to_render
 
-            if is_mineru_text:
+            if is_mineru_text or is_ocr_text:
                 for p in tf.paragraphs:
                     try:
                         if is_primary_heading:
@@ -1470,25 +1655,33 @@ def generate_pptx_from_ir(
             mapped_font = _map_font_name(el.get("font_name"))
             rgb = _hex_to_rgb(el.get("color"))
             if is_mineru_text and mineru_render_pix is not None:
-                try:
-                    sampled_bg_rgb = _sample_bbox_background_rgb(
-                        mineru_render_pix,
-                        bbox_pt=bbox_pt,
-                        page_height_pt=page_h_pt,
-                        dpi=int(scanned_render_dpi),
-                    )
-                    sampled_text_rgb = _sample_bbox_text_rgb(
-                        mineru_render_pix,
-                        bbox_pt=bbox_pt,
-                        page_height_pt=page_h_pt,
-                        dpi=int(scanned_render_dpi),
-                        bg_rgb=sampled_bg_rgb,
-                    )
-                except Exception:
-                    sampled_bg_rgb = None
-                    sampled_text_rgb = None
+                if _should_sample_local_text_colors(
+                    source_id=source_id,
+                    element_color=el.get("color"),
+                ):
+                    try:
+                        sampled_bg_rgb = _sample_bbox_background_rgb(
+                            mineru_render_pix,
+                            bbox_pt=bbox_pt,
+                            page_height_pt=page_h_pt,
+                            dpi=int(scanned_render_dpi),
+                        )
+                        sampled_text_rgb = _sample_bbox_text_rgb(
+                            mineru_render_pix,
+                            bbox_pt=bbox_pt,
+                            page_height_pt=page_h_pt,
+                            dpi=int(scanned_render_dpi),
+                            bg_rgb=sampled_bg_rgb,
+                        )
+                    except Exception:
+                        sampled_bg_rgb = None
+                        sampled_text_rgb = None
             elif (
                 is_ocr_text and sampled_bg_rgb is None and ocr_sampling_pix is not None
+                and _should_sample_local_text_colors(
+                    source_id=source_id,
+                    element_color=el.get("color"),
+                )
             ):
                 # Best-effort local color sampling for OCR elements on text-layer pages.
                 # Reuse mineru render when available; otherwise render OCR page snapshot.
@@ -1550,7 +1743,8 @@ def generate_pptx_from_ir(
             if not applied:
                 continue
 
-        _export_final_preview_page_image(
+        _maybe_export_final_preview_page_image(
+            enabled=should_export_final_previews,
             page=page,
             page_index=page_index,
             page_w_pt=page_w_pt,

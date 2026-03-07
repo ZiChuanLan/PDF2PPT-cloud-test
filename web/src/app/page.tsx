@@ -73,7 +73,7 @@ type JobStatusFetchError = Error & {
 
 const ocrProviderLabels: Record<Settings["ocrProvider"], string> = {
   auto: "自动",
-  aiocr: "AI OCR",
+  aiocr: "AIOCR",
   baidu: "百度 OCR",
   tesseract: "本地 OCR（Tesseract）",
   paddle_local: "本地 OCR（PaddleOCR）",
@@ -83,12 +83,6 @@ const layoutAssistModeLabels: Record<"off" | "on" | "auto", string> = {
   off: "关闭",
   on: "开启",
   auto: "自动",
-}
-
-const ocrLinebreakModeLabels: Record<Settings["ocrAiLinebreakAssistMode"], string> = {
-  auto: "自动",
-  on: "开启",
-  off: "关闭",
 }
 
 const HOME_ACTIVE_JOB_STORAGE_KEY = "ppt-opencode:home:active-job-id"
@@ -532,7 +526,6 @@ export default function Home() {
     if (activeJob.status === "completed") {
       toast.success("转换完成，可下载 PPTX")
     } else if (activeJob.status === "failed") {
-      setActionError(activeJob.error?.message || "转换失败")
       toast.error(activeJob.error?.message || "转换失败")
     } else if (activeJob.status === "cancelled") {
       toast("任务已取消")
@@ -867,12 +860,7 @@ export default function Home() {
                     版式辅助：{layoutAssistModeLabels[runConfig.layoutAssistMode]}
                   </Badge>
                   {runConfig.effectiveOcrProvider === "aiocr" ? (
-                    <Badge variant="outline">
-                      行拆分：{ocrLinebreakModeLabels[runConfig.ocrLinebreakAssistMode]}
-                    </Badge>
-                  ) : null}
-                  {runConfig.effectiveOcrProvider === "aiocr" ? (
-                    <Badge variant="outline">AI 配置：{runOcrConfigSourceLabel}</Badge>
+                    <Badge variant="outline">AIOCR 配置：{runOcrConfigSourceLabel}</Badge>
                   ) : null}
                   <Badge variant="outline" className="max-w-full whitespace-normal break-all">
                     模型：{runModelLabel}
@@ -973,12 +961,6 @@ export default function Home() {
                   </div>
                 ) : null}
 
-                {activeJob?.error?.message ? (
-                  <div className="border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
-                    {activeJob.error.message}
-                  </div>
-                ) : null}
-
                 {hasCurrentJob ? (
                   <JobDebugPanel
                     events={activeJob?.debug_events || []}
@@ -989,7 +971,7 @@ export default function Home() {
                 ) : null}
 
                 {actionError ? (
-                  <div className="border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
+                  <div className="text-xs leading-6 text-muted-foreground">
                     {actionError}
                   </div>
                 ) : null}

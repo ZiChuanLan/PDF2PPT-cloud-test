@@ -53,8 +53,8 @@ from ..models.job import (
     JobStatusResponse,
 )
 from ..convert.ocr import (
-    AiOcrClient,
     _coerce_bbox_xyxy,
+    create_remote_ocr_client,
     probe_local_paddle_models,
     probe_local_paddleocr,
     probe_local_tesseract_models,
@@ -184,7 +184,13 @@ def _run_ai_ocr_capability_check(
     api_key: str,
     base_url: str | None,
     model: str,
+    ocr_ai_chain_mode: str | None = None,
+    ocr_ai_layout_model: str | None = None,
     ocr_paddle_vl_docparser_max_side_px: int | None = None,
+    ocr_ai_block_concurrency: int | None = None,
+    ocr_ai_requests_per_minute: int | None = None,
+    ocr_ai_tokens_per_minute: int | None = None,
+    ocr_ai_max_retries: int | None = None,
 ) -> AiOcrCheckResponse:
     """Run AI OCR capability check and validate whether bbox items are returned."""
     start = time.perf_counter()
@@ -194,12 +200,19 @@ def _run_ai_ocr_capability_check(
     normalized_model = model.strip()
 
     try:
-        client = AiOcrClient(
-            api_key=api_key.strip(),
-            provider=normalized_provider,
-            base_url=normalized_base_url,
-            model=normalized_model,
+        client = create_remote_ocr_client(
+            requested_provider="aiocr",
+            ai_api_key=api_key.strip(),
+            ai_provider=normalized_provider,
+            ai_base_url=normalized_base_url,
+            ai_model=normalized_model,
+            route_kind=ocr_ai_chain_mode,
+            ai_layout_model=ocr_ai_layout_model,
             paddle_doc_max_side_px=ocr_paddle_vl_docparser_max_side_px,
+            layout_block_max_concurrency=ocr_ai_block_concurrency,
+            request_rpm_limit=ocr_ai_requests_per_minute,
+            request_tpm_limit=ocr_ai_tokens_per_minute,
+            request_max_retries=ocr_ai_max_retries,
         )
         raw_items: list[dict[str, Any]] = client.ocr_image(str(image_path))
 
@@ -246,6 +259,7 @@ def _run_ai_ocr_capability_check(
             provider=normalized_provider,
             model=normalized_model,
             base_url=normalized_base_url,
+            route_kind=getattr(client, "route_kind", None),
             elapsed_ms=elapsed_ms,
             items_count=len(raw_items or []),
             valid_bbox_items=valid_bbox_items,
@@ -260,6 +274,7 @@ def _run_ai_ocr_capability_check(
             provider=normalized_provider,
             model=normalized_model,
             base_url=normalized_base_url,
+            route_kind=None,
             elapsed_ms=elapsed_ms,
             items_count=0,
             valid_bbox_items=0,
@@ -301,7 +316,13 @@ async def check_ai_ocr(payload: AiOcrCheckRequest):
             api_key=api_key,
             base_url=payload.base_url,
             model=model,
+            ocr_ai_chain_mode=payload.ocr_ai_chain_mode,
+            ocr_ai_layout_model=payload.ocr_ai_layout_model,
             ocr_paddle_vl_docparser_max_side_px=payload.ocr_paddle_vl_docparser_max_side_px,
+            ocr_ai_block_concurrency=payload.ocr_ai_block_concurrency,
+            ocr_ai_requests_per_minute=payload.ocr_ai_requests_per_minute,
+            ocr_ai_tokens_per_minute=payload.ocr_ai_tokens_per_minute,
+            ocr_ai_max_retries=payload.ocr_ai_max_retries,
         )
     except AppException:
         raise
@@ -446,10 +467,13 @@ async def create_job(
     text_erase_mode: str | None = Form(
         "fill", description="Text erase mode for scanned/mineru pages (smart, fill)"
     ),
-    enable_layout_assist: bool = Form(True, description="Enable AI layout assistance"),
+    enable_layout_assist: bool = Form(
+        False,
+        description="Deprecated and ignored: AI layout assistance has been retired",
+    ),
     layout_assist_apply_image_regions: bool = Form(
         False,
-        description="Apply AI-suggested image regions in layout assist (experimental)",
+        description="Deprecated and ignored: layout-assist image region application has been retired",
     ),
     parse_provider: str = Form(
         "local",
@@ -533,6 +557,14 @@ async def create_job(
         None, description="Optional AI OCR base URL (OpenAI-compatible)"
     ),
     ocr_ai_model: str | None = Form(None, description="Optional AI OCR model name"),
+    ocr_ai_chain_mode: str | None = Form(
+        "direct",
+        description="AI OCR chain mode (direct, doc_parser, layout_block)",
+    ),
+    ocr_ai_layout_model: str | None = Form(
+        "pp_doclayout_v3",
+        description="Local layout model for AI OCR layout_block chain",
+    ),
     ocr_paddle_vl_docparser_max_side_px: int | None = Form(
         None,
         ge=0,
@@ -541,6 +573,39 @@ async def create_job(
             "Optional max long-edge in pixels for PaddleOCR-VL doc_parser input images; "
             "0 disables downscale"
         ),
+    ),
+    ocr_ai_page_concurrency: int | None = Form(
+        1,
+        ge=1,
+        le=8,
+        description=(
+            "Experimental multi-page AI OCR concurrency for direct/layout_block chains. "
+            "1 keeps OCR page processing serial."
+        ),
+    ),
+    ocr_ai_block_concurrency: int | None = Form(
+        None,
+        ge=1,
+        le=8,
+        description="Experimental per-page block concurrency override for layout_block OCR",
+    ),
+    ocr_ai_requests_per_minute: int | None = Form(
+        None,
+        ge=1,
+        le=2000,
+        description="Experimental shared requests-per-minute cap for AI OCR requests",
+    ),
+    ocr_ai_tokens_per_minute: int | None = Form(
+        None,
+        ge=1,
+        le=2_000_000,
+        description="Experimental shared tokens-per-minute cap for AI OCR requests",
+    ),
+    ocr_ai_max_retries: int | None = Form(
+        0,
+        ge=0,
+        le=8,
+        description="Experimental retry count for retryable AI OCR chat/completions failures",
     ),
     ocr_geometry_mode: str | None = Form(
         "auto",
@@ -609,6 +674,8 @@ async def create_job(
         ocr_ai_provider=ocr_ai_provider,
         ocr_ai_api_key=ocr_ai_api_key,
         ocr_ai_model=ocr_ai_model,
+        ocr_ai_chain_mode=ocr_ai_chain_mode,
+        ocr_ai_layout_model=ocr_ai_layout_model,
         ocr_baidu_app_id=ocr_baidu_app_id,
         ocr_baidu_api_key=ocr_baidu_api_key,
         ocr_baidu_secret_key=ocr_baidu_secret_key,
@@ -618,6 +685,8 @@ async def create_job(
         page_start=page_start,
         page_end=page_end,
     )
+    enable_layout_assist = False
+    layout_assist_apply_image_regions = False
     parse_provider_id = normalized_options.parse_provider
 
     if parse_provider_id == "v2":
@@ -710,7 +779,14 @@ async def create_job(
                     "ocr_ai_provider": normalized_options.ocr_ai_provider,
                     "ocr_ai_base_url": ocr_ai_base_url,
                     "ocr_ai_model": ocr_ai_model,
+                    "ocr_ai_chain_mode": normalized_options.ocr_ai_chain_mode,
+                    "ocr_ai_layout_model": normalized_options.ocr_ai_layout_model,
                     "ocr_paddle_vl_docparser_max_side_px": ocr_paddle_vl_docparser_max_side_px,
+                    "ocr_ai_page_concurrency": ocr_ai_page_concurrency,
+                    "ocr_ai_block_concurrency": ocr_ai_block_concurrency,
+                    "ocr_ai_requests_per_minute": ocr_ai_requests_per_minute,
+                    "ocr_ai_tokens_per_minute": ocr_ai_tokens_per_minute,
+                    "ocr_ai_max_retries": ocr_ai_max_retries,
                     "ocr_geometry_mode": normalized_options.ocr_geometry_mode,
                     "text_erase_mode": normalized_options.text_erase_mode,
                     "scanned_page_mode": normalized_options.scanned_page_mode,
@@ -766,7 +842,14 @@ async def create_job(
                 ocr_ai_provider=normalized_options.ocr_ai_provider,
                 ocr_ai_base_url=ocr_ai_base_url,
                 ocr_ai_model=ocr_ai_model,
+                ocr_ai_chain_mode=normalized_options.ocr_ai_chain_mode,
+                ocr_ai_layout_model=normalized_options.ocr_ai_layout_model,
                 ocr_paddle_vl_docparser_max_side_px=ocr_paddle_vl_docparser_max_side_px,
+                ocr_ai_page_concurrency=ocr_ai_page_concurrency,
+                ocr_ai_block_concurrency=ocr_ai_block_concurrency,
+                ocr_ai_requests_per_minute=ocr_ai_requests_per_minute,
+                ocr_ai_tokens_per_minute=ocr_ai_tokens_per_minute,
+                ocr_ai_max_retries=ocr_ai_max_retries,
                 ocr_geometry_mode=normalized_options.ocr_geometry_mode,
                 text_erase_mode=normalized_options.text_erase_mode,
                 scanned_page_mode=normalized_options.scanned_page_mode,

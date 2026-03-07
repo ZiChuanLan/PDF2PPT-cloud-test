@@ -20,8 +20,6 @@ import { Select } from "@/components/ui/select"
 import {
   BAIDU_DOC_PARSE_TYPE_LABELS,
   type BaiduDocParseType,
-  type LayoutAssistMode,
-  SILICONFLOW_BASE_URL,
   SETTINGS_STORAGE_KEY,
   defaultSettings,
   loadStoredSettings,
@@ -45,7 +43,7 @@ import {
   setStoredApiOrigin,
 } from "@/lib/api"
 
-type SettingsSectionId = "api" | "strategy" | "ocr" | "vision"
+type SettingsSectionId = "api" | "strategy" | "ocr"
 
 const settingsSectionItems: Array<{
   id: SettingsSectionId
@@ -55,7 +53,6 @@ const settingsSectionItems: Array<{
   { id: "api", label: "接口配置", description: "密钥、模型与接口地址" },
   { id: "strategy", label: "处理策略", description: "输出方式与版式选项" },
   { id: "ocr", label: "识别配置", description: "OCR、文档解析与能力检测" },
-  { id: "vision", label: "版式辅助", description: "页面结构修正与图片区建议" },
 ]
 
 function SectionTitle({
@@ -113,12 +110,6 @@ function AdvancedReveal({
   )
 }
 
-const aiProviderOptions: Array<{ id: "openai" | "siliconflow" | "claude"; label: string }> = [
-  { id: "openai", label: "OpenAI 兼容" },
-  { id: "siliconflow", label: "SiliconFlow" },
-  { id: "claude", label: "Claude" },
-]
-
 const ocrAiProviderOptions: Array<{ id: OcrAiProvider; label: string }> = [
   { id: "auto", label: "自动识别（推荐）" },
   { id: "openai", label: "OpenAI" },
@@ -128,6 +119,16 @@ const ocrAiProviderOptions: Array<{ id: OcrAiProvider; label: string }> = [
   { id: "novita", label: "Novita" },
 ]
 
+const ocrAiChainModeOptions: Array<{ id: Settings["ocrAiChainMode"]; label: string }> = [
+  { id: "direct", label: "模型直出框和文字" },
+  { id: "doc_parser", label: "内置文档解析（PaddleOCR-VL）" },
+  { id: "layout_block", label: "本地切块识别" },
+]
+
+const ocrAiLayoutModelOptions: Array<{ id: Settings["ocrAiLayoutModel"]; label: string }> = [
+  { id: "pp_doclayout_v3", label: "PP-DocLayoutV3" },
+]
+
 const baiduDocParseTypeOptions: Array<{ id: BaiduDocParseType; label: string }> = [
   { id: "general", label: BAIDU_DOC_PARSE_TYPE_LABELS.general },
   { id: "paddle_vl", label: BAIDU_DOC_PARSE_TYPE_LABELS.paddle_vl },
@@ -135,7 +136,7 @@ const baiduDocParseTypeOptions: Array<{ id: BaiduDocParseType; label: string }> 
 
 const ocrProviderLabels: Record<Settings["ocrProvider"], string> = {
   auto: "自动（混合）",
-  aiocr: "AI OCR（OpenAI 兼容）",
+  aiocr: "AIOCR",
   paddle_local: "本地 OCR（PaddleOCR）",
   baidu: "百度 OCR",
   tesseract: "本地 OCR（Tesseract）",
@@ -201,18 +202,6 @@ type AiOcrCheckResponse = {
   check: AiOcrCheckResult
 }
 
-function isOpenAiCompatibleEndpoint(baseUrl: string): boolean {
-  const normalized = baseUrl.trim().toLowerCase()
-  if (!normalized) return false
-  return !normalized.includes("api.openai.com")
-}
-
-function isOcrSpecializedModel(modelId: string): boolean {
-  const normalized = modelId.trim().toLowerCase()
-  if (!normalized) return false
-  return normalized.includes("ocr") || normalized.includes("paddleocr") || normalized.includes("mineru")
-}
-
 export default function SettingsPage() {
   const [settings, setSettings] = React.useState<Settings>(defaultSettings)
   const [settingsHydrated, setSettingsHydrated] = React.useState(false)
@@ -223,9 +212,6 @@ export default function SettingsPage() {
   const [apiOriginOverrideEnabled, setApiOriginOverrideEnabled] = React.useState(false)
   const [apiOriginResolving, setApiOriginResolving] = React.useState(false)
   const [apiOriginError, setApiOriginError] = React.useState<string | null>(null)
-  const [modelOptions, setModelOptions] = React.useState<string[]>([])
-  const [modelLoading, setModelLoading] = React.useState(false)
-  const [modelError, setModelError] = React.useState<string | null>(null)
   const [ocrModelOptions, setOcrModelOptions] = React.useState<string[]>([])
   const [ocrModelLoading, setOcrModelLoading] = React.useState(false)
   const [ocrModelError, setOcrModelError] = React.useState<string | null>(null)
@@ -281,14 +267,14 @@ export default function SettingsPage() {
   const canUseAiOcr = ocrState.canUseAiOcr
   const selectedOcrProvider = ocrState.selectedOcrProvider
   const parseEngineMode = ocrState.parseEngineMode
-  const currentLayoutAssistMode: LayoutAssistMode = ocrState.currentLayoutAssistMode
-  const isLayoutAssistEnabledForCurrentEngine = ocrState.isLayoutAssistEnabledForCurrentEngine
-  const currentOcrLinebreakAssistMode = ocrState.currentOcrLinebreakAssistMode
-  const canConfigureOcrLinebreakAssist = ocrState.canConfigureOcrLinebreakAssist
-  const isOcrProviderAi = ocrState.isOcrProviderAi
+  const currentOcrAiChainMode = ocrState.runConfig.ocrAiChainMode
+  const currentOcrAiLayoutModel = ocrState.runConfig.ocrAiLayoutModel
   const isOcrProviderPaddleLocal = ocrState.isOcrProviderPaddleLocal
   const isOcrProviderBaidu = ocrState.isOcrProviderBaidu
   const isOcrProviderTesseract = ocrState.isOcrProviderTesseract
+  const isOcrAiChainDirect = ocrState.isOcrAiChainDirect
+  const isOcrAiChainDocParser = ocrState.isOcrAiChainDocParser
+  const isOcrAiChainLayoutBlock = ocrState.isOcrAiChainLayoutBlock
   const needsRequiredOcrAiConfig = ocrState.needsRequiredOcrAiConfig
   const shouldShowLocalOcrCheck = ocrState.shouldShowLocalOcrCheck
   const tesseractSuite = localOcrSuite?.tesseract ?? null
@@ -312,111 +298,10 @@ export default function SettingsPage() {
   const shouldShowTesseractConfig = ocrState.shouldShowTesseractConfig
   const shouldShowAiVendorAdapter = ocrState.shouldShowAiVendorAdapter
   const mainConfig = getMainProviderConfig(settings)
-  const aiProvider =
-    isMineruProvider ? settings.preferredMainProvider : settings.provider
   const mainModelsApiKeyRaw = mainConfig.apiKey
-  const mainModelsBaseUrlRaw =
-    aiProvider === "siliconflow"
-      ? mainConfig.baseUrl || SILICONFLOW_BASE_URL
-      : mainConfig.baseUrl
-  const mainModelsSelectedRaw = mainConfig.model
-  const modelsApiKey = mainModelsApiKeyRaw
-  const modelsBaseUrl = mainModelsBaseUrlRaw
-  const modelsSelected = mainModelsSelectedRaw
-  const isCompatGatewayMode =
-    !isMineruProvider &&
-    aiProvider === "openai" &&
-    isOpenAiCompatibleEndpoint(modelsBaseUrl)
-  const localOcrAiPostprocessRequested =
-    canConfigureOcrLinebreakAssist &&
-    !isOcrProviderAi &&
-    currentOcrLinebreakAssistMode === "on"
-  const shouldShowVisionModelConfig =
-    isLayoutAssistEnabledForCurrentEngine || localOcrAiPostprocessRequested
-  const layoutAssistRequested =
-    settings.visualAssistModeLocal !== "off" ||
-    settings.visualAssistModeRemote !== "off" ||
-    settings.visualAssistModeMineru !== "off"
-  const canLoadModels =
-    aiProvider !== "claude" &&
-    Boolean(modelsApiKey) &&
-    (layoutAssistRequested || localOcrAiPostprocessRequested)
   const ocrModelsApiKey = ocrState.ocrModelsApiKey
   const ocrModelsBaseUrl = ocrState.ocrModelsBaseUrl
-
-  React.useEffect(() => {
-    if (!canLoadModels) {
-      setModelOptions([])
-      setModelError(null)
-      return
-    }
-
-    let mounted = true
-    const controller = new AbortController()
-    const timer = setTimeout(async () => {
-      setModelLoading(true)
-      setModelError(null)
-
-      try {
-        const payload: Record<string, string> = {
-          provider: "openai",
-          api_key: modelsApiKey,
-          capability: "vision",
-        }
-        if (modelsBaseUrl) {
-          payload.base_url = modelsBaseUrl
-        }
-
-        const response = await apiFetch("/models", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        })
-
-        if (!response.ok) {
-          const body = await response.json().catch(() => null)
-          throw new Error(body?.message || "模型列表加载失败")
-        }
-
-        const body = await response.json().catch(() => null)
-        const models = Array.isArray(body?.models)
-          ? body.models.filter((m: unknown) => typeof m === "string")
-          : []
-        const filteredModels = models.filter((model: string) => !isOcrSpecializedModel(model))
-
-        if (!mounted) return
-        setModelOptions(filteredModels)
-        if (filteredModels.length && !filteredModels.includes(modelsSelected)) {
-          setSettings((prev) =>
-            aiProvider === "siliconflow"
-              ? { ...prev, siliconflowModel: "" }
-              : { ...prev, openaiModel: "" }
-          )
-        }
-      } catch (e) {
-        if (!mounted || controller.signal.aborted) return
-        setModelError(normalizeFetchError(e, "模型列表加载失败"))
-        setModelOptions([])
-      } finally {
-        if (mounted) setModelLoading(false)
-      }
-    }, 400)
-
-    return () => {
-      mounted = false
-      controller.abort()
-      clearTimeout(timer)
-    }
-  }, [
-    canLoadModels,
-    modelsApiKey,
-    modelsBaseUrl,
-    modelsSelected,
-    aiProvider,
-    isMineruProvider,
-    layoutAssistRequested,
-  ])
+  const ocrModelCapability = isOcrAiChainLayoutBlock ? "vision" : "ocr"
 
   const canLoadOcrModels =
     canUseAiOcr &&
@@ -426,20 +311,10 @@ export default function SettingsPage() {
 
   const visibleSectionItems = React.useMemo(
     () =>
-      settingsSectionItems.filter(
-        (section) =>
-          (section.id !== "ocr" || isOcrEnabledForCurrentEngine) &&
-          (section.id !== "vision" || (showAdvanced && !isBaiduDocParseMode))
-      ),
-    [isBaiduDocParseMode, isOcrEnabledForCurrentEngine, showAdvanced]
+      settingsSectionItems.filter((section) => section.id !== "ocr" || isOcrEnabledForCurrentEngine),
+    [isOcrEnabledForCurrentEngine]
   )
-  const observableSectionItems = React.useMemo(
-    () =>
-      visibleSectionItems.filter(
-        (section) => section.id !== "vision" || showAdvanced
-      ),
-    [showAdvanced, visibleSectionItems]
-  )
+  const observableSectionItems = visibleSectionItems
   const [activeSection, setActiveSection] = React.useState<SettingsSectionId>("api")
 
   React.useEffect(() => {
@@ -453,23 +328,12 @@ export default function SettingsPage() {
 
   const selectSection = React.useCallback(
     (sectionId: SettingsSectionId) => {
-      if (sectionId === "vision" && !showAdvanced) {
-        setShowAdvanced(true)
-      }
-
       setActiveSection(sectionId)
-      const scrollToTarget = () => {
-        const target = document.getElementById(`settings-section-${sectionId}`)
-        if (!target) return
-        target.scrollIntoView({ behavior: "smooth", block: "start" })
-      }
-      if (sectionId === "vision" && !showAdvanced) {
-        window.setTimeout(scrollToTarget, 180)
-      } else {
-        scrollToTarget()
-      }
+      const target = document.getElementById(`settings-section-${sectionId}`)
+      if (!target) return
+      target.scrollIntoView({ behavior: "smooth", block: "start" })
     },
-    [showAdvanced]
+    []
   )
 
   React.useEffect(() => {
@@ -556,7 +420,7 @@ export default function SettingsPage() {
         const payload: Record<string, string> = {
           provider: "openai",
           api_key: ocrModelsApiKey,
-          capability: "ocr",
+          capability: ocrModelCapability,
         }
         if (ocrModelsBaseUrl) {
           payload.base_url = ocrModelsBaseUrl
@@ -602,6 +466,7 @@ export default function SettingsPage() {
     canLoadOcrModels,
     ocrModelsApiKey,
     ocrModelsBaseUrl,
+    ocrModelCapability,
     settings.ocrAiModel,
     selectedOcrProvider,
     isOcrEnabledForCurrentEngine,
@@ -787,17 +652,14 @@ export default function SettingsPage() {
     const apiKey = ocrModelsApiKey.trim()
     const baseUrl = ocrModelsBaseUrl.trim()
     const model = settings.ocrAiModel.trim()
-    const provider =
-      ocrState.ocrModelsConfigSource === "main"
-        ? (mainConfig.ocrAdapter ?? "auto")
-        : (settings.ocrAiProvider || "auto").trim() || "auto"
+    const provider = (settings.ocrAiProvider || "auto").trim() || "auto"
     const sourceLabel = getOcrConfigSourceLabel(ocrState.ocrModelsConfigSource)
 
     if (!apiKey) {
       const message =
         needsRequiredOcrAiConfig
-          ? "显式 AI OCR 需要独立 OCR API Key"
-          : `请先补充可用的 OCR AI 配置（当前来源：${sourceLabel}）`
+          ? "AIOCR 需要独立 OCR API Key"
+          : `请先补充可用的 AIOCR 配置（当前来源：${sourceLabel}）`
       setAiOcrCheck(null)
       setAiOcrCheckError(message)
       toast.error(message)
@@ -818,11 +680,29 @@ export default function SettingsPage() {
         provider,
         api_key: apiKey,
         model,
+        ocr_ai_chain_mode: currentOcrAiChainMode,
+        ocr_ai_layout_model: currentOcrAiLayoutModel,
       }
       if (baseUrl) payload.base_url = baseUrl
       const paddleDocMaxSidePx = Number(settings.ocrPaddleVlDocparserMaxSidePx.trim())
       if (Number.isFinite(paddleDocMaxSidePx) && paddleDocMaxSidePx >= 0) {
         payload.ocr_paddle_vl_docparser_max_side_px = Math.round(paddleDocMaxSidePx)
+      }
+      const blockConcurrency = Number(settings.ocrAiBlockConcurrency.trim())
+      if (Number.isFinite(blockConcurrency) && blockConcurrency > 0) {
+        payload.ocr_ai_block_concurrency = Math.round(blockConcurrency)
+      }
+      const requestsPerMinute = Number(settings.ocrAiRequestsPerMinute.trim())
+      if (Number.isFinite(requestsPerMinute) && requestsPerMinute > 0) {
+        payload.ocr_ai_requests_per_minute = Math.round(requestsPerMinute)
+      }
+      const tokensPerMinute = Number(settings.ocrAiTokensPerMinute.trim())
+      if (Number.isFinite(tokensPerMinute) && tokensPerMinute > 0) {
+        payload.ocr_ai_tokens_per_minute = Math.round(tokensPerMinute)
+      }
+      const maxRetries = Number(settings.ocrAiMaxRetries.trim())
+      if (Number.isFinite(maxRetries) && maxRetries >= 0) {
+        payload.ocr_ai_max_retries = Math.round(maxRetries)
       }
 
       const response = await apiFetch("/jobs/ocr/ai/check", {
@@ -855,14 +735,19 @@ export default function SettingsPage() {
       setAiOcrChecking(false)
     }
   }, [
-    mainConfig.ocrAdapter,
+    currentOcrAiChainMode,
+    currentOcrAiLayoutModel,
     needsRequiredOcrAiConfig,
     ocrModelsApiKey,
     ocrModelsBaseUrl,
     ocrState.ocrModelsConfigSource,
+    settings.ocrAiBlockConcurrency,
+    settings.ocrAiMaxRetries,
     settings.ocrAiModel,
     settings.ocrAiProvider,
     settings.ocrPaddleVlDocparserMaxSidePx,
+    settings.ocrAiRequestsPerMinute,
+    settings.ocrAiTokensPerMinute,
   ])
 
   return (
@@ -1277,9 +1162,9 @@ export default function SettingsPage() {
               <div className="grid gap-2">
                 <FieldLabel
                   htmlFor="scanned-page-mode"
-                  hint="分块模式会尝试把截图/图表等区域单独裁剪为可编辑图片；全页模式只保留一张整页背景并覆盖文字，通常更接近原图但图片不可单独编辑。"
+                  hint="控制扫描页里的截图、图表和插图，是作为独立图片放进 PPT，还是直接留在整页背景里。"
                 >
-                  扫描页合成模式
+                  扫描页图片处理方式
                 </FieldLabel>
                 <Select
                   id="scanned-page-mode"
@@ -1291,8 +1176,8 @@ export default function SettingsPage() {
                     }))
                   }
                 >
-                  <option value="segmented">分块（图片可编辑）</option>
-                  <option value="fullpage">全页（更像原图）</option>
+                  <option value="segmented">图片拆出来（可单独编辑）</option>
+                  <option value="fullpage">图片留在整页背景里（更像原图）</option>
                 </Select>
               </div>
 
@@ -1481,13 +1366,11 @@ export default function SettingsPage() {
                   <FieldLabel
                     htmlFor="ocr-provider"
                     hint={
-                      isOcrProviderAi
-                        ? "显式 AI OCR 只使用专用 OCR 模型本身的识别与 bbox。"
-                        : isOcrProviderPaddleLocal
-                          ? "使用本地 OCR（PaddleOCR）链路；如需 AI 修字/拆行，可在下方开启 AI OCR 后处理。"
-                          : isOcrProviderBaidu
-                            ? "使用百度 OCR API 直接识别并返回 bbox，不叠加 AI OCR 后处理。"
-                            : "使用本地 OCR（Tesseract）链路；如需 AI 修字/拆行，可在下方开启 AI OCR 后处理。"
+                      isOcrProviderPaddleLocal
+                        ? "使用本地 OCR（PaddleOCR）链路，适合纯本地部署。"
+                        : isOcrProviderBaidu
+                          ? "使用百度 OCR API 直接识别并返回 bbox。"
+                          : "使用本地 OCR（Tesseract）链路，适合纯本地部署。"
                     }
                   >
                     OCR 提供方
@@ -1509,12 +1392,12 @@ export default function SettingsPage() {
                     ))}
                   </Select>
                 </div>
-              ) : (
+              ) : isBaiduDocParseMode ? (
                 <div className="flex flex-wrap gap-2 text-xs">
                   <Badge variant="outline">{PARSE_ENGINE_MODE_LABELS[parseEngineMode]}</Badge>
                   <HoverHint text="当前链路会直接使用百度解析服务返回结构化结果。根据百度官方产品页，该服务基于 PaddleOCR-VL；这里只配置对应凭据，不再单独选择 OCR provider。" />
                 </div>
-              )}
+              ) : null}
 
               <AdvancedReveal show={showAdvanced && !isBaiduDocParseMode}>
                 <>
@@ -1543,7 +1426,7 @@ export default function SettingsPage() {
                       htmlFor="ocr-ai-provider"
                       hint="厂商适配会自动处理常见参数差异。"
                     >
-                      AI OCR 厂商适配
+                      AIOCR 厂商适配
                     </FieldLabel>
                     <Select
                       id="ocr-ai-provider"
@@ -1569,7 +1452,7 @@ export default function SettingsPage() {
                 <div className="grid gap-3 border border-border bg-muted/20 p-3">
                   <div className="flex items-center gap-2 font-sans text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                     <span>专用 OCR 接口参数</span>
-                    <HoverHint text="显式 AI OCR 现在固定走纯 AI OCR 链路，不再混用本地 Tesseract 几何定位；这里仅列专门的 OCR 模型。" />
+                    <HoverHint text="AIOCR 固定走专用模型链路，不再混用本地 Tesseract 定位；这里仅列当前链路可用的 OCR/视觉模型。" />
                   </div>
                   <div className="flex flex-wrap gap-2 text-xs">
                     <Badge variant="outline">
@@ -1612,7 +1495,62 @@ export default function SettingsPage() {
                   </div>
 
                   <div className="grid gap-2">
-                    <FieldLabel htmlFor="ocr-ai-model">专用 OCR 模型（必填）</FieldLabel>
+                    <FieldLabel
+                      htmlFor="ocr-ai-chain-mode"
+                      hint="模型直出：由模型直接返回 bbox 和文字。内置文档解析：PaddleOCR-VL 专用整页解析。 本地切块识别：先用本地版面模型出框，再逐块交给视觉模型识字。"
+                    >
+                      AIOCR 识别链路
+                    </FieldLabel>
+                    <Select
+                      id="ocr-ai-chain-mode"
+                      value={settings.ocrAiChainMode}
+                      onChange={(e) =>
+                        setSettings((s) => ({
+                          ...s,
+                          ocrAiChainMode: e.target.value as Settings["ocrAiChainMode"],
+                          ocrAiModel: "",
+                        }))
+                      }
+                    >
+                      {ocrAiChainModeOptions.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+
+                  {isOcrAiChainLayoutBlock ? (
+                    <div className="grid gap-2">
+                      <FieldLabel
+                        htmlFor="ocr-ai-layout-model"
+                        hint="第一版固定先支持 PP-DocLayoutV3。本地模型只负责版面切块和 bbox，不负责识字。"
+                      >
+                        版面切块模型
+                      </FieldLabel>
+                      <Select
+                        id="ocr-ai-layout-model"
+                        value={settings.ocrAiLayoutModel}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            ocrAiLayoutModel: e.target.value as Settings["ocrAiLayoutModel"],
+                          }))
+                        }
+                      >
+                        {ocrAiLayoutModelOptions.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                  ) : null}
+
+                  <div className="grid gap-2">
+                    <FieldLabel htmlFor="ocr-ai-model">
+                      {isOcrAiChainLayoutBlock ? "AI 视觉识别模型（必填）" : "专用 OCR 模型（必填）"}
+                    </FieldLabel>
                     <Select
                       id="ocr-ai-model"
                       value={settings.ocrAiModel}
@@ -1642,28 +1580,173 @@ export default function SettingsPage() {
                     ) : null}
                   </div>
 
-                  <div className="grid gap-2">
-                    <FieldLabel
-                      htmlFor="ocr-paddle-vl-docparser-max-side"
-                      hint="仅对 PaddleOCR-VL 专用通道生效。会先把超大页图按长边缩到该像素值，再把 bbox 映射回原图坐标。0 表示不缩图；推荐 1800-2400。"
-                    >
-                      PaddleOCR-VL 长边上限
-                    </FieldLabel>
-                    <Input
-                      id="ocr-paddle-vl-docparser-max-side"
-                      type="number"
-                      min={0}
-                      step={100}
-                      value={settings.ocrPaddleVlDocparserMaxSidePx}
-                      onChange={(e) =>
-                        setSettings((s) => ({
-                          ...s,
-                          ocrPaddleVlDocparserMaxSidePx: e.target.value,
-                        }))
-                      }
-                      placeholder="2200"
-                    />
-                  </div>
+                  {isOcrAiChainDocParser ? (
+                    <div className="grid gap-2">
+                      <FieldLabel
+                        htmlFor="ocr-paddle-vl-docparser-max-side"
+                        hint="仅对 PaddleOCR-VL 专用通道生效。会先把超大页图按长边缩到该像素值，再把 bbox 映射回原图坐标。0 表示不缩图；推荐 1800-2400。"
+                      >
+                        PaddleOCR-VL 长边上限
+                      </FieldLabel>
+                      <Input
+                        id="ocr-paddle-vl-docparser-max-side"
+                        type="number"
+                        min={0}
+                        step={100}
+                        value={settings.ocrPaddleVlDocparserMaxSidePx}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            ocrPaddleVlDocparserMaxSidePx: e.target.value,
+                          }))
+                        }
+                        placeholder="2200"
+                      />
+                    </div>
+                  ) : null}
+
+                  <AdvancedReveal show={showAdvanced}>
+                    <div className="grid gap-3 border border-border/70 bg-muted/10 p-3">
+                      <div className="flex items-center gap-2 font-sans text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                        <span>实验型并发与限流</span>
+                        <HoverHint text="这组参数只作用于 AIOCR 的 OpenAI-compatible 请求。模型直出和本地切块识别会生效；PaddleOCR-VL 内置文档解析专用通道不走这一套。" />
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="grid gap-2">
+                          <FieldLabel
+                            htmlFor="ocr-ai-page-concurrency"
+                            hint={`默认：${defaultSettings.ocrAiPageConcurrency}。仅对“模型直出框和文字”与“本地切块识别”生效。1 表示串行。`}
+                          >
+                            多页并发数
+                          </FieldLabel>
+                          <Input
+                            id="ocr-ai-page-concurrency"
+                            type="number"
+                            min={1}
+                            max={8}
+                            step={1}
+                            value={settings.ocrAiPageConcurrency}
+                            disabled={!isOcrAiChainDirect && !isOcrAiChainLayoutBlock}
+                            onChange={(e) =>
+                              setSettings((s) => ({
+                                ...s,
+                                ocrAiPageConcurrency: e.target.value,
+                              }))
+                            }
+                            placeholder="1"
+                          />
+                        </div>
+
+                        <div className="grid gap-2">
+                          <FieldLabel
+                            htmlFor="ocr-ai-block-concurrency"
+                            hint="仅对“本地切块识别”生效。留空表示后端自动选择。"
+                          >
+                            单页切块并发
+                          </FieldLabel>
+                          <Input
+                            id="ocr-ai-block-concurrency"
+                            type="number"
+                            min={1}
+                            max={8}
+                            step={1}
+                            value={settings.ocrAiBlockConcurrency}
+                            disabled={!isOcrAiChainLayoutBlock}
+                            onChange={(e) =>
+                              setSettings((s) => ({
+                                ...s,
+                                ocrAiBlockConcurrency: e.target.value,
+                              }))
+                            }
+                            placeholder="自动"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-3">
+                        <div className="grid gap-2">
+                          <FieldLabel
+                            htmlFor="ocr-ai-rpm"
+                            hint="每分钟请求数上限。留空表示不主动限流。"
+                          >
+                            RPM 上限
+                          </FieldLabel>
+                          <Input
+                            id="ocr-ai-rpm"
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={settings.ocrAiRequestsPerMinute}
+                            disabled={isOcrAiChainDocParser}
+                            onChange={(e) =>
+                              setSettings((s) => ({
+                                ...s,
+                                ocrAiRequestsPerMinute: e.target.value,
+                              }))
+                            }
+                            placeholder="不限"
+                          />
+                        </div>
+
+                        <div className="grid gap-2">
+                          <FieldLabel
+                            htmlFor="ocr-ai-tpm"
+                            hint="每分钟 tokens 预算。实验型估算值，不同视觉模型会有偏差。"
+                          >
+                            TPM 上限
+                          </FieldLabel>
+                          <Input
+                            id="ocr-ai-tpm"
+                            type="number"
+                            min={1}
+                            step={1000}
+                            value={settings.ocrAiTokensPerMinute}
+                            disabled={isOcrAiChainDocParser}
+                            onChange={(e) =>
+                              setSettings((s) => ({
+                                ...s,
+                                ocrAiTokensPerMinute: e.target.value,
+                              }))
+                            }
+                            placeholder="不限"
+                          />
+                        </div>
+
+                        <div className="grid gap-2">
+                          <FieldLabel
+                            htmlFor="ocr-ai-max-retries"
+                            hint={`默认：${defaultSettings.ocrAiMaxRetries}。仅对 AIOCR 的 chat/completions 请求生效。`}
+                          >
+                            失败重试次数
+                          </FieldLabel>
+                          <Input
+                            id="ocr-ai-max-retries"
+                            type="number"
+                            min={0}
+                            max={8}
+                            step={1}
+                            value={settings.ocrAiMaxRetries}
+                            disabled={isOcrAiChainDocParser}
+                            onChange={(e) =>
+                              setSettings((s) => ({
+                                ...s,
+                                ocrAiMaxRetries: e.target.value,
+                              }))
+                            }
+                            placeholder="0"
+                          />
+                        </div>
+                      </div>
+
+                      {isOcrAiChainDocParser ? (
+                        <div className="text-xs text-muted-foreground">
+                          当前是 PaddleOCR-VL 内置文档解析链路。上面的并发、RPM、TPM、重试只影响
+                          OpenAI-compatible OCR 请求，所以这里不会生效。
+                        </div>
+                      ) : null}
+                    </div>
+                  </AdvancedReveal>
 
                   <div className="grid gap-2">
                     <div className="flex flex-wrap items-center gap-2">
@@ -1676,7 +1759,13 @@ export default function SettingsPage() {
                       >
                         {aiOcrChecking ? "验证中..." : "验证 OCR 能力"}
                       </Button>
-                      <HoverHint text="检查模型是否返回有效 bbox。" />
+                      <HoverHint
+                        text={
+                          isOcrAiChainLayoutBlock
+                            ? "检查本地版面切块 + 当前视觉模型是否能返回可用 OCR 结果。"
+                            : "检查模型是否返回有效 bbox。"
+                        }
+                      />
                     </div>
                     {aiOcrCheckError ? (
                       <div className="text-xs text-destructive">{aiOcrCheckError}</div>
@@ -1708,45 +1797,11 @@ export default function SettingsPage() {
                   !settings.ocrAiApiKey.trim() &&
                   Boolean(mainModelsApiKeyRaw.trim()) ? (
                     <div className="text-muted-foreground text-xs">
-                      显式 AI OCR 不再复用主 AI Key。请填写独立 OCR API Key 与 OCR 模型后再执行。
+                      AIOCR 不再复用主 AI Key。请填写独立 OCR API Key 与 OCR 模型后再执行。
                     </div>
                   ) : null}
-
                 </div>
               ) : null}
-
-              {!showAdvanced && canConfigureOcrLinebreakAssist ? (
-                <div className="text-right text-xs text-muted-foreground">
-                  如需给本地 OCR 增加 AI 修字/拆行，请展开“高级设置”后配置视觉模型。
-                </div>
-              ) : null}
-
-              <AdvancedReveal show={showAdvanced}>
-                {canConfigureOcrLinebreakAssist ? (
-                  <div className="grid gap-2">
-                    <FieldLabel
-                      htmlFor="ocr-ai-linebreak-mode"
-                      hint="这是 OCR 后处理，不属于版式辅助。显式 AI OCR：自动模式会按 OCR 模型特性决定是否拆行。本地 OCR：开启后会尽量复用下方视觉模型做文字修正与逐行拆分；若没有可用视觉模型，则退回启发式处理。百度链路固定走纯百度返回，不参与这里的 AI 后处理。"
-                    >
-                      AI OCR 后处理
-                    </FieldLabel>
-                    <Select
-                      id="ocr-ai-linebreak-mode"
-                      value={currentOcrLinebreakAssistMode}
-                      onChange={(e) =>
-                        setSettings((s) => ({
-                          ...s,
-                          ocrAiLinebreakAssistMode: e.target.value as Settings["ocrAiLinebreakAssistMode"],
-                        }))
-                      }
-                    >
-                      <option value="auto">自动（显式 AI OCR 推荐）</option>
-                      <option value="on">开启（本地 OCR 也可用）</option>
-                      <option value="off">关闭</option>
-                    </Select>
-                  </div>
-                ) : null}
-              </AdvancedReveal>
 
               {shouldShowBaiduConfig && (showAdvanced || isOcrProviderBaidu) ? (
                 <>
@@ -1999,294 +2054,6 @@ export default function SettingsPage() {
               </section>
             ) : null}
 
-            <AdvancedReveal show={showAdvanced && !isBaiduDocParseMode}>
-              <section
-                id="settings-section-vision"
-                className="scroll-mt-24 grid gap-4 border-t border-border p-5"
-              >
-                <SectionTitle
-                  hint={
-                    isMineruProvider
-                      ? `当前链路：${PARSE_ENGINE_MODE_LABELS[parseEngineMode]}。这里只控制 AI 版式辅助。`
-                      : isBaiduDocParseMode
-                        ? `当前链路：${PARSE_ENGINE_MODE_LABELS[parseEngineMode]}。这里只控制可选 AI 版式辅助；百度解析本身不使用 OCR provider 选择，也不参与 AI OCR 后处理。`
-                        : `当前链路：${PARSE_ENGINE_MODE_LABELS[parseEngineMode]}。这里配置页面结构分析使用的视觉模型；识字由当前解析链路决定，AI 修字/拆行在识别配置中单独开关。本地 OCR 开启“AI OCR 后处理”时，也会复用这里的模型做文字修正与拆行。`
-                  }
-                >
-                  AI 视觉辅助
-                </SectionTitle>
-
-                <div className="grid gap-2">
-                  <FieldLabel
-                    htmlFor="vision-mode-current"
-                    hint="关闭：禁用当前链路的 AI 版式辅助。强制开启：始终启用版式辅助。自动：由后端按模型能力决定。它不会改变 OCR 提供方，也不会替你切换成另一条 OCR 链路。"
-                  >
-                    版式辅助模式
-                  </FieldLabel>
-                  <Select
-                    id="vision-mode-current"
-                    value={currentLayoutAssistMode}
-                    onChange={(e) => {
-                      const nextMode = e.target.value as LayoutAssistMode
-                      setSettings((s) =>
-                        parseEngineMode === "local_ocr"
-                          ? { ...s, visualAssistModeLocal: nextMode }
-                          : parseEngineMode === "remote_ocr"
-                            ? { ...s, visualAssistModeRemote: nextMode }
-                            : parseEngineMode === "baidu_doc"
-                              ? { ...s, visualAssistModeBaiduDoc: nextMode }
-                          : parseEngineMode === "mineru_cloud"
-                            ? { ...s, visualAssistModeMineru: nextMode }
-                            : s
-                      )
-                    }}
-                  >
-                    <option value="off">关闭（默认）</option>
-                    <option value="on">强制开启</option>
-                    <option value="auto">自动（按模型能力）</option>
-                  </Select>
-                </div>
-
-                <div className="flex items-center gap-1.5">
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 accent-[#111111]"
-                      checked={settings.layoutAssistApplyImageRegions}
-                      disabled={!isLayoutAssistEnabledForCurrentEngine}
-                      onChange={(e) =>
-                        setSettings((s) => ({
-                          ...s,
-                          layoutAssistApplyImageRegions: e.target.checked,
-                        }))
-                      }
-                    />
-                    <span>应用 AI 图片区域建议（高风险实验）</span>
-                  </label>
-                  <HoverHint text="仅当当前链路的版式辅助模式不为“关闭”时生效。开启后可能让图片更干净，也可能误判导致图片缺失；默认关闭更稳妥。" />
-                </div>
-
-                {shouldShowVisionModelConfig ? (
-                  <>
-                    <div className="grid gap-2">
-                      <label className="text-muted-foreground text-xs" htmlFor="ai-provider-2">
-                        视觉模型提供方
-                      </label>
-                      <Select
-                        id="ai-provider-2"
-                        value={aiProvider}
-                        onChange={(e) =>
-                          setSettings((s) => ({
-                            ...s,
-                            preferredMainProvider: e.target.value as "openai" | "siliconflow" | "claude",
-                            provider:
-                              s.provider === "mineru"
-                                ? "mineru"
-                                : (e.target.value as "openai" | "siliconflow" | "claude"),
-                          }))
-                        }
-                      >
-                        {aiProviderOptions.map((option) => (
-                          <option key={option.id} value={option.id}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </Select>
-                    </div>
-
-                    {aiProvider === "openai" ? (
-                      <>
-                        {isCompatGatewayMode ? (
-                          <div className="border border-amber-500/40 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                            当前处于 OpenAI 兼容模式（第三方网关）。建议后续升级为原生接口接入，以提升稳定性和兼容性。
-                          </div>
-                        ) : null}
-                        <div className="grid gap-2">
-                          <label
-                            className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground"
-                            htmlFor="openai-key"
-                          >
-                            OpenAI API Key
-                          </label>
-                          <Input
-                            id="openai-key"
-                            type="password"
-                            autoComplete="off"
-                            value={settings.openaiApiKey}
-                            onChange={(e) =>
-                              setSettings((s) => ({ ...s, openaiApiKey: e.target.value }))
-                            }
-                            placeholder="sk-..."
-                          />
-                        </div>
-
-                        <div className="grid gap-2">
-                          <label
-                            className="text-muted-foreground text-xs"
-                            htmlFor="openai-base-url"
-                          >
-                            OpenAI 兼容 Base URL（可选）
-                          </label>
-                          <Input
-                            id="openai-base-url"
-                            type="text"
-                            autoComplete="off"
-                            value={settings.openaiBaseUrl}
-                            onChange={(e) =>
-                              setSettings((s) => ({ ...s, openaiBaseUrl: e.target.value }))
-                            }
-                            placeholder="https://api.openai.com/v1"
-                          />
-                        </div>
-
-                        <div className="grid gap-2">
-                          <label
-                            className="text-muted-foreground text-xs"
-                            htmlFor="openai-model"
-                          >
-                            OpenAI 兼容视觉模型
-                          </label>
-                          <Select
-                            id="openai-model"
-                            value={settings.openaiModel}
-                            onChange={(e) =>
-                              setSettings((s) => ({ ...s, openaiModel: e.target.value }))
-                            }
-                            disabled={modelLoading || modelOptions.length === 0}
-                          >
-                            <option value="">
-                              {modelLoading
-                                ? "正在加载模型..."
-                                : modelOptions.length
-                                  ? "请选择模型"
-                                  : "暂无可用模型"}
-                            </option>
-                            {modelOptions.map((model) => (
-                              <option key={model} value={model}>
-                                {model}
-                              </option>
-                            ))}
-                          </Select>
-                          {modelError ? (
-                            <div className="text-xs text-destructive">{modelError}</div>
-                          ) : null}
-                        </div>
-                      </>
-                    ) : aiProvider === "siliconflow" ? (
-                      <>
-                        <div className="border border-cyan-500/35 bg-cyan-50 px-3 py-2 text-xs text-cyan-900">
-                          SiliconFlow 使用 OpenAI 兼容接口；该通道建议优先填写专用 Base URL 与模型。
-                        </div>
-                        <div className="grid gap-2">
-                          <label
-                            className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground"
-                            htmlFor="siliconflow-key"
-                          >
-                            SiliconFlow API Key
-                          </label>
-                          <Input
-                            id="siliconflow-key"
-                            type="password"
-                            autoComplete="off"
-                            value={settings.siliconflowApiKey}
-                            onChange={(e) =>
-                              setSettings((s) => ({ ...s, siliconflowApiKey: e.target.value }))
-                            }
-                            placeholder="sk-..."
-                          />
-                        </div>
-
-                        <div className="grid gap-2">
-                          <label
-                            className="text-muted-foreground text-xs"
-                            htmlFor="siliconflow-base-url"
-                          >
-                            SiliconFlow Base URL
-                          </label>
-                          <Input
-                            id="siliconflow-base-url"
-                            type="text"
-                            autoComplete="off"
-                            value={settings.siliconflowBaseUrl}
-                            onChange={(e) =>
-                              setSettings((s) => ({ ...s, siliconflowBaseUrl: e.target.value }))
-                            }
-                            placeholder={SILICONFLOW_BASE_URL}
-                          />
-                        </div>
-
-                        <div className="grid gap-2">
-                          <label
-                            className="text-muted-foreground text-xs"
-                            htmlFor="siliconflow-model"
-                          >
-                            SiliconFlow 视觉模型
-                          </label>
-                          <Select
-                            id="siliconflow-model"
-                            value={settings.siliconflowModel}
-                            onChange={(e) =>
-                              setSettings((s) => ({ ...s, siliconflowModel: e.target.value }))
-                            }
-                            disabled={modelLoading || modelOptions.length === 0}
-                          >
-                            <option value="">
-                              {modelLoading
-                                ? "正在加载模型..."
-                                : modelOptions.length
-                                  ? "请选择模型"
-                                  : "暂无可用模型"}
-                            </option>
-                            {modelOptions.map((model) => (
-                              <option key={model} value={model}>
-                                {model}
-                              </option>
-                            ))}
-                          </Select>
-                          {modelError ? (
-                            <div className="text-xs text-destructive">{modelError}</div>
-                          ) : null}
-                        </div>
-                      </>
-                    ) : (
-                      <div className="grid gap-2">
-                        <label
-                          className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground"
-                          htmlFor="claude-key"
-                        >
-                          Claude API Key
-                        </label>
-                        <Input
-                          id="claude-key"
-                          type="password"
-                          autoComplete="off"
-                          value={settings.claudeApiKey}
-                          onChange={(e) =>
-                            setSettings((s) => ({ ...s, claudeApiKey: e.target.value }))
-                          }
-                          placeholder="sk-ant-..."
-                        />
-                      </div>
-                    )}
-                    {localOcrAiPostprocessRequested ? (
-                      <div className="rounded-md border border-emerald-500/25 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
-                        当前 OCR 已开启 AI OCR 后处理：会复用这里的视觉模型做文字修正与逐行拆分；它不改变 OCR 提供方，也不等同于 AI 版式辅助。
-                      </div>
-                    ) : null}
-
-                    {localOcrAiPostprocessRequested && aiProvider === "claude" ? (
-                      <div className="rounded-md border border-amber-500/35 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                        Claude 目前只用于版式辅助，不会参与当前 OCR 链路的 AI 后处理。若要使用 AI 修字/拆行，请切换到 OpenAI 兼容视觉模型提供方。
-                      </div>
-                    ) : null}
-                  </>
-                ) : (
-                  <div className="text-muted-foreground text-sm">
-                    当前未启用 AI 版式辅助，也未开启本地 OCR 的 AI 后处理，已折叠视觉模型配置。
-                  </div>
-                )}
-              </section>
-            </AdvancedReveal>
           </CardContent>
 
             </Card>

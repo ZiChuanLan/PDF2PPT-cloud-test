@@ -37,27 +37,74 @@ OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX=2200
 ```
 
 说明：
+- 本地部署现在默认只会在容器启动时预拉 `PP-DocLayoutV3` 到缓存卷里：`OCR_PADDLE_LAYOUT_PREWARM=1`。这样首个 PaddleOCR-VL 相关任务不会再承担这个本地 layout 模型下载。
 - `OCR_PADDLE_VL_PREWARM=1` 用于容器启动时预热 PaddleOCR-VL，避免第一个请求承担冷启动
+- `OCR_PADDLE_VL_PREWARM` 仍然需要启动阶段已经有可用的远程 API key；如果 key 只在 Web 提交任务时才提供，这一项会跳过，但本地模型预热仍可执行
 - `OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX` 是目前仍建议保留的公开调节项
 - 其他 PaddleOCR-VL 超时、重试、并发等细粒度参数默认走代码内置值，除非你在排障，否则不需要管
 
-## Windows 可下载版（EXE + Release 包）
+### 生产部署命令
 
-如果你希望用户在 GitHub 上下载后直接运行，可以使用 Windows 打包流程：
+默认的 `docker-compose.yml` 就是部署版，可以直接走标准命令。
 
-- 文档：`packaging/windows/README.md`
-- 构建脚本：`packaging/windows/build_exe.ps1` / `packaging/windows/build_exe.bat`
-- 自动化工作流：`.github/workflows/windows-release.yml`
+1. 复制环境变量模板：
 
-当前打包链路输出的文件名仍沿用历史名字：
+```bash
+cp .env.example .env
+```
 
-- `release/windows/PPT-OpenCode-Launcher.exe`
-- `release/windows/ppt-opencode-win-x64.zip`
+2. 至少补齐 `.env` 里的这些值：
 
-说明：
-- `PPT-OpenCode-Launcher.exe` 是启动器
-- 对最终用户分发，优先使用 `ppt-opencode-win-x64.zip`（包含 EXE + 运行所需目录）
-- Markdown 文档品牌已经统一为 `PDF2PPT`，但打包产物文件名暂未跟着改动，避免影响现有发布链路
+```env
+SILICONFLOW_API_KEY=你的key
+SILICONFLOW_MODEL=PaddlePaddle/PaddleOCR-VL-1.5
+OCR_PADDLE_VL_PREWARM=1
+OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX=2200
+```
+
+3. 直接启动：
+
+```bash
+docker compose up -d --build
+```
+
+生产编排默认行为：
+- `web` 对外暴露 `${WEB_PORT}`，默认 `3000`
+- `api` 只绑定到宿主机 `127.0.0.1:${API_PORT}`，默认 `8000`
+- `redis` 不对外暴露
+- 任务结果和模型缓存走 named volume：`api-data`、`paddlex-cache`、`paddle-cache`
+- 前端默认走同源 `/health` 和 `/api/*`，再由 Next 反代到容器内 `api:8000`
+
+如果你有自己的域名反代，直接把外部流量转到 `WEB_PORT` 即可，不需要单独公开 `api`。
+
+### 同源与跨域配置
+
+默认推荐：
+- 保持 `NEXT_PUBLIC_API_URL=` 为空
+- 保持 `INTERNAL_API_ORIGIN=http://api:8000`
+- 让浏览器只访问 Web，同源 `/health` 和 `/api/v1/*` 由 Next 转发到后端
+
+只有在你明确要把 API 暴露为另一个公网地址时，才需要：
+- 设置 `NEXT_PUBLIC_API_URL=https://你的-api-域名`
+- 更新 `CORS_ALLOW_ORIGINS`
+- 重新构建 Web 镜像，因为 `NEXT_PUBLIC_*` 变量会进入前端构建产物
+
+### 常用运维命令
+
+```bash
+docker compose ps
+docker compose logs -f
+docker compose down
+curl http://127.0.0.1:8000/health
+```
+
+### 开发态 Compose
+
+如果你还想保留源码挂载和 `next dev` 那套开发容器，改用：
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build
+```
 
 ## 远程 OCR（推荐）
 
@@ -75,19 +122,18 @@ OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX=2200
 - PaddleOCR-VL：`PaddlePaddle/PaddleOCR-VL-1.5`
 - 通用 VL 也可尝试 OCR：`Qwen/Qwen2.5-VL-72B-Instruct`（效果取决于模型与 prompt）
 
-## 扫描页合成模式（关键）
+## 扫描页图片处理方式（关键）
 
 设置项：`scanned_page_mode`
 
-- `segmented`（分块）：尽量把截图/图表等区域裁为可编辑图片块，文字仍可编辑
-- `fullpage`（全页）：整页作为背景图，仅覆盖可编辑文字，通常最接近原图（图片不可单独编辑）
+- `segmented`（图片拆出来）：尽量把截图/图表等区域裁为独立图片对象，方便在 PPT 里单独编辑
+- `fullpage`（留在整页背景里）：整页作为背景图，仅覆盖可编辑文字，通常最接近原图
 
 ## 项目结构
 
 - `api/`：FastAPI 接口、任务队列、PDF 解析、OCR 和 PPTX 生成
 - `web/`：Next.js 前端，负责上传、运行配置、结果跟踪和设置页
 - `scripts/dev/`：本地开发辅助脚本
-- `packaging/windows/`：Windows 启动器与发布打包脚本
 
 说明：
 - 公开仓库默认不保留测试样本、截图对比产物和临时基准脚本

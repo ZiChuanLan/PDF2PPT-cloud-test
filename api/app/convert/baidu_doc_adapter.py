@@ -165,43 +165,87 @@ def _extract_page_size(entry: Any) -> tuple[float, float] | None:
         if width and height and width > 0 and height > 0:
             return (float(width), float(height))
 
-    size = entry.get("size")
-    if isinstance(size, dict):
-        width = _coerce_float(size.get("width") or size.get("w"))
-        height = _coerce_float(size.get("height") or size.get("h"))
-        if width and height and width > 0 and height > 0:
-            return (float(width), float(height))
+    width = _coerce_float(entry.get("page_width") or entry.get("page_w"))
+    height = _coerce_float(entry.get("page_height") or entry.get("page_h"))
+    if width and height and width > 0 and height > 0:
+        return (float(width), float(height))
 
-    has_page_size_context = any(
+    return None
+
+
+def _has_explicit_page_idx(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    return any(
+        key in entry
+        for key in ("page_idx", "page_index", "page", "page_no", "page_num", "page_id")
+    )
+
+
+def _looks_like_page_container(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    if any(
         key in entry
         for key in (
-            "page_idx",
-            "page_index",
-            "page",
-            "page_no",
-            "page_num",
-            "page_id",
-            "page_width",
-            "page_height",
-            "page_w",
-            "page_h",
-            "page_size",
-            "size",
+            "bbox",
+            "box",
+            "rect",
+            "rectangle",
+            "polygon",
+            "poly",
+            "points",
+            "position",
+            "location",
+            "coordinates",
+            "coordinate",
+        )
+    ):
+        return False
+    if any(
+        key in entry
+        for key in (
+            "text",
+            "content",
+            "value",
+            "words",
+            "markdown",
+            "html",
+            "type",
+            "kind",
+            "category",
+            "block_type",
+            "layout_type",
+            "label",
+            "name",
+            "cls",
+        )
+    ):
+        return False
+    return any(
+        key in entry
+        for key in (
             "blocks",
             "items",
             "elements",
             "layouts",
             "paragraphs",
             "regions",
+            "pages",
         )
     )
-    if not has_page_size_context:
+
+
+def _extract_loose_page_size(entry: Any) -> tuple[float, float] | None:
+    if not isinstance(entry, dict):
         return None
 
-    width = _coerce_float(entry.get("page_width") or entry.get("page_w"))
-    height = _coerce_float(entry.get("page_height") or entry.get("page_h"))
-    if width and height and width > 0 and height > 0:
-        return (float(width), float(height))
+    size = entry.get("size")
+    if isinstance(size, dict):
+        width = _coerce_float(size.get("width") or size.get("w"))
+        height = _coerce_float(size.get("height") or size.get("h"))
+        if width and height and width > 0 and height > 0:
+            return (float(width), float(height))
 
     width = _coerce_float(entry.get("width"))
     height = _coerce_float(entry.get("height"))
@@ -442,15 +486,27 @@ def _collect_page_payload(
 ) -> None:
     if isinstance(node, list):
         for idx, item in enumerate(node):
-            _collect_page_payload(item, fallback_page_idx=idx, out_pages=out_pages)
+            child_fallback = fallback_page_idx if fallback_page_idx is not None else idx
+            _collect_page_payload(
+                item,
+                fallback_page_idx=child_fallback,
+                out_pages=out_pages,
+            )
         return
     if not isinstance(node, dict):
         return
 
     page_idx = _extract_page_idx(node, fallback=fallback_page_idx)
     page_size = _extract_page_size(node)
+    looks_like_page = _looks_like_page_container(node)
+    if page_size is None and (
+        _has_explicit_page_idx(node) or (fallback_page_idx is not None and looks_like_page)
+    ):
+        page_size = _extract_loose_page_size(node)
     if page_idx is not None and page_size is not None:
         out_pages[int(page_idx)] = page_size
+        if looks_like_page:
+            return
 
     for value in node.values():
         if isinstance(value, (dict, list)):

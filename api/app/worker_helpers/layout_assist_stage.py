@@ -40,6 +40,7 @@ def run_layout_assist_stage(
     job_path: Path,
     artifacts_dir: Path,
     scanned_render_dpi: int,
+    export_debug_images: bool,
     select_provider: Callable[[], Any | None],
     set_processing_progress: Callable[[JobStage, int, str], None],
     abort_if_cancelled: Callable[..., None],
@@ -136,25 +137,26 @@ def run_layout_assist_stage(
             encoding="utf-8",
         )
 
-        try:
-            debug_result = _export_layout_assist_debug_images(
-                source_pdf=input_pdf,
-                before_ir=before_ai_ir,
-                after_ir=ir,
-                out_dir=artifacts_dir / "layout_assist",
-                render_dpi=max(96, int(scanned_render_dpi)),
-                assist_status=layout_assist_status,
-                assist_error=layout_assist_error,
-            )
-            ir.setdefault("warnings", []).append(
-                f"layout_assist_debug_pages={int(debug_result.get('pages_exported') or 0)}"
-            )
-            ir.setdefault("warnings", []).append(
-                "layout_assist_debug_changed_pages="
-                f"{int(debug_result.get('pages_changed') or 0)}"
-            )
-        except Exception as e:
-            logger.warning("Failed to export layout assist debug images: %s", e)
+        if export_debug_images:
+            try:
+                debug_result = _export_layout_assist_debug_images(
+                    source_pdf=input_pdf,
+                    before_ir=before_ai_ir,
+                    after_ir=ir,
+                    out_dir=artifacts_dir / "layout_assist",
+                    render_dpi=max(96, int(scanned_render_dpi)),
+                    assist_status=layout_assist_status,
+                    assist_error=layout_assist_error,
+                )
+                ir.setdefault("warnings", []).append(
+                    f"layout_assist_debug_pages={int(debug_result.get('pages_exported') or 0)}"
+                )
+                ir.setdefault("warnings", []).append(
+                    "layout_assist_debug_changed_pages="
+                    f"{int(debug_result.get('pages_changed') or 0)}"
+                )
+            except Exception as e:
+                logger.warning("Failed to export layout assist debug images: %s", e)
 
         set_processing_progress(
             JobStage.layout_assist,

@@ -78,6 +78,16 @@ def _build_ocr_effective_runtime_debug(
                 "_paddle_doc_backend",
                 None,
             ),
+            "last_predict": getattr(
+                primary_provider,
+                "_paddle_doc_last_predict_debug",
+                None,
+            ),
+            "recent_predicts": getattr(
+                primary_provider,
+                "_paddle_doc_recent_predict_debug",
+                None,
+            ),
         }
 
     try:

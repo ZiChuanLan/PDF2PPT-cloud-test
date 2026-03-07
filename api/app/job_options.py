@@ -18,6 +18,8 @@ VALID_OCR_AI_PROVIDERS = {
     "ppio",
     "novita",
 }
+VALID_OCR_AI_CHAIN_MODES = {"direct", "doc_parser", "layout_block"}
+VALID_OCR_AI_LAYOUT_MODELS = {"pp_doclayout_v3"}
 VALID_OCR_GEOMETRY_MODES = {"auto", "local_tesseract", "direct_ai"}
 VALID_TEXT_ERASE_MODES = {"smart", "fill"}
 VALID_SCANNED_PAGE_MODES = {"segmented", "fullpage"}
@@ -58,6 +60,24 @@ BAIDU_DOC_PARSE_TYPE_ALIASES = VALID_BAIDU_DOC_PARSE_TYPES | {
     "paddleocr_vl",
     "vl",
 }
+OCR_AI_CHAIN_MODE_ALIASES = VALID_OCR_AI_CHAIN_MODES | {
+    "prompt",
+    "prompt_ocr",
+    "model_direct",
+    "direct_ai",
+    "docparser",
+    "doc-parse",
+    "structured",
+    "layout",
+    "layout_block_ocr",
+    "local_layout",
+}
+OCR_AI_LAYOUT_MODEL_ALIASES = VALID_OCR_AI_LAYOUT_MODELS | {
+    "pp-doclayoutv3",
+    "pp_doclayoutv3",
+    "pp_doclayout",
+    "pp-doclayout-v3",
+}
 
 
 @dataclass(frozen=True)
@@ -67,6 +87,8 @@ class NormalizedJobOptions:
     baidu_doc_parse_type: str
     ocr_provider: str
     ocr_ai_provider: str
+    ocr_ai_chain_mode: str
+    ocr_ai_layout_model: str
     ocr_geometry_mode: str
     text_erase_mode: str
     scanned_page_mode: str
@@ -114,6 +136,24 @@ def normalize_ai_ocr_provider(value: str | None) -> str:
     if provider_id in {"openai_compatible", "openai-compatible"}:
         return "openai"
     return provider_id
+
+
+def normalize_ai_ocr_chain_mode(value: str | None) -> str:
+    mode = (clean_str(_unwrap_form_default(value)) or "direct").lower()
+    if mode in {"prompt", "prompt_ocr", "model_direct", "direct_ai"}:
+        return "direct"
+    if mode in {"docparser", "doc-parse", "structured"}:
+        return "doc_parser"
+    if mode in {"layout", "layout_block_ocr", "local_layout"}:
+        return "layout_block"
+    return mode if mode in VALID_OCR_AI_CHAIN_MODES else "direct"
+
+
+def normalize_ai_ocr_layout_model(value: str | None) -> str:
+    model = (clean_str(_unwrap_form_default(value)) or "pp_doclayout_v3").lower()
+    if model in {"pp-doclayoutv3", "pp_doclayoutv3", "pp_doclayout", "pp-doclayout-v3"}:
+        return "pp_doclayout_v3"
+    return model if model in VALID_OCR_AI_LAYOUT_MODELS else "pp_doclayout_v3"
 
 
 def normalize_ocr_geometry_mode(value: str | None) -> str:
@@ -179,6 +219,8 @@ def validate_and_normalize_job_options(
     ocr_ai_provider: str | None,
     ocr_ai_api_key: str | None,
     ocr_ai_model: str | None,
+    ocr_ai_chain_mode: str | None,
+    ocr_ai_layout_model: str | None,
     ocr_baidu_app_id: str | None = None,
     ocr_baidu_api_key: str | None = None,
     ocr_baidu_secret_key: str | None = None,
@@ -195,6 +237,8 @@ def validate_and_normalize_job_options(
     mineru_api_token = _unwrap_form_default(mineru_api_token)
     ocr_ai_api_key = _unwrap_form_default(ocr_ai_api_key)
     ocr_ai_model = _unwrap_form_default(ocr_ai_model)
+    ocr_ai_chain_mode = _unwrap_form_default(ocr_ai_chain_mode)
+    ocr_ai_layout_model = _unwrap_form_default(ocr_ai_layout_model)
     ocr_baidu_app_id = _unwrap_form_default(ocr_baidu_app_id)
     ocr_baidu_api_key = _unwrap_form_default(ocr_baidu_api_key)
     ocr_baidu_secret_key = _unwrap_form_default(ocr_baidu_secret_key)
@@ -253,6 +297,12 @@ def validate_and_normalize_job_options(
             details={"ocr_provider": ocr_provider},
             status_code=400,
         )
+    # Legacy compatibility: some older callers redundantly paired the new
+    # structured Baidu parser with `ocr_provider=baidu`. The canonical Baidu
+    # document chain no longer consumes OCR-provider routing, so normalize the
+    # redundant alias away before later validation.
+    if normalized_parse_provider == "baidu_doc" and normalized_ocr_provider == "baidu":
+        normalized_ocr_provider = "auto"
 
     normalized_ocr_ai_provider = normalize_ai_ocr_provider(ocr_ai_provider)
     if normalized_ocr_ai_provider not in VALID_OCR_AI_PROVIDERS:
@@ -260,6 +310,29 @@ def validate_and_normalize_job_options(
             code=ErrorCode.VALIDATION_ERROR,
             message="Unsupported OCR AI provider",
             details={"ocr_ai_provider": ocr_ai_provider},
+            status_code=400,
+        )
+
+    normalized_ocr_ai_chain_mode = normalize_ai_ocr_chain_mode(ocr_ai_chain_mode)
+    raw_ocr_ai_chain_mode = (clean_str(ocr_ai_chain_mode) or "").lower()
+    if raw_ocr_ai_chain_mode and raw_ocr_ai_chain_mode not in OCR_AI_CHAIN_MODE_ALIASES:
+        raise AppException(
+            code=ErrorCode.VALIDATION_ERROR,
+            message="Unsupported OCR AI chain mode",
+            details={"ocr_ai_chain_mode": ocr_ai_chain_mode},
+            status_code=400,
+        )
+
+    normalized_ocr_ai_layout_model = normalize_ai_ocr_layout_model(ocr_ai_layout_model)
+    raw_ocr_ai_layout_model = (clean_str(ocr_ai_layout_model) or "").lower()
+    if (
+        raw_ocr_ai_layout_model
+        and raw_ocr_ai_layout_model not in OCR_AI_LAYOUT_MODEL_ALIASES
+    ):
+        raise AppException(
+            code=ErrorCode.VALIDATION_ERROR,
+            message="Unsupported OCR AI layout model",
+            details={"ocr_ai_layout_model": ocr_ai_layout_model},
             status_code=400,
         )
 
@@ -302,11 +375,25 @@ def validate_and_normalize_job_options(
             status_code=400,
         )
 
-    if normalized_parse_provider == "mineru" and normalized_ocr_provider in {"aiocr", "paddle"}:
+    if normalized_parse_provider == "mineru" and normalized_ocr_provider != "auto":
         raise AppException(
             code=ErrorCode.VALIDATION_ERROR,
-            message="MinerU hybrid OCR does not support aiocr/paddle providers directly",
-            details={"ocr_provider": normalized_ocr_provider},
+            message="MinerU parse does not use OCR provider selection",
+            details={
+                "parse_provider": normalized_parse_provider,
+                "ocr_provider": normalized_ocr_provider,
+            },
+            status_code=400,
+        )
+
+    if normalized_parse_provider == "baidu_doc" and normalized_ocr_provider != "auto":
+        raise AppException(
+            code=ErrorCode.VALIDATION_ERROR,
+            message="Baidu document parser does not use OCR provider selection",
+            details={
+                "parse_provider": normalized_parse_provider,
+                "ocr_provider": normalized_ocr_provider,
+            },
             status_code=400,
         )
 
@@ -316,6 +403,22 @@ def validate_and_normalize_job_options(
                 code=ErrorCode.VALIDATION_ERROR,
                 message="ocr_ai_api_key is required for explicit AI OCR providers",
                 details={"ocr_provider": normalized_ocr_provider},
+                status_code=400,
+            )
+
+        if (
+            normalized_ocr_provider == "aiocr"
+            and normalized_ocr_ai_chain_mode == "doc_parser"
+            and "paddleocr-vl" not in str(ocr_ai_model or "").strip().lower()
+        ):
+            raise AppException(
+                code=ErrorCode.VALIDATION_ERROR,
+                message="doc_parser chain requires a PaddleOCR-VL model",
+                details={
+                    "ocr_provider": normalized_ocr_provider,
+                    "ocr_ai_chain_mode": normalized_ocr_ai_chain_mode,
+                    "ocr_ai_model": ocr_ai_model,
+                },
                 status_code=400,
             )
         if not (ocr_ai_model or "").strip():
@@ -358,6 +461,8 @@ def validate_and_normalize_job_options(
         baidu_doc_parse_type=normalized_baidu_doc_parse_type,
         ocr_provider=normalized_ocr_provider,
         ocr_ai_provider=normalized_ocr_ai_provider,
+        ocr_ai_chain_mode=normalized_ocr_ai_chain_mode,
+        ocr_ai_layout_model=normalized_ocr_ai_layout_model,
         ocr_geometry_mode=normalized_geometry_mode,
         text_erase_mode=normalize_text_erase_mode(text_erase_mode),
         scanned_page_mode=normalize_scanned_page_mode(scanned_page_mode),

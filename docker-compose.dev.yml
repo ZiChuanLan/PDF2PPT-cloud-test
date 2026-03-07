@@ -1,0 +1,113 @@
+services:
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+      - /app/.next
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
+      - NEXT_PUBLIC_API_PORT=${NEXT_PUBLIC_API_PORT:-8000}
+    depends_on:
+      - api
+    networks:
+      - app-network
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    command: ["sh", "/app/scripts/with_prewarm.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api:/app
+      - paddlex-cache:/root/.paddlex
+      - paddle-cache:/root/.cache/paddle
+    environment:
+      - MAX_FILE_MB=${MAX_FILE_MB:-100}
+      - MAX_PAGES=${MAX_PAGES:-200}
+      - JOB_TTL_MINUTES=${JOB_TTL_MINUTES:-60}
+      - JOB_KEEPALIVE_INTERVAL_S=${JOB_KEEPALIVE_INTERVAL_S:-15}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-*}
+      - CORS_ALLOW_ORIGIN_REGEX=${CORS_ALLOW_ORIGIN_REGEX:-}
+      - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY:-}
+      - SILICONFLOW_BASE_URL=${SILICONFLOW_BASE_URL:-https://api.siliconflow.cn/v1}
+      - SILICONFLOW_MODEL=${SILICONFLOW_MODEL:-Pro/deepseek-ai/deepseek-ocr}
+      - OCR_PADDLE_LAYOUT_PREWARM=${OCR_PADDLE_LAYOUT_PREWARM:-1}
+      - OCR_PADDLE_LAYOUT_PREWARM_TARGET=${OCR_PADDLE_LAYOUT_PREWARM_TARGET:-worker}
+      - OCR_PADDLE_VL_PREWARM=${OCR_PADDLE_VL_PREWARM:-0}
+      - OCR_PADDLE_VL_PREWARM_TARGET=${OCR_PADDLE_VL_PREWARM_TARGET:-worker}
+      - OCR_PADDLE_VL_DOCPARSER_USE_QUEUES=${OCR_PADDLE_VL_DOCPARSER_USE_QUEUES:-}
+      - OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX=${OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX:-}
+      - APP_SERVICE_ROLE=api
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 240s
+    networks:
+      - app-network
+
+  worker:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    command: ["sh", "/app/scripts/with_prewarm.sh", "sh", "-c", "workers=$${WORKER_CONCURRENCY:-1}; i=1; while [ $$i -le $$workers ]; do python -m app.worker & i=$$((i+1)); done; wait"]
+    volumes:
+      - ./api:/app
+      - paddlex-cache:/root/.paddlex
+      - paddle-cache:/root/.cache/paddle
+    environment:
+      - MAX_FILE_MB=${MAX_FILE_MB:-100}
+      - MAX_PAGES=${MAX_PAGES:-200}
+      - JOB_TTL_MINUTES=${JOB_TTL_MINUTES:-60}
+      - JOB_KEEPALIVE_INTERVAL_S=${JOB_KEEPALIVE_INTERVAL_S:-15}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY:-}
+      - SILICONFLOW_BASE_URL=${SILICONFLOW_BASE_URL:-https://api.siliconflow.cn/v1}
+      - SILICONFLOW_MODEL=${SILICONFLOW_MODEL:-Pro/deepseek-ai/deepseek-ocr}
+      - OCR_PADDLE_LAYOUT_PREWARM=${OCR_PADDLE_LAYOUT_PREWARM:-1}
+      - OCR_PADDLE_LAYOUT_PREWARM_TARGET=${OCR_PADDLE_LAYOUT_PREWARM_TARGET:-worker}
+      - OCR_PADDLE_VL_PREWARM=${OCR_PADDLE_VL_PREWARM:-0}
+      - OCR_PADDLE_VL_PREWARM_TARGET=${OCR_PADDLE_VL_PREWARM_TARGET:-worker}
+      - OCR_PADDLE_VL_DOCPARSER_USE_QUEUES=${OCR_PADDLE_VL_DOCPARSER_USE_QUEUES:-}
+      - OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX=${OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX:-}
+      - APP_SERVICE_ROLE=worker
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis; r=redis.from_url('redis://redis:6379/0'); r.ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 240s
+    networks:
+      - app-network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --save "" --appendonly no
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  paddlex-cache:
+  paddle-cache:

@@ -1,0 +1,39 @@
+FROM node:20-alpine AS build
+
+WORKDIR /app
+
+ENV NEXT_TELEMETRY_DISABLED=1
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+ARG NEXT_PUBLIC_API_URL=
+ARG INTERNAL_API_ORIGIN=http://api:8000
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV INTERNAL_API_ORIGIN=${INTERNAL_API_ORIGIN}
+
+RUN npm run build
+
+FROM node:20-alpine AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+ENV NEXT_TELEMETRY_DISABLED=1
+
+ARG NEXT_PUBLIC_API_URL=
+ARG INTERNAL_API_ORIGIN=http://api:8000
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV INTERNAL_API_ORIGIN=${INTERNAL_API_ORIGIN}
+
+COPY --from=build /app/.next/standalone /app
+COPY --from=build /app/.next/static /app/.next/static
+COPY --from=build /app/public /app/public
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]

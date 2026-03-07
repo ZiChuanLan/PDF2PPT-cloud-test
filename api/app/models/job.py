@@ -151,6 +151,14 @@ class AiOcrCheckRequest(BaseModel):
         None, description="Optional OpenAI-compatible base URL"
     )
     model: str = Field(..., description="Target AI OCR model identifier")
+    ocr_ai_chain_mode: Optional[str] = Field(
+        "direct",
+        description="AI OCR chain mode (direct, doc_parser, layout_block)",
+    )
+    ocr_ai_layout_model: Optional[str] = Field(
+        "pp_doclayout_v3",
+        description="Local layout model for layout_block chain",
+    )
     ocr_paddle_vl_docparser_max_side_px: Optional[int] = Field(
         None,
         ge=0,
@@ -159,6 +167,30 @@ class AiOcrCheckRequest(BaseModel):
             "Optional max long-edge in pixels for PaddleOCR-VL doc_parser input images; "
             "0 disables downscale"
         ),
+    )
+    ocr_ai_block_concurrency: Optional[int] = Field(
+        None,
+        ge=1,
+        le=8,
+        description="Optional per-page block concurrency for layout_block OCR",
+    )
+    ocr_ai_requests_per_minute: Optional[int] = Field(
+        None,
+        ge=1,
+        le=2000,
+        description="Optional shared requests-per-minute cap for AI OCR requests",
+    )
+    ocr_ai_tokens_per_minute: Optional[int] = Field(
+        None,
+        ge=1,
+        le=2_000_000,
+        description="Optional shared tokens-per-minute cap for AI OCR requests",
+    )
+    ocr_ai_max_retries: Optional[int] = Field(
+        None,
+        ge=0,
+        le=8,
+        description="Optional retry count for retryable AI OCR chat/completions failures",
     )
 
 
@@ -176,6 +208,7 @@ class AiOcrCheckResult(BaseModel):
     provider: str
     model: str
     base_url: Optional[str] = None
+    route_kind: Optional[str] = None
     elapsed_ms: int
     items_count: int
     valid_bbox_items: int

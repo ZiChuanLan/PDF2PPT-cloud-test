@@ -1,5 +1,6 @@
 """Local OCR providers, manager orchestration, and conversion helpers."""
 
+from dataclasses import dataclass
 import logging
 import math
 import os
@@ -18,7 +19,16 @@ from .base import (
     _DEFAULT_PADDLE_OCR_VL_MODEL,
     _clean_str,
     _normalize_paddle_language,
+    _normalize_tesseract_language,
+    _split_tesseract_languages,
     OcrProvider,
+)
+from .routing import (
+    ROUTE_KIND_HYBRID_AUTO,
+    ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR,
+    ROUTE_KIND_REMOTE_DOC_PARSER,
+    ROUTE_KIND_REMOTE_PROMPT_OCR,
+    normalize_ocr_route_kind,
 )
 from .runtime_probe import (
     probe_local_paddle_models,
@@ -31,6 +41,131 @@ from .vendors import _normalize_ai_ocr_provider
 from .deepseek_parser import _looks_like_ocr_prompt_echo_text
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RemoteOcrClientSpec:
+    requested_provider: str
+    route_kind: str
+    ai_provider: str | None
+    ai_model: str | None
+
+
+def resolve_remote_ocr_client_spec(
+    *,
+    provider_id: str,
+    ai_provider: str | None,
+    ai_base_url: str | None,
+    ai_model: str | None,
+    route_kind: str | None,
+) -> RemoteOcrClientSpec:
+    normalized_route_kind = normalize_ocr_route_kind(route_kind)
+    resolved_model = _clean_str(ai_model) or None
+
+    if provider_id == "paddle":
+        resolved_model = resolved_model or _DEFAULT_PADDLE_OCR_VL_MODEL
+        if not _is_paddleocr_vl_model(resolved_model):
+            raise ValueError(
+                "Paddle OCR provider requires a PaddleOCR-VL model (for example PaddlePaddle/PaddleOCR-VL or PaddlePaddle/PaddleOCR-VL-1.5)"
+            )
+        normalized_route_kind = ROUTE_KIND_REMOTE_DOC_PARSER
+    elif provider_id == "aiocr":
+        if normalized_route_kind not in {
+            ROUTE_KIND_REMOTE_PROMPT_OCR,
+            ROUTE_KIND_REMOTE_DOC_PARSER,
+            ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR,
+        }:
+            normalized_route_kind = (
+                ROUTE_KIND_REMOTE_DOC_PARSER
+                if _is_paddleocr_vl_model(resolved_model)
+                else ROUTE_KIND_REMOTE_PROMPT_OCR
+            )
+    else:
+        raise ValueError(f"Unsupported remote OCR provider: {provider_id}")
+
+    resolved_ai_provider = ai_provider
+    if _is_paddleocr_vl_model(resolved_model):
+        normalized_vendor = _normalize_ai_ocr_provider(ai_provider)
+        if normalized_vendor == "auto" and not _clean_str(ai_base_url):
+            resolved_ai_provider = "siliconflow"
+
+    return RemoteOcrClientSpec(
+        requested_provider=provider_id,
+        route_kind=normalized_route_kind,
+        ai_provider=resolved_ai_provider,
+        ai_model=resolved_model,
+    )
+
+
+def create_remote_ocr_client(
+    *,
+    requested_provider: str,
+    route_kind: str | None = None,
+    ai_provider: str | None = None,
+    ai_api_key: str,
+    ai_base_url: str | None = None,
+    ai_model: str | None = None,
+    ai_layout_model: str | None = None,
+    paddle_doc_max_side_px: int | None = None,
+    layout_block_max_concurrency: int | None = None,
+    request_rpm_limit: int | None = None,
+    request_tpm_limit: int | None = None,
+    request_max_retries: int | None = None,
+    allow_paddle_model_downgrade: bool = False,
+) -> AiOcrClient:
+    spec = resolve_remote_ocr_client_spec(
+        provider_id=requested_provider,
+        ai_provider=ai_provider,
+        ai_base_url=ai_base_url,
+        ai_model=ai_model,
+        route_kind=route_kind,
+    )
+    return _build_remote_ocr_client_from_spec(
+        spec=spec,
+        ai_api_key=ai_api_key,
+        ai_base_url=ai_base_url,
+        ai_layout_model=ai_layout_model,
+        paddle_doc_max_side_px=paddle_doc_max_side_px,
+        layout_block_max_concurrency=layout_block_max_concurrency,
+        request_rpm_limit=request_rpm_limit,
+        request_tpm_limit=request_tpm_limit,
+        request_max_retries=request_max_retries,
+        allow_paddle_model_downgrade=allow_paddle_model_downgrade,
+    )
+
+
+def _build_remote_ocr_client_from_spec(
+    *,
+    spec: RemoteOcrClientSpec,
+    ai_api_key: str,
+    ai_base_url: str | None,
+    ai_layout_model: str | None,
+    paddle_doc_max_side_px: int | None,
+    layout_block_max_concurrency: int | None,
+    request_rpm_limit: int | None,
+    request_tpm_limit: int | None,
+    request_max_retries: int | None,
+    allow_paddle_model_downgrade: bool,
+) -> AiOcrClient:
+    client = AiOcrClient(
+        api_key=ai_api_key,
+        base_url=ai_base_url,
+        model=spec.ai_model,
+        provider=spec.ai_provider,
+        layout_model=ai_layout_model,
+        paddle_doc_max_side_px=paddle_doc_max_side_px,
+        layout_block_max_concurrency=layout_block_max_concurrency,
+        request_rpm_limit=request_rpm_limit,
+        request_tpm_limit=request_tpm_limit,
+        request_max_retries=request_max_retries,
+        route_kind=spec.route_kind,
+    )
+    client.allow_model_downgrade = bool(allow_paddle_model_downgrade)
+    return client
+
+
+_resolve_remote_ocr_client_spec = resolve_remote_ocr_client_spec
+_build_remote_ocr_client = create_remote_ocr_client
 
 
 class BaiduOcrClient(OcrProvider):
@@ -945,11 +1080,17 @@ class OcrManager:
         self,
         provider: str | None = None,
         *,
+        route_kind: str | None = None,
         ai_provider: str | None = None,
         ai_api_key: str | None = None,
         ai_base_url: str | None = None,
         ai_model: str | None = None,
+        ai_layout_model: str | None = None,
         paddle_doc_max_side_px: int | None = None,
+        layout_block_max_concurrency: int | None = None,
+        request_rpm_limit: int | None = None,
+        request_tpm_limit: int | None = None,
+        request_max_retries: int | None = None,
         baidu_app_id: str | None = None,
         baidu_api_key: str | None = None,
         baidu_secret_key: str | None = None,
@@ -968,6 +1109,7 @@ class OcrManager:
         self.last_quality_notes: list[str] = []
         self.last_image_regions: list[list[float]] = []
         self.provider_id: str = "auto"
+        self.route_kind: str = ROUTE_KIND_HYBRID_AUTO
         self.strict_no_fallback: bool = bool(strict_no_fallback)
         self.allow_paddle_model_downgrade: bool = bool(allow_paddle_model_downgrade)
         self.ai_provider_disabled: bool = False
@@ -996,6 +1138,10 @@ class OcrManager:
         }:
             raise ValueError(f"Unsupported OCR provider: {provider_id}")
         self.provider_id = provider_id
+        self.route_kind = normalize_ocr_route_kind(
+            route_kind,
+            default=(ROUTE_KIND_HYBRID_AUTO if provider_id == "auto" else "unknown"),
+        )
 
         tesseract_min_conf = (
             float(tesseract_min_confidence)
@@ -1067,28 +1213,39 @@ class OcrManager:
         if provider_id == "aiocr":
             if not ai_api_key:
                 raise ValueError("AI OCR requires api_key")
-            ai_provider_id = ai_provider
-            if _is_paddleocr_vl_model(ai_model):
-                normalized = _normalize_ai_ocr_provider(ai_provider)
-                if normalized == "auto" and not _clean_str(ai_base_url):
-                    ai_provider_id = "siliconflow"
-            self.ai_provider = AiOcrClient(
-                api_key=ai_api_key,
-                base_url=ai_base_url,
-                model=ai_model,
-                provider=ai_provider_id,
-                paddle_doc_max_side_px=paddle_doc_max_side_px,
+            remote_spec = resolve_remote_ocr_client_spec(
+                provider_id=provider_id,
+                ai_provider=ai_provider,
+                ai_base_url=ai_base_url,
+                ai_model=ai_model,
+                route_kind=route_kind,
             )
-            self.ai_provider.allow_model_downgrade = self.allow_paddle_model_downgrade
+            self.route_kind = remote_spec.route_kind
+            self.ai_provider = create_remote_ocr_client(
+                requested_provider=provider_id,
+                route_kind=route_kind,
+                ai_provider=ai_provider,
+                ai_api_key=ai_api_key,
+                ai_base_url=ai_base_url,
+                ai_model=ai_model,
+                ai_layout_model=ai_layout_model,
+                paddle_doc_max_side_px=paddle_doc_max_side_px,
+                layout_block_max_concurrency=layout_block_max_concurrency,
+                request_rpm_limit=request_rpm_limit,
+                request_tpm_limit=request_tpm_limit,
+                request_max_retries=request_max_retries,
+                allow_paddle_model_downgrade=self.allow_paddle_model_downgrade,
+            )
             self.providers.append(self.ai_provider)
             logger.info(
-                "Using AI OCR as primary provider (vendor=%s, model=%s, base_url=%s)",
+                "Using AI OCR as primary provider (route=%s, vendor=%s, model=%s, base_url=%s)",
+                self.ai_provider.route_kind,
                 self.ai_provider.provider_id,
                 self.ai_provider.model,
                 self.ai_provider.base_url or "<default>",
             )
-            _maybe_add_tesseract_fallback(reason="aiocr")
-            _maybe_add_paddle_local_fallback(reason="aiocr")
+            _maybe_add_tesseract_fallback(reason=remote_spec.route_kind)
+            _maybe_add_paddle_local_fallback(reason=remote_spec.route_kind)
         if provider_id in {"baidu"}:
             self.baidu_provider = BaiduOcrClient(
                 app_id=baidu_app_id,
@@ -1115,36 +1272,39 @@ class OcrManager:
         if provider_id == "paddle":
             if not ai_api_key:
                 raise ValueError("Paddle OCR requires api_key")
-
-            paddle_model = _clean_str(ai_model) or _DEFAULT_PADDLE_OCR_VL_MODEL
-            if not _is_paddleocr_vl_model(paddle_model):
-                raise ValueError(
-                    "Paddle OCR provider requires a PaddleOCR-VL model (for example PaddlePaddle/PaddleOCR-VL or PaddlePaddle/PaddleOCR-VL-1.5)"
-                )
-
-            paddle_provider_id = _normalize_ai_ocr_provider(ai_provider)
-            if paddle_provider_id == "auto" and not _clean_str(ai_base_url):
-                paddle_provider_id = "siliconflow"
-
-            self.paddle_provider = AiOcrClient(
-                api_key=ai_api_key,
-                base_url=ai_base_url,
-                model=paddle_model,
-                provider=paddle_provider_id,
-                paddle_doc_max_side_px=paddle_doc_max_side_px,
+            remote_spec = resolve_remote_ocr_client_spec(
+                provider_id=provider_id,
+                ai_provider=ai_provider,
+                ai_base_url=ai_base_url,
+                ai_model=ai_model,
+                route_kind=route_kind,
             )
-            self.paddle_provider.allow_model_downgrade = (
-                self.allow_paddle_model_downgrade
+            self.route_kind = remote_spec.route_kind
+            self.paddle_provider = create_remote_ocr_client(
+                requested_provider=provider_id,
+                route_kind=route_kind,
+                ai_provider=ai_provider,
+                ai_api_key=ai_api_key,
+                ai_base_url=ai_base_url,
+                ai_model=ai_model,
+                ai_layout_model=ai_layout_model,
+                paddle_doc_max_side_px=paddle_doc_max_side_px,
+                layout_block_max_concurrency=layout_block_max_concurrency,
+                request_rpm_limit=request_rpm_limit,
+                request_tpm_limit=request_tpm_limit,
+                request_max_retries=request_max_retries,
+                allow_paddle_model_downgrade=self.allow_paddle_model_downgrade,
             )
             self.providers.append(self.paddle_provider)
             logger.info(
-                "Using PaddleOCR-VL as primary provider (vendor=%s, model=%s, base_url=%s)",
+                "Using PaddleOCR-VL as primary provider (route=%s, vendor=%s, model=%s, base_url=%s)",
+                self.paddle_provider.route_kind,
                 self.paddle_provider.provider_id,
                 self.paddle_provider.model,
                 self.paddle_provider.base_url or "<default>",
             )
-            _maybe_add_tesseract_fallback(reason="paddle_vl")
-            _maybe_add_paddle_local_fallback(reason="paddle_vl")
+            _maybe_add_tesseract_fallback(reason=remote_spec.route_kind)
+            _maybe_add_paddle_local_fallback(reason=remote_spec.route_kind)
 
         if provider_id == "auto":
             if self.strict_no_fallback:
@@ -1154,19 +1314,33 @@ class OcrManager:
                         "set ocr_provider=paddle/aiocr (recommended) or disable strict mode explicitly."
                     )
 
-                self.ai_provider = AiOcrClient(
-                    api_key=ai_api_key,
-                    base_url=ai_base_url,
-                    model=ai_model,
-                    provider=ai_provider,
-                    paddle_doc_max_side_px=paddle_doc_max_side_px,
+                remote_spec = resolve_remote_ocr_client_spec(
+                    provider_id="aiocr",
+                    ai_provider=ai_provider,
+                    ai_base_url=ai_base_url,
+                    ai_model=ai_model,
+                    route_kind=route_kind,
                 )
-                self.ai_provider.allow_model_downgrade = (
-                    self.allow_paddle_model_downgrade
+                self.route_kind = remote_spec.route_kind
+                self.ai_provider = create_remote_ocr_client(
+                    requested_provider="aiocr",
+                    route_kind=route_kind,
+                    ai_provider=ai_provider,
+                    ai_api_key=ai_api_key,
+                    ai_base_url=ai_base_url,
+                    ai_model=ai_model,
+                    ai_layout_model=ai_layout_model,
+                    paddle_doc_max_side_px=paddle_doc_max_side_px,
+                    layout_block_max_concurrency=layout_block_max_concurrency,
+                    request_rpm_limit=request_rpm_limit,
+                    request_tpm_limit=request_tpm_limit,
+                    request_max_retries=request_max_retries,
+                    allow_paddle_model_downgrade=self.allow_paddle_model_downgrade,
                 )
                 self.providers.append(self.ai_provider)
                 logger.info(
-                    "Using AI OCR as primary provider in strict auto mode (vendor=%s, model=%s)",
+                    "Using AI OCR as primary provider in strict auto mode (route=%s, vendor=%s, model=%s)",
+                    self.ai_provider.route_kind,
                     self.ai_provider.provider_id,
                     self.ai_provider.model,
                 )
@@ -1206,19 +1380,28 @@ class OcrManager:
 
                 try:
                     if ai_api_key:
-                        self.ai_provider = AiOcrClient(
-                            api_key=ai_api_key,
-                            base_url=ai_base_url,
-                            model=ai_model,
-                            provider=ai_provider,
-                            paddle_doc_max_side_px=paddle_doc_max_side_px,
+                        remote_spec = resolve_remote_ocr_client_spec(
+                            provider_id="aiocr",
+                            ai_provider=ai_provider,
+                            ai_base_url=ai_base_url,
+                            ai_model=ai_model,
+                            route_kind=route_kind,
                         )
-                        self.ai_provider.allow_model_downgrade = (
-                            self.allow_paddle_model_downgrade
+                        self.ai_provider = create_remote_ocr_client(
+                            requested_provider="aiocr",
+                            route_kind=route_kind,
+                            ai_provider=ai_provider,
+                            ai_api_key=ai_api_key,
+                            ai_base_url=ai_base_url,
+                            ai_model=ai_model,
+                            ai_layout_model=ai_layout_model,
+                            paddle_doc_max_side_px=paddle_doc_max_side_px,
+                            allow_paddle_model_downgrade=self.allow_paddle_model_downgrade,
                         )
                         self.providers.append(self.ai_provider)
                         logger.info(
-                            "Using AI OCR as supplementary provider in auto mode"
+                            "Using AI OCR as supplementary provider in auto mode (route=%s)",
+                            self.ai_provider.route_kind,
                         )
                 except Exception as e:
                     logger.warning("AI OCR not available: %s", e)
@@ -1703,11 +1886,17 @@ class OcrManager:
 def create_ocr_manager(
     provider: str | None = None,
     *,
+    route_kind: str | None = None,
     ai_provider: str | None = None,
     ai_api_key: str | None = None,
     ai_base_url: str | None = None,
     ai_model: str | None = None,
+    ai_layout_model: str | None = None,
     paddle_doc_max_side_px: int | None = None,
+    layout_block_max_concurrency: int | None = None,
+    request_rpm_limit: int | None = None,
+    request_tpm_limit: int | None = None,
+    request_max_retries: int | None = None,
     baidu_app_id: str | None = None,
     baidu_api_key: str | None = None,
     baidu_secret_key: str | None = None,
@@ -1724,11 +1913,17 @@ def create_ocr_manager(
     """
     return OcrManager(
         provider=provider,
+        route_kind=route_kind,
         ai_provider=ai_provider,
         ai_api_key=ai_api_key,
         ai_base_url=ai_base_url,
         ai_model=ai_model,
+        ai_layout_model=ai_layout_model,
         paddle_doc_max_side_px=paddle_doc_max_side_px,
+        layout_block_max_concurrency=layout_block_max_concurrency,
+        request_rpm_limit=request_rpm_limit,
+        request_tpm_limit=request_tpm_limit,
+        request_max_retries=request_max_retries,
         baidu_app_id=baidu_app_id,
         baidu_api_key=baidu_api_key,
         baidu_secret_key=baidu_secret_key,

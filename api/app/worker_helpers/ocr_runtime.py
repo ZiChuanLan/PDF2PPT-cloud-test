@@ -4,11 +4,18 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..job_options import (
+    normalize_ai_ocr_chain_mode,
+    normalize_ai_ocr_layout_model,
     normalize_ai_ocr_provider,
     normalize_ocr_geometry_mode,
     normalize_requested_ocr_provider,
 )
 from ..convert.ocr import AiOcrTextRefiner, create_ocr_manager
+from ..convert.ocr.routing import (
+    OcrRoutePlan,
+    build_ocr_route_plan,
+    should_allow_main_ai_reuse,
+)
 from ..logging_config import get_logger
 from ..models.error import AppException, ErrorCode
 from ..utils.text import clean_str
@@ -28,7 +35,14 @@ class OcrRuntimeSetup:
     effective_ocr_ai_api_key: str | None
     effective_ocr_ai_base_url: str | None
     effective_ocr_ai_model: str | None
+    effective_ocr_ai_chain_mode: str
+    effective_ocr_ai_layout_model: str
     effective_paddle_doc_max_side_px: int | None
+    effective_ocr_ai_page_concurrency: int
+    effective_ocr_ai_block_concurrency: int | None
+    effective_ocr_ai_requests_per_minute: int | None
+    effective_ocr_ai_tokens_per_minute: int | None
+    effective_ocr_ai_max_retries: int
     effective_tesseract_language: str
     effective_tesseract_min_conf: float | None
     strict_ocr_mode: bool
@@ -44,8 +58,27 @@ class OcrRuntimeSetup:
     ocr_geometry_strategy: str | None = None
     ocr_geometry_mode_requested: str | None = None
     ocr_geometry_mode_effective: str | None = None
+    route_plan: OcrRoutePlan | None = None
     setup_warning: str | None = None
     setup_notes: tuple[str, ...] = ()
+
+
+def _should_allow_main_ai_reuse(requested_ocr_provider: str) -> bool:
+    return should_allow_main_ai_reuse(requested_ocr_provider)
+
+
+def _build_ocr_route_plan(
+    *,
+    requested_ocr_provider: str,
+    effective_ai_model: str | None,
+    ai_chain_mode: str | None = None,
+) -> OcrRoutePlan:
+    return build_ocr_route_plan(
+        requested_ocr_provider=requested_ocr_provider,
+        effective_ai_model=effective_ai_model,
+        ai_chain_mode=ai_chain_mode,
+    )
+
 
 def setup_ocr_runtime(
     *,
@@ -63,13 +96,20 @@ def setup_ocr_runtime(
     ocr_ai_provider: str | None,
     ocr_ai_base_url: str | None,
     ocr_ai_model: str | None,
+    ocr_ai_chain_mode: str | None = None,
+    ocr_ai_layout_model: str | None = None,
     ocr_paddle_vl_docparser_max_side_px: int | None = None,
+    ocr_ai_page_concurrency: int | None = None,
+    ocr_ai_block_concurrency: int | None = None,
+    ocr_ai_requests_per_minute: int | None = None,
+    ocr_ai_tokens_per_minute: int | None = None,
+    ocr_ai_max_retries: int | None = None,
     ocr_geometry_mode: str | None = None,
     ocr_ai_linebreak_assist: bool | None = None,
     ocr_strict_mode: bool | None = True,
 ) -> OcrRuntimeSetup:
     requested_ocr_provider = normalize_requested_ocr_provider(ocr_provider)
-    allow_main_ai_reuse = requested_ocr_provider not in {"aiocr", "paddle", "baidu"}
+    allow_main_ai_reuse = _should_allow_main_ai_reuse(requested_ocr_provider)
 
     # If the user didn't configure separate AI OCR credentials, reuse
     # the layout-assist OpenAI-compatible settings (when available).
@@ -77,6 +117,10 @@ def setup_ocr_runtime(
     effective_ocr_ai_provider = normalize_ai_ocr_provider(ocr_ai_provider)
     effective_ocr_ai_base_url = clean_str(ocr_ai_base_url)
     effective_ocr_ai_model = clean_str(ocr_ai_model)
+    effective_ocr_ai_chain_mode = normalize_ai_ocr_chain_mode(ocr_ai_chain_mode)
+    effective_ocr_ai_layout_model = normalize_ai_ocr_layout_model(
+        ocr_ai_layout_model
+    )
     ocr_ai_api_key_source = "ocr" if effective_ocr_ai_api_key else "none"
     ocr_ai_base_url_source = "ocr" if effective_ocr_ai_base_url else "none"
     ocr_ai_model_source = "ocr" if effective_ocr_ai_model else "none"
@@ -135,6 +179,71 @@ def setup_ocr_runtime(
                 "ocr_paddle_vl_docparser_max_side_px="
                 f"{effective_paddle_doc_max_side_px}"
             )
+    effective_ocr_ai_page_concurrency = 1
+    if ocr_ai_page_concurrency is not None:
+        try:
+            effective_ocr_ai_page_concurrency = int(ocr_ai_page_concurrency)
+        except Exception:
+            effective_ocr_ai_page_concurrency = 1
+    effective_ocr_ai_page_concurrency = max(
+        1, min(8, int(effective_ocr_ai_page_concurrency))
+    )
+    effective_ocr_ai_block_concurrency: int | None = None
+    if ocr_ai_block_concurrency is not None:
+        try:
+            effective_ocr_ai_block_concurrency = int(ocr_ai_block_concurrency)
+        except Exception:
+            effective_ocr_ai_block_concurrency = None
+        if effective_ocr_ai_block_concurrency is not None:
+            effective_ocr_ai_block_concurrency = max(
+                1, min(8, int(effective_ocr_ai_block_concurrency))
+            )
+    effective_ocr_ai_requests_per_minute: int | None = None
+    if ocr_ai_requests_per_minute is not None:
+        try:
+            effective_ocr_ai_requests_per_minute = int(ocr_ai_requests_per_minute)
+        except Exception:
+            effective_ocr_ai_requests_per_minute = None
+        if effective_ocr_ai_requests_per_minute is not None:
+            effective_ocr_ai_requests_per_minute = max(
+                1, min(2000, int(effective_ocr_ai_requests_per_minute))
+            )
+    effective_ocr_ai_tokens_per_minute: int | None = None
+    if ocr_ai_tokens_per_minute is not None:
+        try:
+            effective_ocr_ai_tokens_per_minute = int(ocr_ai_tokens_per_minute)
+        except Exception:
+            effective_ocr_ai_tokens_per_minute = None
+        if effective_ocr_ai_tokens_per_minute is not None:
+            effective_ocr_ai_tokens_per_minute = max(
+                1, min(2_000_000, int(effective_ocr_ai_tokens_per_minute))
+            )
+    effective_ocr_ai_max_retries = 0
+    if ocr_ai_max_retries is not None:
+        try:
+            effective_ocr_ai_max_retries = int(ocr_ai_max_retries)
+        except Exception:
+            effective_ocr_ai_max_retries = 0
+    effective_ocr_ai_max_retries = max(
+        0, min(8, int(effective_ocr_ai_max_retries))
+    )
+    setup_notes.append(f"ocr_ai_page_concurrency={effective_ocr_ai_page_concurrency}")
+    if effective_ocr_ai_block_concurrency is not None:
+        setup_notes.append(
+            f"ocr_ai_block_concurrency={effective_ocr_ai_block_concurrency}"
+        )
+    if effective_ocr_ai_requests_per_minute is not None:
+        setup_notes.append(
+            "ocr_ai_requests_per_minute="
+            f"{effective_ocr_ai_requests_per_minute}"
+        )
+    if effective_ocr_ai_tokens_per_minute is not None:
+        setup_notes.append(
+            "ocr_ai_tokens_per_minute="
+            f"{effective_ocr_ai_tokens_per_minute}"
+        )
+    if effective_ocr_ai_max_retries > 0:
+        setup_notes.append(f"ocr_ai_max_retries={effective_ocr_ai_max_retries}")
 
     text_refiner: AiOcrTextRefiner | None = None
     linebreak_refiner: AiOcrTextRefiner | None = None
@@ -146,6 +255,11 @@ def setup_ocr_runtime(
     runtime_ocr_provider = effective_ocr_provider
     geometry_strategy = "direct"
     geometry_mode_effective = "n/a"
+    route_plan = _build_ocr_route_plan(
+        requested_ocr_provider=requested_ocr_provider,
+        effective_ai_model=effective_ocr_ai_model,
+        ai_chain_mode=effective_ocr_ai_chain_mode,
+    )
 
     if requested_ocr_provider == "aiocr":
         if not effective_ocr_ai_api_key:
@@ -188,11 +302,17 @@ def setup_ocr_runtime(
     try:
         ocr_manager = create_ocr_manager(
             provider=runtime_ocr_provider,
+            route_kind=route_plan.route_kind,
             ai_provider=effective_ocr_ai_provider,
             ai_api_key=effective_ocr_ai_api_key,
             ai_base_url=effective_ocr_ai_base_url,
             ai_model=effective_ocr_ai_model,
+            ai_layout_model=effective_ocr_ai_layout_model,
             paddle_doc_max_side_px=effective_paddle_doc_max_side_px,
+            layout_block_max_concurrency=effective_ocr_ai_block_concurrency,
+            request_rpm_limit=effective_ocr_ai_requests_per_minute,
+            request_tpm_limit=effective_ocr_ai_tokens_per_minute,
+            request_max_retries=effective_ocr_ai_max_retries,
             baidu_app_id=ocr_baidu_app_id,
             baidu_api_key=ocr_baidu_api_key,
             baidu_secret_key=ocr_baidu_secret_key,
@@ -205,59 +325,34 @@ def setup_ocr_runtime(
         # Optional OCR post-process: refine OCR texts or split coarse boxes
         # into line-level boxes after the primary OCR provider is selected.
         try:
-            provider_choice = requested_ocr_provider
-            is_paddle_vl_model = "paddleocr-vl" in (
-                str(effective_ocr_ai_model or "").strip().lower()
-            )
-            text_refiner_allowed = provider_choice in {
-                "auto",
-                "aiocr",
-                "tesseract",
-                "local",
-                "paddle_local",
-            }
-            linebreak_refiner_allowed = provider_choice in {
-                "auto",
-                "aiocr",
-                "tesseract",
-                "local",
-                "paddle",
-                "paddle_local",
-            }
+            provider_choice = route_plan.requested_provider
+            is_paddle_vl_model = route_plan.is_paddle_vl_model
+            text_refiner_allowed = route_plan.allow_text_refiner
+            linebreak_refiner_allowed = route_plan.allow_linebreak_refiner
             linebreak_requested = ocr_ai_linebreak_assist
             linebreak_enabled = bool(linebreak_requested)
             auto_linebreak_enabled = False
 
-            if provider_choice == "baidu":
+            if route_plan.force_disable_linebreak:
                 if linebreak_requested is not None:
                     setup_notes.append(
                         "ocr_ai_linebreak_assist_ignored_for_explicit_baidu"
                     )
                 linebreak_enabled = False
 
-            # PaddleOCR-VL doc_parser often returns paragraph-like bboxes.
-            # Auto-enable line-break assist (when user didn't specify)
-            # so downstream PPT rendering doesn't have to guess wraps.
-            if linebreak_requested is None and (
-                provider_choice == "paddle"
-                or (provider_choice in {"aiocr", "auto"} and is_paddle_vl_model)
-            ):
-                linebreak_enabled = True
-                auto_linebreak_enabled = True
-            # For explicit AI OCR with non-Paddle models (for example GPT/Gemini/
-            # Qwen-VL style endpoints), line-level geometry can still be coarse on
-            # dense scanned pages. Auto-enable visual line-break assist so the
-            # model can split paragraph-like OCR boxes into line-level boxes.
-            elif (
-                linebreak_requested is None
-                and provider_choice == "aiocr"
-                and (not is_paddle_vl_model)
-                and bool(effective_ocr_ai_api_key)
-            ):
+            # Route plan centralizes which OCR families should auto-enable
+            # line-break recovery. Remote doc-parser / generic AI OCR routes
+            # default to assist-on; machine OCR routes stay conservative.
+            if linebreak_requested is None and route_plan.auto_enable_linebreak:
                 linebreak_enabled = True
                 auto_linebreak_enabled = True
 
-            needs_refiner = text_refiner_allowed or (
+            # The only public OCR post-process toggle we expose today is the
+            # line-break assist switch. Use the same explicit opt-in to gate the
+            # local OCR text refiner so simply configuring a main vision model
+            # does not silently add another round-trip on every OCR page.
+            text_refine_requested = bool(linebreak_requested)
+            needs_refiner = (text_refine_requested and text_refiner_allowed) or (
                 linebreak_enabled and linebreak_refiner_allowed
             )
             if needs_refiner and effective_ocr_ai_api_key:
@@ -266,13 +361,18 @@ def setup_ocr_runtime(
                     provider=effective_ocr_ai_provider,
                     base_url=effective_ocr_ai_base_url,
                     model=effective_ocr_ai_model,
+                    request_rpm_limit=effective_ocr_ai_requests_per_minute,
+                    request_tpm_limit=effective_ocr_ai_tokens_per_minute,
+                    request_max_retries=effective_ocr_ai_max_retries,
                 )
 
-                # If the user enabled line-break assist, we can also reuse the
-                # same vision model to refine OCR texts (keeping machine bboxes)
-                # and improve transcription quality in non-AI providers.
-                text_refine_enabled = bool(text_refiner_allowed) or bool(linebreak_enabled)
-                if text_refine_enabled and not is_paddle_vl_model:
+                # Text refinement is only meaningful for non-AI OCR chains that
+                # keep upstream geometry but need transcription cleanup.
+                if (
+                    text_refine_requested
+                    and text_refiner_allowed
+                    and not is_paddle_vl_model
+                ):
                     text_refiner = shared_refiner
 
                 if linebreak_enabled and linebreak_refiner_allowed:
@@ -299,7 +399,14 @@ def setup_ocr_runtime(
             effective_ocr_ai_api_key=effective_ocr_ai_api_key,
             effective_ocr_ai_base_url=effective_ocr_ai_base_url,
             effective_ocr_ai_model=effective_ocr_ai_model,
+            effective_ocr_ai_chain_mode=effective_ocr_ai_chain_mode,
+            effective_ocr_ai_layout_model=effective_ocr_ai_layout_model,
             effective_paddle_doc_max_side_px=effective_paddle_doc_max_side_px,
+            effective_ocr_ai_page_concurrency=effective_ocr_ai_page_concurrency,
+            effective_ocr_ai_block_concurrency=effective_ocr_ai_block_concurrency,
+            effective_ocr_ai_requests_per_minute=effective_ocr_ai_requests_per_minute,
+            effective_ocr_ai_tokens_per_minute=effective_ocr_ai_tokens_per_minute,
+            effective_ocr_ai_max_retries=effective_ocr_ai_max_retries,
             effective_tesseract_language=effective_tesseract_language,
             effective_tesseract_min_conf=effective_tesseract_min_conf,
             strict_ocr_mode=strict_ocr_mode,
@@ -315,6 +422,7 @@ def setup_ocr_runtime(
             ocr_geometry_strategy=geometry_strategy,
             ocr_geometry_mode_requested=requested_geometry_mode,
             ocr_geometry_mode_effective=geometry_mode_effective,
+            route_plan=route_plan,
             setup_warning=None,
             setup_notes=tuple(setup_notes),
         )
@@ -338,7 +446,14 @@ def setup_ocr_runtime(
             effective_ocr_ai_api_key=effective_ocr_ai_api_key,
             effective_ocr_ai_base_url=effective_ocr_ai_base_url,
             effective_ocr_ai_model=effective_ocr_ai_model,
+            effective_ocr_ai_chain_mode=effective_ocr_ai_chain_mode,
+            effective_ocr_ai_layout_model=effective_ocr_ai_layout_model,
             effective_paddle_doc_max_side_px=effective_paddle_doc_max_side_px,
+            effective_ocr_ai_page_concurrency=effective_ocr_ai_page_concurrency,
+            effective_ocr_ai_block_concurrency=effective_ocr_ai_block_concurrency,
+            effective_ocr_ai_requests_per_minute=effective_ocr_ai_requests_per_minute,
+            effective_ocr_ai_tokens_per_minute=effective_ocr_ai_tokens_per_minute,
+            effective_ocr_ai_max_retries=effective_ocr_ai_max_retries,
             effective_tesseract_language=effective_tesseract_language,
             effective_tesseract_min_conf=effective_tesseract_min_conf,
             strict_ocr_mode=strict_ocr_mode,
@@ -354,6 +469,7 @@ def setup_ocr_runtime(
             ocr_geometry_strategy=geometry_strategy,
             ocr_geometry_mode_requested=requested_geometry_mode,
             ocr_geometry_mode_effective=geometry_mode_effective,
+            route_plan=route_plan,
             setup_warning=f"{e!s}",
             setup_notes=tuple(setup_notes),
         )
@@ -382,6 +498,40 @@ def build_ocr_debug_payload(
             "mode_requested": setup.ocr_geometry_mode_requested or "auto",
             "mode_effective": setup.ocr_geometry_mode_effective or "n/a",
         },
+        "ocr_route": {
+            "kind": (
+                setup.route_plan.route_kind
+                if setup.route_plan is not None
+                else "unknown"
+            ),
+            "chain_mode": setup.effective_ocr_ai_chain_mode,
+            "layout_model": setup.effective_ocr_ai_layout_model,
+            "runtime_provider": (
+                setup.route_plan.runtime_provider
+                if setup.route_plan is not None
+                else setup.effective_ocr_provider
+            ),
+            "is_paddle_vl_model": bool(
+                setup.route_plan.is_paddle_vl_model
+                if setup.route_plan is not None
+                else False
+            ),
+            "allow_main_ai_reuse": bool(
+                setup.route_plan.allow_main_ai_reuse
+                if setup.route_plan is not None
+                else False
+            ),
+            "allow_text_refiner": bool(
+                setup.route_plan.allow_text_refiner
+                if setup.route_plan is not None
+                else False
+            ),
+            "allow_linebreak_refiner": bool(
+                setup.route_plan.allow_linebreak_refiner
+                if setup.route_plan is not None
+                else False
+            ),
+        },
         "tesseract_language": setup.effective_tesseract_language,
         "tesseract_min_confidence": setup.effective_tesseract_min_conf,
         "ocr_render_dpi": int(ocr_render_dpi),
@@ -390,7 +540,14 @@ def build_ocr_debug_payload(
             "provider": setup.effective_ocr_ai_provider,
             "base_url": setup.effective_ocr_ai_base_url,
             "model": setup.effective_ocr_ai_model,
+            "chain_mode": setup.effective_ocr_ai_chain_mode,
+            "layout_model": setup.effective_ocr_ai_layout_model,
             "paddle_doc_max_side_px": setup.effective_paddle_doc_max_side_px,
+            "page_concurrency": setup.effective_ocr_ai_page_concurrency,
+            "block_concurrency": setup.effective_ocr_ai_block_concurrency,
+            "requests_per_minute": setup.effective_ocr_ai_requests_per_minute,
+            "tokens_per_minute": setup.effective_ocr_ai_tokens_per_minute,
+            "max_retries": setup.effective_ocr_ai_max_retries,
             "config_source": setup.ocr_ai_config_source,
             "sources": {
                 "api_key": setup.ocr_ai_api_key_source,

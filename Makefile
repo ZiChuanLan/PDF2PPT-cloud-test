@@ -1,10 +1,24 @@
-.PHONY: dev dev-local up down build logs clean test lint
+.PHONY: dev dev-local dev-docker dev-docker-down dev-docker-build dev-docker-logs up down build logs clean test lint
+
+DEV_COMPOSE = docker compose -f docker-compose.dev.yml
 
 # Development commands
-dev: up logs
+dev: dev-local
 
 dev-local:
 	bash scripts/dev/local_dev.sh
+
+dev-docker:
+	$(DEV_COMPOSE) up --build -d
+
+dev-docker-down:
+	$(DEV_COMPOSE) down
+
+dev-docker-build:
+	$(DEV_COMPOSE) build
+
+dev-docker-logs:
+	$(DEV_COMPOSE) logs -f
 
 up:
 	docker compose up --build -d

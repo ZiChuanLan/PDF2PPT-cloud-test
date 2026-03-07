@@ -2,16 +2,17 @@ import {
   BAIDU_DOC_PARSE_TYPE_LABELS,
   PARSE_ENGINE_MODE_LABELS as SETTINGS_PARSE_ENGINE_MODE_LABELS,
   SILICONFLOW_BASE_URL,
+  type OcrAiChainMode,
+  type OcrAiLayoutModel,
   type BaiduDocParseType,
   type LayoutAssistMode,
   type MainProvider,
-  type OcrAiLinebreakAssistMode,
   type OcrProvider,
   type ParseEngineMode,
   type Settings,
 } from "./settings.ts"
 
-export type OcrConfigSource = "dedicated" | "main" | "none"
+export type OcrConfigSource = "dedicated" | "none"
 export type { ParseEngineMode } from "./settings.ts"
 
 export type RunConfig = {
@@ -27,14 +28,17 @@ export type RunConfig = {
   effectiveOcrAiBaseUrl: string
   effectiveOcrAiModel: string
   effectiveOcrAiProvider: string
+  ocrAiChainMode: OcrAiChainMode
+  ocrAiLayoutModel: OcrAiLayoutModel
+  ocrAiPageConcurrency: number
+  ocrAiBlockConcurrency: number | null
+  ocrAiRequestsPerMinute: number | null
+  ocrAiTokensPerMinute: number | null
+  ocrAiMaxRetries: number
   ocrAiConfigSource: OcrConfigSource
   layoutAssistChain: ParseEngineMode
   layoutAssistMode: LayoutAssistMode
   layoutAssistEnabled: boolean
-  ocrLinebreakAssistMode: OcrAiLinebreakAssistMode
-  visionGeometryMode: Settings["ocrGeometryMode"]
-  predictedGeometryMode: Settings["ocrGeometryMode"] | "n/a"
-  predictedGeometryReason: string | null
   shouldAttachOcrAiParams: boolean
 }
 
@@ -50,23 +54,11 @@ export type OcrSettingsState = {
   hasBaiduCredentials: boolean
   canUseAiOcr: boolean
   selectedOcrProvider: OcrProvider
-  visibleOcrProvider: OcrProvider
   parseEngineMode: ParseEngineMode
-  currentLayoutAssistMode: LayoutAssistMode
-  isLayoutAssistEnabledForCurrentEngine: boolean
-  currentOcrLinebreakAssistMode: OcrAiLinebreakAssistMode
-  canConfigureOcrLinebreakAssist: boolean
-  isRemoteOcrMode: boolean
-  isOcrProviderAuto: boolean
-  isOcrProviderAi: boolean
   isOcrProviderPaddleLocal: boolean
   isOcrProviderBaidu: boolean
   isOcrProviderTesseract: boolean
-  isAiOcrProviderSelected: boolean
   needsRequiredOcrAiConfig: boolean
-  supportsOptionalOcrAiConfig: boolean
-  hasAnyOcrAiConfigValue: boolean
-  shouldExpandOptionalOcrAiConfig: boolean
   shouldShowAiVendorAdapter: boolean
   shouldShowOcrProviderSelector: boolean
   shouldShowBaiduConfig: boolean
@@ -76,28 +68,22 @@ export type OcrSettingsState = {
   ocrModelsConfigSource: OcrConfigSource
   ocrModelsApiKey: string
   ocrModelsBaseUrl: string
-  predictedGeometryMode: Settings["ocrGeometryMode"] | "n/a"
-  predictedGeometryReason: string | null
+  isOcrAiChainDirect: boolean
+  isOcrAiChainDocParser: boolean
+  isOcrAiChainLayoutBlock: boolean
   runConfig: RunConfig
 }
 
 export const OCR_PROVIDER_LABELS: Record<OcrProvider, string> = {
   auto: "自动（混合）",
-  aiocr: "AI OCR（OpenAI 兼容）",
+  aiocr: "AIOCR",
   paddle_local: "本地 OCR（PaddleOCR）",
   baidu: "百度 OCR",
   tesseract: "本地 OCR（Tesseract）",
 }
 
-export const OCR_GEOMETRY_MODE_LABELS: Record<Settings["ocrGeometryMode"], string> = {
-  auto: "自动",
-  local_tesseract: "本地定位",
-  direct_ai: "AI bbox",
-}
-
 const OCR_CONFIG_SOURCE_LABELS: Record<OcrConfigSource, string> = {
   dedicated: "OCR 独立配置",
-  main: "复用主 AI 配置",
   none: "未配置",
 }
 
@@ -203,28 +189,6 @@ export function normalizeVisibleOcrProvider(settings: Settings): OcrProvider {
   return getPreferredLocalOcrProvider(settings)
 }
 
-function predictGeometryMode(
-  provider: OcrProvider,
-  requestedMode: Settings["ocrGeometryMode"]
-): {
-  mode: Settings["ocrGeometryMode"] | "n/a"
-  reason: string | null
-} {
-  if (provider !== "aiocr") {
-    return { mode: "n/a", reason: null }
-  }
-  if (requestedMode === "local_tesseract") {
-    return {
-      mode: "direct_ai",
-      reason: "显式 AI OCR 已固定为纯 AI OCR，不再混用本地 Tesseract 定位。",
-    }
-  }
-  return {
-    mode: "direct_ai",
-    reason: "显式 AI OCR 固定使用模型自身 bbox。",
-  }
-}
-
 function resolveOcrAiConfigSource({
   explicitAiOcrSelected,
   dedicatedApiKey,
@@ -250,6 +214,14 @@ function toFiniteIntStringOrUndefined(value: string): string | undefined {
   const n = Number(trimmed)
   if (!Number.isFinite(n) || n < 0) return undefined
   return String(Math.round(n))
+}
+
+function toFinitePositiveIntOrNull(value: string): number | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const n = Number(trimmed)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return Math.round(n)
 }
 
 function appendBaiduFields(form: FormData, settings: Settings) {
@@ -308,25 +280,24 @@ export function resolveRunConfig(settings: Settings): RunConfig {
   const effectiveOcrAiProvider = explicitAiOcrSelected
     ? (settings.ocrAiProvider || "auto").trim() || "auto"
     : "auto"
+  const ocrAiChainMode: OcrAiChainMode = explicitAiOcrSelected
+    ? settings.ocrAiChainMode
+    : "direct"
+  const ocrAiLayoutModel: OcrAiLayoutModel = explicitAiOcrSelected
+    ? settings.ocrAiLayoutModel
+    : "pp_doclayout_v3"
+  const ocrAiPageConcurrency = Math.min(
+    8,
+    Math.max(1, Number(settings.ocrAiPageConcurrency) || 1)
+  )
+  const ocrAiBlockConcurrency = toFinitePositiveIntOrNull(settings.ocrAiBlockConcurrency)
+  const ocrAiRequestsPerMinute = toFinitePositiveIntOrNull(settings.ocrAiRequestsPerMinute)
+  const ocrAiTokensPerMinute = toFinitePositiveIntOrNull(settings.ocrAiTokensPerMinute)
+  const ocrAiMaxRetries = Math.min(8, Math.max(0, Number(settings.ocrAiMaxRetries) || 0))
 
   const layoutAssistChain = parseEngineMode
-  const layoutAssistMode: LayoutAssistMode =
-    layoutAssistChain === "baidu_doc"
-      ? "off"
-      : layoutAssistChain === "local_ocr"
-      ? settings.visualAssistModeLocal
-      : layoutAssistChain === "remote_ocr"
-        ? settings.visualAssistModeRemote
-        : settings.visualAssistModeMineru
-  const layoutAssistEnabled = layoutAssistMode !== "off"
-  const ocrLinebreakAssistMode: OcrAiLinebreakAssistMode =
-    parseProvider === "local" ? settings.ocrAiLinebreakAssistMode : "off"
-  const visionGeometryMode: Settings["ocrGeometryMode"] =
-    explicitAiOcrSelected ? "direct_ai" : "auto"
-  const geometryPrediction = predictGeometryMode(
-    effectiveOcrProvider,
-    visionGeometryMode
-  )
+  const layoutAssistMode: LayoutAssistMode = "off"
+  const layoutAssistEnabled = false
   const shouldAttachOcrAiParams = explicitAiOcrSelected && Boolean(effectiveOcrAiKey)
 
   return {
@@ -342,14 +313,17 @@ export function resolveRunConfig(settings: Settings): RunConfig {
     effectiveOcrAiBaseUrl,
     effectiveOcrAiModel,
     effectiveOcrAiProvider,
+    ocrAiChainMode,
+    ocrAiLayoutModel,
+    ocrAiPageConcurrency,
+    ocrAiBlockConcurrency,
+    ocrAiRequestsPerMinute,
+    ocrAiTokensPerMinute,
+    ocrAiMaxRetries,
     ocrAiConfigSource,
     layoutAssistChain,
     layoutAssistMode,
     layoutAssistEnabled,
-    ocrLinebreakAssistMode,
-    visionGeometryMode,
-    predictedGeometryMode: geometryPrediction.mode,
-    predictedGeometryReason: geometryPrediction.reason,
     shouldAttachOcrAiParams,
   }
 }
@@ -365,31 +339,12 @@ export function resolveOcrSettingsState(settings: Settings): OcrSettingsState {
     Boolean(settings.ocrBaiduSecretKey.trim())
   const canUseAiOcr = parseEngineMode === "local_ocr" || parseEngineMode === "remote_ocr"
   const selectedOcrProvider = runConfig.selectedOcrProvider
-  const currentLayoutAssistMode = runConfig.layoutAssistMode
-  const isLayoutAssistEnabledForCurrentEngine = currentLayoutAssistMode !== "off"
-  const currentOcrLinebreakAssistMode = runConfig.ocrLinebreakAssistMode
-  const isRemoteOcrMode = parseEngineMode === "remote_ocr"
-  const isOcrProviderAuto = selectedOcrProvider === "auto"
-  const isOcrProviderAi = selectedOcrProvider === "aiocr"
   const isOcrProviderPaddleLocal = selectedOcrProvider === "paddle_local"
   const isOcrProviderBaidu = selectedOcrProvider === "baidu"
   const isOcrProviderTesseract = selectedOcrProvider === "tesseract"
-  const supportsOcrAiPostprocess =
-    !isMineruProvider &&
-    !isBaiduDocParseMode &&
-    (isOcrProviderAi || isOcrProviderTesseract || isOcrProviderPaddleLocal)
-  const canConfigureOcrLinebreakAssist = supportsOcrAiPostprocess
-  const isAiOcrProviderSelected = isOcrProviderAi || isOcrProviderAuto
-  const needsRequiredOcrAiConfig = parseEngineMode === "remote_ocr" && isOcrProviderAi
-  const supportsOptionalOcrAiConfig = false
-  const hasAnyOcrAiConfigValue =
-    Boolean(settings.ocrAiApiKey.trim()) ||
-    Boolean(settings.ocrAiBaseUrl.trim()) ||
-    Boolean(settings.ocrAiModel.trim())
-  const shouldExpandOptionalOcrAiConfig = false
-  const shouldShowAiVendorAdapter = canUseAiOcr && needsRequiredOcrAiConfig
-  const shouldShowOcrProviderSelector =
-    parseEngineMode === "local_ocr" || parseEngineMode === "remote_ocr"
+  const needsRequiredOcrAiConfig = parseEngineMode === "remote_ocr"
+  const shouldShowAiVendorAdapter = needsRequiredOcrAiConfig
+  const shouldShowOcrProviderSelector = parseEngineMode === "local_ocr"
   const shouldShowBaiduConfig = isBaiduDocParseMode || isOcrProviderBaidu
   const shouldShowTesseractConfig = parseEngineMode === "local_ocr" && isOcrProviderTesseract
   const shouldShowLocalOcrCheck =
@@ -400,7 +355,7 @@ export function resolveOcrSettingsState(settings: Settings): OcrSettingsState {
     ? MINERU_OCR_PROVIDERS
     : isBaiduDocParseMode
       ? BAIDU_DOC_PARSE_OCR_PROVIDERS
-    : isRemoteOcrMode
+    : parseEngineMode === "remote_ocr"
       ? REMOTE_PARSE_OCR_PROVIDERS
       : LOCAL_PARSE_OCR_PROVIDERS
   const ocrModelsConfigSource = needsRequiredOcrAiConfig
@@ -424,23 +379,11 @@ export function resolveOcrSettingsState(settings: Settings): OcrSettingsState {
     hasBaiduCredentials,
     canUseAiOcr,
     selectedOcrProvider,
-    visibleOcrProvider: selectedOcrProvider,
     parseEngineMode,
-    currentLayoutAssistMode,
-    isLayoutAssistEnabledForCurrentEngine,
-    currentOcrLinebreakAssistMode,
-    canConfigureOcrLinebreakAssist,
-    isRemoteOcrMode,
-    isOcrProviderAuto,
-    isOcrProviderAi,
     isOcrProviderPaddleLocal,
     isOcrProviderBaidu,
     isOcrProviderTesseract,
-    isAiOcrProviderSelected,
     needsRequiredOcrAiConfig,
-    supportsOptionalOcrAiConfig,
-    hasAnyOcrAiConfigValue,
-    shouldExpandOptionalOcrAiConfig,
     shouldShowAiVendorAdapter,
     shouldShowOcrProviderSelector,
     shouldShowBaiduConfig,
@@ -450,8 +393,9 @@ export function resolveOcrSettingsState(settings: Settings): OcrSettingsState {
     ocrModelsConfigSource,
     ocrModelsApiKey,
     ocrModelsBaseUrl,
-    predictedGeometryMode: runConfig.predictedGeometryMode,
-    predictedGeometryReason: runConfig.predictedGeometryReason,
+    isOcrAiChainDirect: runConfig.ocrAiChainMode === "direct",
+    isOcrAiChainDocParser: runConfig.ocrAiChainMode === "doc_parser",
+    isOcrAiChainLayoutBlock: runConfig.ocrAiChainMode === "layout_block",
     runConfig,
   }
 }
@@ -477,6 +421,10 @@ export function getRunModelLabel(runConfig: RunConfig): string {
   }
   if (runConfig.effectiveOcrProvider === "aiocr" && !runConfig.effectiveOcrAiModel) {
     return "未设置 OCR 模型"
+  }
+  if (runConfig.effectiveOcrProvider === "aiocr" && runConfig.ocrAiChainMode === "layout_block") {
+    const model = runConfig.effectiveOcrAiModel || "未设置"
+    return `PP-DocLayoutV3 + ${model}`
   }
   return runConfig.effectiveOcrAiModel || "未设置"
 }
@@ -520,11 +468,17 @@ export function validateRunConfig(settings: Settings): ValidationResult {
     if (!settings.ocrAiApiKey.trim()) {
       return {
         ok: false,
-        message: "显式 AI OCR 不再复用主 AI 配置，请在设置页单独填写 OCR API Key。",
+        message: "AIOCR 不再复用主 AI 配置，请在设置页单独填写 OCR API Key。",
       }
     }
     if (!settings.ocrAiModel.trim()) {
-      return { ok: false, message: "当前 OCR 提供方为 AI OCR，请先在设置页选择 OCR 模型。" }
+      return { ok: false, message: "当前链路为 AIOCR，请先在设置页选择 OCR 模型。" }
+    }
+    if (
+      run.ocrAiChainMode === "doc_parser" &&
+      !settings.ocrAiModel.trim().toLowerCase().includes("paddleocr-vl")
+    ) {
+      return { ok: false, message: "内置文档解析链路仅支持 PaddleOCR-VL 模型。" }
     }
   }
 
@@ -549,11 +503,9 @@ export function createJobFormData(
   if (run.mainBaseUrl) form.append("base_url", run.mainBaseUrl)
   if (run.mainModel) form.append("model", run.mainModel)
 
-  form.append("enable_layout_assist", String(run.layoutAssistEnabled))
-  form.append(
-    "layout_assist_apply_image_regions",
-    String(Boolean(run.layoutAssistEnabled && settings.layoutAssistApplyImageRegions))
-  )
+  // Product-side layout assist has been retired for speed-focused runs.
+  form.append("enable_layout_assist", "false")
+  form.append("layout_assist_apply_image_regions", "false")
   form.append("enable_ocr", String(run.parseProvider === "local" ? Boolean(settings.enableOcr) : false))
   form.append("remove_footer_notebooklm", String(Boolean(settings.removeFooterNotebooklm)))
   form.append("text_erase_mode", settings.textEraseMode)
@@ -612,18 +564,36 @@ export function createJobFormData(
       if (run.effectiveOcrAiBaseUrl) form.append("ocr_ai_base_url", run.effectiveOcrAiBaseUrl)
       if (run.effectiveOcrAiModel) form.append("ocr_ai_model", run.effectiveOcrAiModel)
       form.append("ocr_ai_provider", run.effectiveOcrAiProvider)
+      form.append("ocr_ai_chain_mode", run.ocrAiChainMode)
+      form.append("ocr_ai_layout_model", run.ocrAiLayoutModel)
       const paddleDocMaxSidePx = toFiniteIntStringOrUndefined(
         settings.ocrPaddleVlDocparserMaxSidePx
       )
       if (paddleDocMaxSidePx !== undefined) {
         form.append("ocr_paddle_vl_docparser_max_side_px", paddleDocMaxSidePx)
       }
-    }
-    if (run.effectiveOcrProvider !== "baidu") {
-      if (run.ocrLinebreakAssistMode === "on") {
-        form.append("ocr_ai_linebreak_assist", "true")
-      } else if (run.ocrLinebreakAssistMode === "off") {
-        form.append("ocr_ai_linebreak_assist", "false")
+      form.append("ocr_ai_page_concurrency", String(run.ocrAiPageConcurrency))
+      const ocrAiBlockConcurrency = toFiniteIntStringOrUndefined(
+        settings.ocrAiBlockConcurrency
+      )
+      if (ocrAiBlockConcurrency !== undefined) {
+        form.append("ocr_ai_block_concurrency", ocrAiBlockConcurrency)
+      }
+      const ocrAiRequestsPerMinute = toFiniteIntStringOrUndefined(
+        settings.ocrAiRequestsPerMinute
+      )
+      if (ocrAiRequestsPerMinute !== undefined) {
+        form.append("ocr_ai_requests_per_minute", ocrAiRequestsPerMinute)
+      }
+      const ocrAiTokensPerMinute = toFiniteIntStringOrUndefined(
+        settings.ocrAiTokensPerMinute
+      )
+      if (ocrAiTokensPerMinute !== undefined) {
+        form.append("ocr_ai_tokens_per_minute", ocrAiTokensPerMinute)
+      }
+      const ocrAiMaxRetries = toFiniteIntStringOrUndefined(settings.ocrAiMaxRetries)
+      if (ocrAiMaxRetries !== undefined) {
+        form.append("ocr_ai_max_retries", ocrAiMaxRetries)
       }
     }
 

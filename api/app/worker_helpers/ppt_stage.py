@@ -10,6 +10,13 @@ from ..models.job import JobStage
 from .guarded import run_blocking_with_guards
 
 
+_REQUIRED_GENERATOR_FEATURES = (
+    "text_erase_mode",
+    "progress_callback",
+    "export_final_preview_images",
+)
+
+
 def _progress_in_span(
     done: int,
     total: int,
@@ -28,6 +35,28 @@ class PptStageResult:
     worker_compat_mode: bool
 
 
+def _missing_generator_features(
+    generator_params: dict[str, inspect.Parameter],
+) -> list[str]:
+    return [
+        feature
+        for feature in _REQUIRED_GENERATOR_FEATURES
+        if feature not in generator_params
+    ]
+
+
+def _collect_supported_generator_kwargs(
+    *,
+    generator_params: dict[str, inspect.Parameter],
+    candidates: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        name: value
+        for name, value in candidates.items()
+        if name in generator_params
+    }
+
+
 def run_ppt_stage(
     *,
     ir: dict[str, Any],
@@ -43,6 +72,7 @@ def run_ppt_stage(
     normalized_scanned_image_region_min_area_ratio: float,
     normalized_scanned_image_region_max_area_ratio: float,
     normalized_scanned_image_region_max_aspect_ratio: float,
+    export_final_preview_images: bool,
     set_processing_progress: Callable[[JobStage, int, str], None],
     abort_if_cancelled: Callable[..., None],
     heartbeat: Callable[[], None] | None = None,
@@ -66,51 +96,27 @@ def run_ppt_stage(
         )
         abort_if_cancelled(stage=JobStage.pptx_generating, message="Job cancelled")
 
-    generator_params = inspect.signature(generate_pptx_from_ir).parameters
-    missing_generator_features: list[str] = []
-    if "text_erase_mode" not in generator_params:
-        missing_generator_features.append("text_erase_mode")
-    if "progress_callback" not in generator_params:
-        missing_generator_features.append("progress_callback")
+    generator_params = dict(inspect.signature(generate_pptx_from_ir).parameters)
+    missing_generator_features = _missing_generator_features(generator_params)
     worker_compat_mode = bool(missing_generator_features)
-    generator_kwargs: dict[str, Any] = {
-        "artifacts_dir": artifacts_dir,
-        "scanned_render_dpi": int(scanned_render_dpi),
-    }
-    if "remove_footer_notebooklm" in generator_params:
-        generator_kwargs["remove_footer_notebooklm"] = bool(
-            remove_footer_notebooklm
-        )
-    if "text_erase_mode" in generator_params:
-        generator_kwargs["text_erase_mode"] = normalized_text_erase_mode
-    if "scanned_page_mode" in generator_params:
-        generator_kwargs["scanned_page_mode"] = normalized_scanned_page_mode
-    if "image_bg_clear_expand_min_pt" in generator_params:
-        generator_kwargs["image_bg_clear_expand_min_pt"] = (
-            normalized_image_bg_clear_expand_min_pt
-        )
-    if "image_bg_clear_expand_max_pt" in generator_params:
-        generator_kwargs["image_bg_clear_expand_max_pt"] = (
-            normalized_image_bg_clear_expand_max_pt
-        )
-    if "image_bg_clear_expand_ratio" in generator_params:
-        generator_kwargs["image_bg_clear_expand_ratio"] = (
-            normalized_image_bg_clear_expand_ratio
-        )
-    if "scanned_image_region_min_area_ratio" in generator_params:
-        generator_kwargs["scanned_image_region_min_area_ratio"] = (
-            normalized_scanned_image_region_min_area_ratio
-        )
-    if "scanned_image_region_max_area_ratio" in generator_params:
-        generator_kwargs["scanned_image_region_max_area_ratio"] = (
-            normalized_scanned_image_region_max_area_ratio
-        )
-    if "scanned_image_region_max_aspect_ratio" in generator_params:
-        generator_kwargs["scanned_image_region_max_aspect_ratio"] = (
-            normalized_scanned_image_region_max_aspect_ratio
-        )
-    if "progress_callback" in generator_params:
-        generator_kwargs["progress_callback"] = _on_ppt_page_done
+    generator_kwargs = _collect_supported_generator_kwargs(
+        generator_params=generator_params,
+        candidates={
+            "artifacts_dir": artifacts_dir,
+            "scanned_render_dpi": int(scanned_render_dpi),
+            "remove_footer_notebooklm": bool(remove_footer_notebooklm),
+            "text_erase_mode": normalized_text_erase_mode,
+            "scanned_page_mode": normalized_scanned_page_mode,
+            "image_bg_clear_expand_min_pt": normalized_image_bg_clear_expand_min_pt,
+            "image_bg_clear_expand_max_pt": normalized_image_bg_clear_expand_max_pt,
+            "image_bg_clear_expand_ratio": normalized_image_bg_clear_expand_ratio,
+            "scanned_image_region_min_area_ratio": normalized_scanned_image_region_min_area_ratio,
+            "scanned_image_region_max_area_ratio": normalized_scanned_image_region_max_area_ratio,
+            "scanned_image_region_max_aspect_ratio": normalized_scanned_image_region_max_aspect_ratio,
+            "export_final_preview_images": bool(export_final_preview_images),
+            "progress_callback": _on_ppt_page_done,
+        },
+    )
 
     if worker_compat_mode:
         compat_features = ",".join(missing_generator_features)

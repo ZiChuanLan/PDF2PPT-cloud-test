@@ -9,6 +9,7 @@ the conversion inline via threads (see jobs router).
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from pathlib import Path
@@ -37,6 +38,7 @@ from .logging_config import get_logger
 from .logging_config import set_job_id, set_job_stage, setup_logging
 from .models.error import AppException, ErrorCode
 from .models.job import JobStage, JobStatus
+from .perf_policies import RuntimePerformanceSettings
 from .services.redis_service import get_redis_service
 from .utils.text import clean_str
 from .worker_helpers import (
@@ -118,7 +120,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
     enable_ocr: bool = False,
     remove_footer_notebooklm: bool = False,
     text_erase_mode: str | None = None,
-    enable_layout_assist: bool = True,
+    enable_layout_assist: bool = False,
     layout_assist_apply_image_regions: bool = False,
     provider: str | None = None,
     api_key: str | None = None,
@@ -146,7 +148,14 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
     ocr_ai_provider: str | None = None,
     ocr_ai_base_url: str | None = None,
     ocr_ai_model: str | None = None,
+    ocr_ai_chain_mode: str | None = None,
+    ocr_ai_layout_model: str | None = None,
     ocr_paddle_vl_docparser_max_side_px: int | None = None,
+    ocr_ai_page_concurrency: int | None = None,
+    ocr_ai_block_concurrency: int | None = None,
+    ocr_ai_requests_per_minute: int | None = None,
+    ocr_ai_tokens_per_minute: int | None = None,
+    ocr_ai_max_retries: int | None = None,
     ocr_geometry_mode: str | None = None,
     scanned_page_mode: str | None = None,
     image_bg_clear_expand_min_pt: float | None = None,
@@ -193,7 +202,14 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         ocr_ai_provider,
         ocr_ai_base_url,
         ocr_ai_model,
+        ocr_ai_chain_mode,
+        ocr_ai_layout_model,
         ocr_paddle_vl_docparser_max_side_px,
+        ocr_ai_page_concurrency,
+        ocr_ai_block_concurrency,
+        ocr_ai_requests_per_minute,
+        ocr_ai_tokens_per_minute,
+        ocr_ai_max_retries,
         ocr_geometry_mode,
         scanned_page_mode,
         image_bg_clear_expand_min_pt,
@@ -206,15 +222,17 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         ocr_strict_mode,
         job_timeout,
     )
+    # Product-side AI layout assist has been retired for speed-focused runs.
+    enable_layout_assist = False
+    layout_assist_apply_image_regions = False
     redis_service = get_redis_service()
     set_job_id(job_id)
     set_job_stage(None)
     settings = get_settings()
-    ocr_render_dpi = int(getattr(settings, "ocr_render_dpi", 200) or 200)
-    scanned_render_dpi = int(getattr(settings, "scanned_render_dpi", 200) or 200)
-    keepalive_interval_s = float(
-        getattr(settings, "job_keepalive_interval_s", 15) or 15
-    )
+    perf_settings = RuntimePerformanceSettings.from_settings(settings)
+    ocr_render_dpi = int(perf_settings.ocr_render_dpi)
+    scanned_render_dpi = int(perf_settings.scanned_render_dpi)
+    keepalive_interval_s = float(perf_settings.keepalive_interval_s)
 
     job_path = _job_dir(job_id)
     input_pdf = job_path / "input.pdf"
@@ -349,6 +367,42 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         default=2200,
         low=0,
         high=6000,
+    )
+    normalized_ocr_ai_page_concurrency = _normalize_int(
+        ocr_ai_page_concurrency,
+        default=1,
+        low=1,
+        high=8,
+    )
+    normalized_ocr_ai_block_concurrency: int | None = None
+    if ocr_ai_block_concurrency is not None:
+        normalized_ocr_ai_block_concurrency = _normalize_int(
+            ocr_ai_block_concurrency,
+            default=1,
+            low=1,
+            high=8,
+        )
+    normalized_ocr_ai_requests_per_minute: int | None = None
+    if ocr_ai_requests_per_minute is not None:
+        normalized_ocr_ai_requests_per_minute = _normalize_int(
+            ocr_ai_requests_per_minute,
+            default=1,
+            low=1,
+            high=2000,
+        )
+    normalized_ocr_ai_tokens_per_minute: int | None = None
+    if ocr_ai_tokens_per_minute is not None:
+        normalized_ocr_ai_tokens_per_minute = _normalize_int(
+            ocr_ai_tokens_per_minute,
+            default=1000,
+            low=1,
+            high=2_000_000,
+        )
+    normalized_ocr_ai_max_retries = _normalize_int(
+        ocr_ai_max_retries,
+        default=0,
+        low=0,
+        high=8,
     )
 
     try:
@@ -544,6 +598,11 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         parsed_pages = sum(
             1 for page in (ir.get("pages") or []) if isinstance(page, dict)
         )
+        artifact_export_policy = (
+            perf_settings.artifact_exports.resolve_for_parsed_document(
+                parsed_pages=parsed_pages
+            )
+        )
         _set_processing_progress(
             JobStage.parsing,
             22,
@@ -561,9 +620,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             for page in (ir.get("pages") or [])
         )
         should_attempt_ocr = (
-            parse_provider_id == "local"
-            and scanned_pages_exist
-            and (bool(enable_ocr) or bool(enable_layout_assist))
+            parse_provider_id == "local" and scanned_pages_exist and bool(enable_ocr)
         )
         ocr_setup = None
         ocr_manager = None
@@ -601,6 +658,11 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 for page in (ir.get("pages") or [])
                 if isinstance(page, dict) and not page.get("has_text_layer")
             )
+            export_ocr_overlay_images_effective = (
+                perf_settings.artifact_exports.resolve_ocr_overlay_images(
+                    ocr_target_pages=ocr_target_pages
+                )
+            )
             _set_processing_progress(
                 JobStage.ocr,
                 35,
@@ -622,7 +684,14 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 ocr_ai_provider=ocr_ai_provider,
                 ocr_ai_base_url=ocr_ai_base_url,
                 ocr_ai_model=ocr_ai_model,
+                ocr_ai_chain_mode=ocr_ai_chain_mode,
+                ocr_ai_layout_model=ocr_ai_layout_model,
                 ocr_paddle_vl_docparser_max_side_px=normalized_ocr_paddle_vl_docparser_max_side_px,
+                ocr_ai_page_concurrency=normalized_ocr_ai_page_concurrency,
+                ocr_ai_block_concurrency=normalized_ocr_ai_block_concurrency,
+                ocr_ai_requests_per_minute=normalized_ocr_ai_requests_per_minute,
+                ocr_ai_tokens_per_minute=normalized_ocr_ai_tokens_per_minute,
+                ocr_ai_max_retries=normalized_ocr_ai_max_retries,
                 ocr_geometry_mode=ocr_geometry_mode,
                 ocr_ai_linebreak_assist=ocr_ai_linebreak_assist,
                 ocr_strict_mode=ocr_strict_mode,
@@ -647,6 +716,35 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 setup=ocr_setup,
             )
             ocr_debug_payload["env_PATH"] = os.environ.get("PATH")
+
+            def _build_page_ocr_runtime():
+                return setup_ocr_runtime(
+                    provider=provider,
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                    ocr_provider=ocr_provider,
+                    ocr_baidu_app_id=ocr_baidu_app_id,
+                    ocr_baidu_api_key=ocr_baidu_api_key,
+                    ocr_baidu_secret_key=ocr_baidu_secret_key,
+                    ocr_tesseract_min_confidence=ocr_tesseract_min_confidence,
+                    ocr_tesseract_language=ocr_tesseract_language,
+                    ocr_ai_api_key=ocr_ai_api_key,
+                    ocr_ai_provider=ocr_ai_provider,
+                    ocr_ai_base_url=ocr_ai_base_url,
+                    ocr_ai_model=ocr_ai_model,
+                    ocr_ai_chain_mode=ocr_ai_chain_mode,
+                    ocr_ai_layout_model=ocr_ai_layout_model,
+                    ocr_paddle_vl_docparser_max_side_px=normalized_ocr_paddle_vl_docparser_max_side_px,
+                    ocr_ai_page_concurrency=normalized_ocr_ai_page_concurrency,
+                    ocr_ai_block_concurrency=normalized_ocr_ai_block_concurrency,
+                    ocr_ai_requests_per_minute=normalized_ocr_ai_requests_per_minute,
+                    ocr_ai_tokens_per_minute=normalized_ocr_ai_tokens_per_minute,
+                    ocr_ai_max_retries=normalized_ocr_ai_max_retries,
+                    ocr_geometry_mode=ocr_geometry_mode,
+                    ocr_ai_linebreak_assist=ocr_ai_linebreak_assist,
+                    ocr_strict_mode=ocr_strict_mode,
+                )
 
             if ocr_setup.setup_warning:
                 logger.warning(
@@ -713,6 +811,9 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 effective_ocr_provider=effective_ocr_provider,
                 ocr_render_dpi=int(ocr_render_dpi),
                 ocr_debug=ocr_debug_payload,
+                export_overlay_images=export_ocr_overlay_images_effective,
+                ocr_setup=ocr_setup,
+                ocr_runtime_factory=_build_page_ocr_runtime,
                 set_processing_progress=_set_processing_progress,
                 abort_if_cancelled=_abort_if_cancelled,
             )
@@ -726,6 +827,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             job_path=job_path,
             artifacts_dir=artifacts_dir,
             scanned_render_dpi=int(scanned_render_dpi),
+            export_debug_images=artifact_export_policy.layout_assist_debug_images,
             select_provider=_select_provider,
             set_processing_progress=_set_processing_progress,
             abort_if_cancelled=_abort_if_cancelled,
@@ -733,25 +835,36 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             heartbeat_interval_s=keepalive_interval_s,
         ).ir
 
-        worker_compat_mode = run_ppt_stage(
-            ir=ir,
-            output_pptx=output_pptx,
-            artifacts_dir=artifacts_dir,
-            scanned_render_dpi=int(scanned_render_dpi),
-            remove_footer_notebooklm=bool(remove_footer_notebooklm),
-            normalized_text_erase_mode=normalized_text_erase_mode,
-            normalized_scanned_page_mode=normalized_scanned_page_mode,
-            normalized_image_bg_clear_expand_min_pt=normalized_image_bg_clear_expand_min_pt,
-            normalized_image_bg_clear_expand_max_pt=normalized_image_bg_clear_expand_max_pt,
-            normalized_image_bg_clear_expand_ratio=normalized_image_bg_clear_expand_ratio,
-            normalized_scanned_image_region_min_area_ratio=normalized_scanned_image_region_min_area_ratio,
-            normalized_scanned_image_region_max_area_ratio=normalized_scanned_image_region_max_area_ratio,
-            normalized_scanned_image_region_max_aspect_ratio=normalized_scanned_image_region_max_aspect_ratio,
-            set_processing_progress=_set_processing_progress,
-            abort_if_cancelled=_abort_if_cancelled,
-            heartbeat=_refresh_job_ttl,
-            heartbeat_interval_s=keepalive_interval_s,
-        ).worker_compat_mode
+        ppt_stage_kwargs: dict[str, Any] = {
+            "ir": ir,
+            "output_pptx": output_pptx,
+            "artifacts_dir": artifacts_dir,
+            "scanned_render_dpi": int(scanned_render_dpi),
+            "remove_footer_notebooklm": bool(remove_footer_notebooklm),
+            "normalized_text_erase_mode": normalized_text_erase_mode,
+            "normalized_scanned_page_mode": normalized_scanned_page_mode,
+            "normalized_image_bg_clear_expand_min_pt": normalized_image_bg_clear_expand_min_pt,
+            "normalized_image_bg_clear_expand_max_pt": normalized_image_bg_clear_expand_max_pt,
+            "normalized_image_bg_clear_expand_ratio": normalized_image_bg_clear_expand_ratio,
+            "normalized_scanned_image_region_min_area_ratio": normalized_scanned_image_region_min_area_ratio,
+            "normalized_scanned_image_region_max_area_ratio": normalized_scanned_image_region_max_area_ratio,
+            "normalized_scanned_image_region_max_aspect_ratio": normalized_scanned_image_region_max_aspect_ratio,
+            "export_final_preview_images": artifact_export_policy.final_preview_images,
+            "set_processing_progress": _set_processing_progress,
+            "abort_if_cancelled": _abort_if_cancelled,
+            "heartbeat": _refresh_job_ttl,
+            "heartbeat_interval_s": keepalive_interval_s,
+        }
+        ppt_stage_params = inspect.signature(run_ppt_stage).parameters
+        if "remove_footer_notebooklm" not in ppt_stage_params:
+            ppt_stage_kwargs.pop("remove_footer_notebooklm", None)
+            ir.setdefault("warnings", []).append(
+                "worker_helper_compat_mode_missing_remove_footer_notebooklm"
+            )
+        ppt_stage_result = run_ppt_stage(**ppt_stage_kwargs)
+        worker_compat_mode = bool(
+            getattr(ppt_stage_result, "worker_compat_mode", ppt_stage_result)
+        )
         # Persist final IR so users can inspect what the generator saw.
         ir_path.write_text(
             json.dumps(ir, ensure_ascii=True, indent=2) + "\n", encoding="utf-8"

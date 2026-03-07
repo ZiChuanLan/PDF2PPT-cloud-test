@@ -832,6 +832,43 @@ def _prefer_wrap_for_ocr_text(
     return False
 
 
+def _resolve_visual_wrap_override_for_ocr_text(
+    *,
+    visual_line_count: int | None,
+    compact_len: int,
+    bbox_h_pt: float,
+    baseline_ocr_h_pt: float,
+    is_heading: bool,
+) -> bool | None:
+    """Resolve whether source-pixel line counting should override OCR wrap.
+
+    A single visually-detected text row is a strong negative signal for short
+    labels/headings, but only a weak negative signal for long OCR paragraphs.
+    Some OCR backends return long paragraph text in shallow bboxes; forcing
+    `wrap=False` in those cases prevents the fitter from recovering with a
+    wrapped layout and results in tiny illegible text.
+    """
+
+    if not isinstance(visual_line_count, int) or visual_line_count < 1:
+        return None
+
+    if visual_line_count >= 2:
+        return True if int(compact_len) >= 12 else None
+
+    if is_heading:
+        return False
+
+    compact_len = max(0, int(compact_len))
+    bbox_h_pt = max(0.0, float(bbox_h_pt))
+    baseline = max(4.0, float(baseline_ocr_h_pt))
+
+    if compact_len >= 28:
+        return None
+    if compact_len >= 18 and bbox_h_pt >= max(1.10 * baseline, 10.0):
+        return None
+    return False
+
+
 def _fit_ocr_text_style(
     *,
     text: str,
@@ -851,6 +888,7 @@ def _fit_ocr_text_style(
     if not normalized:
         return ("", 6.0, False)
 
+    compact_len = _compact_text_length(normalized)
     line_height = 1.18 if _contains_cjk(normalized) else 1.15
 
     def _fit_wrapped_text(
@@ -929,6 +967,9 @@ def _fit_ocr_text_style(
     )
 
     text_to_render = normalized
+    allow_wrap_recovery = wrap_override is None or (
+        wrap_override is False and (not is_heading) and compact_len >= 72
+    )
     if wrap:
         text_to_render, font_size_pt, _line_count, _fill = _fit_wrapped_text(
             seed_font_pt=float(font_size_pt),
@@ -937,14 +978,16 @@ def _fit_ocr_text_style(
             bbox_h_pt=float(bbox_h_pt),
         )
     elif (
-        wrap_override is None
+        allow_wrap_recovery
         and (not is_heading)
         and ("\n" not in normalized)
-        and len(normalized.replace("\n", "").strip()) >= 16
+        and compact_len >= 16
     ):
         # Adaptive fallback: if single-line rendering leaves too much vertical
         # whitespace, try wrapped fitting and accept it only when it materially
-        # improves box fill (user-reported "上下偏离太远" cases).
+        # improves box fill. Treat explicit `wrap_override=False` as a weak
+        # veto for very long OCR paragraphs so coarse doc-parser boxes can
+        # still recover from tiny illegible single-line output.
         single_fill = (float(font_size_pt) * float(line_height)) / max(
             1.0, float(bbox_h_pt)
         )

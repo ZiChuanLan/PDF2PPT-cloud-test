@@ -1,4 +1,4 @@
-"""Optional PaddleOCR-VL doc_parser prewarm helpers for container startup."""
+"""Paddle model prewarm helpers for container startup."""
 
 from __future__ import annotations
 
@@ -7,12 +7,23 @@ import logging
 import os
 import time
 
-from app.convert.ocr.ai_client import AiOcrClient
+from app.convert.ocr import (
+    ROUTE_KIND_REMOTE_DOC_PARSER,
+    create_remote_ocr_client,
+)
 from app.convert.ocr.base import _clean_str, _env_flag
 from app.convert.ocr.utils import _is_paddleocr_vl_model
 from app.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class LocalPaddleLayoutPrewarmConfig:
+    """Resolved config for optional PP-DocLayout startup prewarm."""
+
+    model_name: str
+    service_role: str
 
 
 @dataclass(frozen=True)
@@ -43,10 +54,8 @@ def _resolve_service_role(explicit_role: str | None = None) -> str:
     return role.lower() or "unknown"
 
 
-def _should_prewarm_for_role(service_role: str) -> bool:
-    target_raw = (
-        _clean_str(os.getenv("OCR_PADDLE_VL_PREWARM_TARGET")) or "worker"
-    ).lower()
+def _should_prewarm_for_role(service_role: str, *, env_name: str) -> bool:
+    target_raw = (_clean_str(os.getenv(env_name)) or "worker").lower()
     if target_raw in {"all", "both", "*"}:
         return True
     targets = {
@@ -55,6 +64,29 @@ def _should_prewarm_for_role(service_role: str) -> bool:
         if token.strip()
     }
     return service_role.lower() in targets
+
+
+def resolve_local_paddle_layout_prewarm_config(
+    *,
+    service_role: str | None = None,
+) -> LocalPaddleLayoutPrewarmConfig | None:
+    """Resolve optional PP-DocLayout startup prewarm config."""
+
+    if not _env_flag("OCR_PADDLE_LAYOUT_PREWARM", default=False):
+        return None
+
+    resolved_role = _resolve_service_role(service_role)
+    if not _should_prewarm_for_role(
+        resolved_role,
+        env_name="OCR_PADDLE_LAYOUT_PREWARM_TARGET",
+    ):
+        return None
+
+    model_name = _clean_str(os.getenv("OCR_PADDLE_LAYOUT_PREWARM_MODEL"))
+    return LocalPaddleLayoutPrewarmConfig(
+        model_name=model_name or "PP-DocLayoutV3",
+        service_role=resolved_role,
+    )
 
 
 def resolve_paddle_doc_prewarm_config(
@@ -67,7 +99,10 @@ def resolve_paddle_doc_prewarm_config(
         return None
 
     resolved_role = _resolve_service_role(service_role)
-    if not _should_prewarm_for_role(resolved_role):
+    if not _should_prewarm_for_role(
+        resolved_role,
+        env_name="OCR_PADDLE_VL_PREWARM_TARGET",
+    ):
         return None
 
     model = _clean_str(os.getenv("OCR_PADDLE_VL_PREWARM_MODEL")) or _clean_str(
@@ -103,6 +138,39 @@ def resolve_paddle_doc_prewarm_config(
     )
 
 
+def run_local_paddle_layout_prewarm(*, service_role: str | None = None) -> bool:
+    """Download PP-DocLayout model weights during container startup."""
+
+    config = resolve_local_paddle_layout_prewarm_config(service_role=service_role)
+    if config is None:
+        logger.info(
+            "Skipping PP-DocLayout prewarm (service_role=%s)",
+            _resolve_service_role(service_role),
+        )
+        return False
+
+    started_at = time.perf_counter()
+    try:
+        import paddlex
+
+        paddlex.create_model(config.model_name)
+        elapsed_s = time.perf_counter() - started_at
+        logger.info(
+            "PP-DocLayout prewarm finished in %.2fs (service_role=%s, model=%s)",
+            elapsed_s,
+            config.service_role,
+            config.model_name,
+        )
+        return True
+    except Exception:
+        elapsed_s = time.perf_counter() - started_at
+        logger.exception(
+            "PP-DocLayout prewarm failed after %.2fs; continuing without local layout model cache",
+            elapsed_s,
+        )
+        return False
+
+
 def run_paddle_doc_prewarm(*, service_role: str | None = None) -> bool:
     """Prewarm PaddleOCR-VL doc_parser if explicitly enabled."""
 
@@ -116,11 +184,13 @@ def run_paddle_doc_prewarm(*, service_role: str | None = None) -> bool:
 
     started_at = time.perf_counter()
     try:
-        client = AiOcrClient(
-            api_key=config.api_key,
-            base_url=config.base_url,
-            model=config.model,
-            provider=config.provider,
+        client = create_remote_ocr_client(
+            requested_provider="aiocr",
+            route_kind=ROUTE_KIND_REMOTE_DOC_PARSER,
+            ai_api_key=config.api_key,
+            ai_base_url=config.base_url,
+            ai_model=config.model,
+            ai_provider=config.provider,
             paddle_doc_max_side_px=config.max_side_px,
         )
         client._get_paddle_doc_parser()
@@ -152,6 +222,7 @@ def main() -> int:
     """CLI entrypoint used by container startup scripts."""
 
     setup_logging(os.getenv("LOG_LEVEL", "INFO"))
+    run_local_paddle_layout_prewarm()
     run_paddle_doc_prewarm()
     return 0
 

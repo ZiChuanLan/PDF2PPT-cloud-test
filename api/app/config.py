@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     # degrade on others and increases CPU/memory usage. Keep conservative defaults.
     ocr_render_dpi: int = 200
     scanned_render_dpi: int = 200
+    # Large multi-page jobs can spend a lot of time exporting debug/preview
+    # images that are not required for the final PPTX output.
+    export_ocr_overlay_images: bool = False
+    export_layout_assist_debug_images: bool = False
+    # Final preview images are useful for QA, but they are pure extra output and
+    # add avoidable rendering work. Keep them opt-in for speed-focused runs.
+    export_final_preview_images: bool = False
+    export_final_preview_max_pages: int = 5
     siliconflow_api_key: str | None = None
     siliconflow_base_url: str | None = "https://api.siliconflow.cn/v1"
     siliconflow_model: str | None = "Pro/deepseek-ai/deepseek-ocr"

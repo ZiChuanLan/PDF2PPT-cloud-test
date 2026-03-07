@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 import time
 from pathlib import Path
@@ -76,6 +77,446 @@ def _summarize_ocr_page_runtime(
     }
 
 
+def _format_ocr_progress_message(
+    *,
+    ocr_page_processed: int,
+    ocr_page_targets: int,
+    pdf_page_index: int,
+    source_page_count: int,
+    overall_progress: int,
+) -> str:
+    ocr_total = max(1, int(ocr_page_targets))
+    ocr_stage_percent = int(
+        round((max(0, int(ocr_page_processed) - 1) / float(ocr_total)) * 100.0)
+    )
+    pdf_page_number = max(1, int(pdf_page_index) + 1)
+    pdf_total = max(pdf_page_number, int(source_page_count or 0))
+    return (
+        "OCR 识别中（"
+        f"OCR页 {int(ocr_page_processed)}/{ocr_total}，"
+        f"PDF页 {pdf_page_number}/{pdf_total}，"
+        f"OCR阶段 {ocr_stage_percent}%，"
+        f"总进度 {int(overall_progress)}%"
+        "）"
+    )
+
+
+def _format_parallel_ocr_progress_message(
+    *,
+    completed_pages: int,
+    total_pages: int,
+    running_pages: int,
+    page_concurrency: int,
+    latest_pdf_page_index: int | None,
+    source_page_count: int,
+    overall_progress: int,
+) -> str:
+    pdf_page_number = (
+        max(1, int(latest_pdf_page_index) + 1)
+        if latest_pdf_page_index is not None
+        else None
+    )
+    pdf_total = max(
+        int(source_page_count or 0),
+        pdf_page_number or 1,
+    )
+    latest_page_text = (
+        f"，最近 PDF页 {pdf_page_number}/{pdf_total}"
+        if pdf_page_number is not None
+        else ""
+    )
+    return (
+        "OCR 识别中（"
+        f"已完成 {int(completed_pages)}/{max(1, int(total_pages))} 页，"
+        f"运行中 {max(0, int(running_pages))} 页，"
+        f"页并发 {max(1, int(page_concurrency))}"
+        f"{latest_page_text}，"
+        f"总进度 {int(overall_progress)}%"
+        "）"
+    )
+
+
+def _process_parallel_ai_ocr_page(
+    *,
+    page: dict[str, Any],
+    input_pdf: Path,
+    ocr_dir: Path,
+    ocr_runtime_factory: Callable[[], Any],
+    linebreak_assist_effective: bool | None,
+    ocr_render_dpi: int,
+    ocr_page_timeout: int,
+    ocr_image_region_timeout: int,
+    export_overlay_images: bool,
+    abort_if_cancelled: Callable[..., None],
+) -> dict[str, Any]:
+    abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
+    page_index = int(page.get("page_index") or 0)
+    page_w_pt = float(page.get("page_width_pt") or 0)
+    page_h_pt = float(page.get("page_height_pt") or 0)
+    if page_w_pt <= 0 or page_h_pt <= 0:
+        return {
+            "page_index": page_index,
+            "page_warnings": [],
+            "ir_warnings": [],
+            "elements": [],
+            "image_regions": [],
+            "debug_entry": {
+                "page_index": page_index,
+                "skipped": "invalid_dimensions",
+                "page_width_pt": page_w_pt,
+                "page_height_pt": page_h_pt,
+            },
+        }
+
+    runtime = ocr_runtime_factory()
+    ocr_manager = getattr(runtime, "ocr_manager", None)
+    if ocr_manager is None:
+        raise RuntimeError("parallel OCR runtime has no ocr_manager")
+    text_refiner = getattr(runtime, "text_refiner", None)
+    linebreak_refiner = getattr(runtime, "linebreak_refiner", None)
+    strict_no_fallback = bool(getattr(runtime, "strict_ocr_mode", True))
+    effective_ocr_provider = str(
+        getattr(runtime, "effective_ocr_provider", None) or "aiocr"
+    )
+    route_kind = getattr(ocr_manager, "route_kind", None)
+
+    try:
+        pdf_doc = pymupdf.open(str(input_pdf))
+        try:
+            abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
+            pdf_page = pdf_doc.load_page(page_index)
+            pix = pdf_page.get_pixmap(dpi=int(ocr_render_dpi), alpha=False)
+        finally:
+            pdf_doc.close()
+    except Exception as e:
+        logger.warning("Failed to render parallel OCR page %s: %s", page_index, e)
+        return {
+            "page_index": page_index,
+            "page_warnings": [],
+            "ir_warnings": [],
+            "elements": [],
+            "image_regions": [],
+            "debug_entry": {
+                "page_index": page_index,
+                "error": f"render_failed: {e!s}",
+            },
+        }
+
+    image_path = ocr_dir / f"page-{page_index:04d}.png"
+    try:
+        pix.save(str(image_path))
+    except Exception as e:
+        logger.warning("Failed to save parallel OCR image %s: %s", image_path, e)
+        return {
+            "page_index": page_index,
+            "page_warnings": [],
+            "ir_warnings": [],
+            "elements": [],
+            "image_regions": [],
+            "debug_entry": {
+                "page_index": page_index,
+                "error": f"image_save_failed: {e!s}",
+            },
+        }
+
+    ocr_call_started = time.perf_counter()
+    logger.info(
+        "Starting parallel OCR page (pdf_page=%s, provider=%s, route=%s, timeout_s=%s, image=%s)",
+        page_index + 1,
+        effective_ocr_provider,
+        route_kind,
+        ocr_page_timeout,
+        image_path.name,
+    )
+
+    try:
+        abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
+        ocr_elements = run_in_daemon_thread_with_timeout(
+            lambda: ocr_image_to_elements(
+                str(image_path),
+                page_width_pt=page_w_pt,
+                page_height_pt=page_h_pt,
+                ocr_manager=ocr_manager,
+                text_refiner=text_refiner,
+                linebreak_refiner=linebreak_refiner,
+                linebreak_assist=linebreak_assist_effective,
+                strict_no_fallback=bool(strict_no_fallback),
+            ),
+            timeout_s=float(ocr_page_timeout),
+            label=f"worker:ocr_page:{page_index}",
+        )
+    except Exception as e:
+        cause = getattr(e, "__cause__", None)
+        details = f"{e!s}"
+        if cause is not None:
+            details = f"{details}; cause={cause!s}"
+        logger.warning(
+            "Parallel OCR failed for page %s (provider=%s): %s",
+            page_index,
+            effective_ocr_provider,
+            details,
+        )
+        details_lower = details.lower()
+        is_timeout_error = isinstance(e, TimeoutError) or (
+            "timeout" in details_lower or "timed out" in details_lower
+        )
+        if is_timeout_error and not strict_no_fallback:
+            return {
+                "page_index": page_index,
+                "page_warnings": [
+                    f"ocr_timeout_best_effort: provider={effective_ocr_provider}, page={page_index + 1}, parallel=1"
+                ],
+                "ir_warnings": [],
+                "elements": [],
+                "image_regions": [],
+                "debug_entry": {
+                    "page_index": page_index,
+                    "warning": "ocr_timeout",
+                    "provider": effective_ocr_provider,
+                    "error": details,
+                },
+            }
+
+        nonfatal_empty_ocr = any(
+            marker in details_lower
+            for marker in (
+                "ai ocr returned no items",
+                "ai ocr returned empty elements",
+                "ai ocr returned no parseable items",
+            )
+        )
+        if nonfatal_empty_ocr:
+            if strict_no_fallback:
+                raise AppException(
+                    code=ErrorCode.OCR_FAILED,
+                    message=(
+                        f"{effective_ocr_provider.upper()} returned empty OCR result on page {page_index + 1}"
+                    ),
+                    details={
+                        "page_index": page_index,
+                        "provider": effective_ocr_provider,
+                        "reason": details,
+                    },
+                ) from e
+            return {
+                "page_index": page_index,
+                "page_warnings": [
+                    f"ocr_empty_result: provider={effective_ocr_provider}, page={page_index + 1}"
+                ],
+                "ir_warnings": [],
+                "elements": [],
+                "image_regions": [],
+                "debug_entry": {
+                    "page_index": page_index,
+                    "warning": "ocr_empty_result",
+                    "provider": effective_ocr_provider,
+                    "error": details,
+                },
+            }
+
+        if strict_no_fallback:
+            raise AppException(
+                code=ErrorCode.OCR_FAILED,
+                message=(
+                    f"{effective_ocr_provider.upper()} failed on page {page_index + 1}: {details}"
+                ),
+                details={
+                    "page_index": page_index,
+                    "provider": effective_ocr_provider,
+                    "reason": details,
+                },
+            ) from e
+
+        return {
+            "page_index": page_index,
+            "page_warnings": [
+                f"ocr_failed_best_effort: provider={effective_ocr_provider}, page={page_index + 1}"
+            ],
+            "ir_warnings": [],
+            "elements": [],
+            "image_regions": [],
+            "debug_entry": {
+                "page_index": page_index,
+                "error": f"ocr_failed: {details}",
+            },
+        }
+
+    elapsed_ms = int(round(max(0.0, time.perf_counter() - ocr_call_started) * 1000.0))
+    logger.info(
+        "Finished parallel OCR page (pdf_page=%s, provider=%s, route=%s, elapsed_ms=%s, elements=%s)",
+        page_index + 1,
+        effective_ocr_provider,
+        route_kind,
+        elapsed_ms,
+        len(ocr_elements or []),
+    )
+
+    used_provider = getattr(ocr_manager, "last_provider_name", None)
+    fallback_reason = getattr(ocr_manager, "last_fallback_reason", None)
+    quality_notes_raw = getattr(ocr_manager, "last_quality_notes", [])
+    quality_notes = [
+        str(note).strip()
+        for note in (
+            quality_notes_raw if isinstance(quality_notes_raw, list) else []
+        )
+        if str(note).strip()
+    ]
+    page_warnings = list(quality_notes)
+    ir_warnings = [f"{note}:page={page_index + 1}" for note in quality_notes]
+
+    detected_image_regions_pt: list[list[float]] = []
+    image_region_error: str | None = None
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as img_probe:
+            image_width_px, image_height_px = img_probe.size
+
+        detected_image_regions_px = run_in_daemon_thread_with_timeout(
+            lambda: ocr_manager.detect_image_regions(str(image_path)),
+            timeout_s=float(max(1, ocr_image_region_timeout)),
+            label=f"worker:ocr_image_regions:{page_index}",
+        )
+        for bbox in detected_image_regions_px or []:
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                continue
+            try:
+                bbox_pt = ocr_manager.convert_bbox_to_pdf_coords(
+                    bbox=bbox,
+                    image_width=int(image_width_px),
+                    image_height=int(image_height_px),
+                    page_width_pt=page_w_pt,
+                    page_height_pt=page_h_pt,
+                )
+            except Exception:
+                continue
+            detected_image_regions_pt.append(list(bbox_pt))
+    except TimeoutError:
+        image_region_error = (
+            "image_region_detection_timeout:"
+            f"{int(max(1, ocr_image_region_timeout))}s"
+        )
+    except Exception as e:
+        image_region_error = str(e)
+
+    overlay_path, bbox_stats = _maybe_export_ocr_overlay_image(
+        enabled=export_overlay_images,
+        image_path=image_path,
+        ocr_dir=ocr_dir,
+        page_index=page_index,
+        page_w_pt=page_w_pt,
+        page_h_pt=page_h_pt,
+        ocr_elements=ocr_elements if isinstance(ocr_elements, list) else None,
+    )
+
+    return {
+        "page_index": page_index,
+        "page_warnings": page_warnings,
+        "ir_warnings": ir_warnings,
+        "elements": ocr_elements or [],
+        "image_regions": detected_image_regions_pt,
+        "debug_entry": {
+            "page_index": page_index,
+            "elements": len(ocr_elements or []),
+            "image_regions": len(detected_image_regions_pt),
+            "image_region_detection_error": image_region_error,
+            "used_provider": used_provider,
+            "fallback_reason": fallback_reason,
+            "quality_notes": quality_notes,
+            "overlay_image": str(overlay_path) if overlay_path else None,
+            "bbox_stats": bbox_stats,
+        },
+    }
+
+
+def _maybe_export_ocr_overlay_image(
+    *,
+    enabled: bool,
+    image_path: Path,
+    ocr_dir: Path,
+    page_index: int,
+    page_w_pt: float,
+    page_h_pt: float,
+    ocr_elements: list[dict[str, Any]] | None,
+) -> tuple[Path | None, dict[str, Any]]:
+    if not enabled:
+        return None, {}
+
+    try:
+        from PIL import Image, ImageDraw
+
+        img = Image.open(image_path).convert("RGB")
+        gray = img.convert("L")
+        W, H = img.size
+        draw = ImageDraw.Draw(img)
+
+        stds: list[float] = []
+        out_of_bounds = 0
+        low_variance = 0
+        low_std_threshold = 5.0
+
+        sx = float(W) / float(page_w_pt) if page_w_pt else 1.0
+        sy = float(H) / float(page_h_pt) if page_h_pt else 1.0
+
+        for el in ocr_elements or []:
+            bbox_pt = el.get("bbox_pt")
+            if not isinstance(bbox_pt, list) or len(bbox_pt) != 4:
+                continue
+            try:
+                x0, y0, x1, y1 = (
+                    float(bbox_pt[0]),
+                    float(bbox_pt[1]),
+                    float(bbox_pt[2]),
+                    float(bbox_pt[3]),
+                )
+            except Exception:
+                continue
+
+            x0p = int(round(x0 * sx))
+            y0p = int(round(y0 * sy))
+            x1p = int(round(x1 * sx))
+            y1p = int(round(y1 * sy))
+
+            if x0p < 0 or y0p < 0 or x1p > W or y1p > H:
+                out_of_bounds += 1
+
+            # Clamp for drawing/stat sampling.
+            x0c = max(0, min(W - 1, x0p))
+            y0c = max(0, min(H - 1, y0p))
+            x1c = max(0, min(W, x1p))
+            y1c = max(0, min(H, y1p))
+            if x1c <= x0c or y1c <= y0c:
+                continue
+
+            draw.rectangle([x0c, y0c, x1c, y1c], outline=(255, 0, 0), width=2)
+
+            crop = gray.crop((x0c, y0c, x1c, y1c))
+            target_w = max(8, min(64, crop.width // 8))
+            target_h = max(8, min(64, crop.height // 8))
+            small = crop.resize((target_w, target_h))
+            pixels = list(small.getdata())
+            if not pixels:
+                continue
+            mean = sum(pixels) / len(pixels)
+            var = sum((p - mean) ** 2 for p in pixels) / len(pixels)
+            std = float(var**0.5)
+            stds.append(std)
+            if std <= low_std_threshold:
+                low_variance += 1
+
+        overlay_path = ocr_dir / f"page-{page_index:04d}.overlay.png"
+        img.save(overlay_path)
+
+        return overlay_path, {
+            "out_of_bounds": out_of_bounds,
+            "low_variance": low_variance,
+            "low_std_threshold": low_std_threshold,
+            "median_std": (sorted(stds)[len(stds) // 2] if stds else None),
+        }
+    except Exception as e:
+        return None, {"overlay_error": str(e)}
+
+
 def run_ocr_stage(
     *,
     ir: dict[str, Any],
@@ -91,8 +532,11 @@ def run_ocr_stage(
     effective_ocr_provider: str,
     ocr_render_dpi: int,
     ocr_debug: dict[str, Any],
+    export_overlay_images: bool,
     set_processing_progress: Callable[[JobStage, int, str], None],
     abort_if_cancelled: Callable[..., None],
+    ocr_setup: Any | None = None,
+    ocr_runtime_factory: Callable[[], Any] | None = None,
 ) -> None:
     ocr_dir = artifacts_dir / "ocr"
     ocr_dir.mkdir(parents=True, exist_ok=True)
@@ -136,7 +580,178 @@ def run_ocr_stage(
     ocr_timeout_break_after = max(1, ocr_timeout_break_after)
     ocr_consecutive_timeouts = 0
     ocr_stage_deadline = time.monotonic() + ocr_total_timeout
+    source_page_count = int(
+        ir.get("source_page_count")
+        or ir.get("page_count")
+        or len(ir.get("pages") or [])
+        or 0
+    )
+    route_kind = str(getattr(ocr_manager, "route_kind", "") or "")
+    page_concurrency = max(
+        1,
+        int(
+            getattr(ocr_setup, "effective_ocr_ai_page_concurrency", 1)
+            if ocr_setup is not None
+            else 1
+        ),
+    )
+    use_parallel_ai_ocr = (
+        page_concurrency > 1
+        and str(effective_ocr_provider or "").strip().lower() == "aiocr"
+        and route_kind in {"remote_prompt_ocr", "local_layout_block_ocr"}
+        and callable(ocr_runtime_factory)
+    )
     try:
+        if use_parallel_ai_ocr:
+            ocr_pages = [
+                page
+                for page in (ir.get("pages") or [])
+                if isinstance(page, dict) and not page.get("has_text_layer")
+            ]
+            completed_pages = 0
+            latest_pdf_page_index: int | None = None
+            running_initial = min(page_concurrency, len(ocr_pages))
+            set_processing_progress(
+                JobStage.ocr,
+                36,
+                _format_parallel_ocr_progress_message(
+                    completed_pages=0,
+                    total_pages=len(ocr_pages),
+                    running_pages=running_initial,
+                    page_concurrency=page_concurrency,
+                    latest_pdf_page_index=None,
+                    source_page_count=source_page_count,
+                    overall_progress=36,
+                ),
+            )
+            abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
+
+            page_iter = iter(ocr_pages)
+            future_map: dict[Any, dict[str, Any]] = {}
+            stop_submitting_new_pages = False
+            with ThreadPoolExecutor(max_workers=page_concurrency) as executor:
+                for _ in range(running_initial):
+                    page = next(page_iter, None)
+                    if page is None:
+                        break
+                    future = executor.submit(
+                        _process_parallel_ai_ocr_page,
+                        page=page,
+                        input_pdf=input_pdf,
+                        ocr_dir=ocr_dir,
+                        ocr_runtime_factory=ocr_runtime_factory,
+                        linebreak_assist_effective=linebreak_assist_effective,
+                        ocr_render_dpi=int(ocr_render_dpi),
+                        ocr_page_timeout=int(ocr_page_timeout),
+                        ocr_image_region_timeout=int(ocr_image_region_timeout),
+                        export_overlay_images=bool(export_overlay_images),
+                        abort_if_cancelled=abort_if_cancelled,
+                    )
+                    future_map[future] = page
+
+                while future_map:
+                    done_futures, _ = wait(
+                        set(future_map),
+                        timeout=1.0,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    if not done_futures:
+                        if (
+                            not stop_submitting_new_pages
+                            and time.monotonic() >= ocr_stage_deadline
+                        ):
+                            stop_submitting_new_pages = True
+                            logger.warning(
+                                "Parallel OCR stage timeout (%ss) exceeded – stop scheduling new pages",
+                                ocr_total_timeout,
+                            )
+                            ir.setdefault("warnings", []).append(
+                                "ocr_parallel_total_timeout:"
+                                f" total_timeout_s={ocr_total_timeout}"
+                            )
+                        abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
+                        continue
+                    for future in done_futures:
+                        page = future_map.pop(future)
+                        result = future.result()
+                        latest_pdf_page_index = int(result.get("page_index") or 0)
+                        for note in result.get("page_warnings") or []:
+                            if str(note).strip():
+                                page.setdefault("warnings", []).append(str(note).strip())
+                        for note in result.get("ir_warnings") or []:
+                            if str(note).strip():
+                                ir.setdefault("warnings", []).append(str(note).strip())
+                        image_regions = result.get("image_regions") or []
+                        if image_regions:
+                            page["image_regions"] = image_regions
+                        ocr_elements = result.get("elements") or []
+                        if ocr_elements:
+                            page.setdefault("elements", []).extend(ocr_elements)
+                            page["ocr_used"] = True
+                        debug_entry = result.get("debug_entry")
+                        if isinstance(debug_entry, dict):
+                            ocr_debug["pages"].append(debug_entry)
+
+                        completed_pages += 1
+                        if (
+                            not stop_submitting_new_pages
+                            and time.monotonic() >= ocr_stage_deadline
+                        ):
+                            stop_submitting_new_pages = True
+                            logger.warning(
+                                "Parallel OCR stage timeout (%ss) exceeded – stop scheduling new pages",
+                                ocr_total_timeout,
+                            )
+                            ir.setdefault("warnings", []).append(
+                                "ocr_parallel_total_timeout:"
+                                f" total_timeout_s={ocr_total_timeout}"
+                            )
+                        next_page = None if stop_submitting_new_pages else next(page_iter, None)
+                        if next_page is not None:
+                            next_future = executor.submit(
+                                _process_parallel_ai_ocr_page,
+                                page=next_page,
+                                input_pdf=input_pdf,
+                                ocr_dir=ocr_dir,
+                                ocr_runtime_factory=ocr_runtime_factory,
+                                linebreak_assist_effective=linebreak_assist_effective,
+                                ocr_render_dpi=int(ocr_render_dpi),
+                                ocr_page_timeout=int(ocr_page_timeout),
+                                ocr_image_region_timeout=int(ocr_image_region_timeout),
+                                export_overlay_images=bool(export_overlay_images),
+                                abort_if_cancelled=abort_if_cancelled,
+                            )
+                            future_map[next_future] = next_page
+
+                        progress_value = _progress_in_span(
+                            completed_pages,
+                            max(1, len(ocr_pages)),
+                            start=36,
+                            end=68,
+                        )
+                        set_processing_progress(
+                            JobStage.ocr,
+                            progress_value,
+                            _format_parallel_ocr_progress_message(
+                                completed_pages=completed_pages,
+                                total_pages=len(ocr_pages),
+                                running_pages=len(future_map),
+                                page_concurrency=page_concurrency,
+                                latest_pdf_page_index=latest_pdf_page_index,
+                                source_page_count=source_page_count,
+                                overall_progress=progress_value,
+                            ),
+                        )
+                        abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
+
+            set_processing_progress(
+                JobStage.ocr,
+                68,
+                "OCR 阶段完成（并发模式）",
+            )
+            abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
+            return
+
         for page in ir.get("pages") or []:
             abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
             # --- overall OCR stage timeout ---
@@ -158,19 +773,26 @@ def run_ocr_stage(
                 continue
 
             ocr_page_processed += 1
+            page_index = int(page.get("page_index") or 0)
+            progress_value = _progress_in_span(
+                ocr_page_processed - 1,
+                max(1, ocr_page_targets),
+                start=36,
+                end=68,
+            )
             set_processing_progress(
                 JobStage.ocr,
-                _progress_in_span(
-                    ocr_page_processed - 1,
-                    max(1, ocr_page_targets),
-                    start=36,
-                    end=68,
+                progress_value,
+                _format_ocr_progress_message(
+                    ocr_page_processed=ocr_page_processed,
+                    ocr_page_targets=ocr_page_targets,
+                    pdf_page_index=page_index,
+                    source_page_count=source_page_count,
+                    overall_progress=progress_value,
                 ),
-                f"OCR 识别中（第 {ocr_page_processed}/{max(1, ocr_page_targets)} 页）",
             )
             abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
 
-            page_index = int(page.get("page_index") or 0)
             page_w_pt = float(page.get("page_width_pt") or 0)
             page_h_pt = float(page.get("page_height_pt") or 0)
             if page_w_pt <= 0 or page_h_pt <= 0:
@@ -211,6 +833,19 @@ def run_ocr_stage(
                 continue
 
             fallback_reason: str | None = None
+            ocr_call_started = time.perf_counter()
+            route_kind = getattr(ocr_manager, "route_kind", None)
+            logger.info(
+                "Starting OCR page (ocr_page=%s/%s, pdf_page=%s/%s, provider=%s, route=%s, timeout_s=%s, image=%s)",
+                ocr_page_processed,
+                max(1, ocr_page_targets),
+                page_index + 1,
+                max(1, source_page_count),
+                effective_ocr_provider,
+                route_kind,
+                ocr_page_timeout,
+                image_path.name,
+            )
 
             try:
                 abort_if_cancelled(stage=JobStage.ocr, message="Job cancelled")
@@ -343,6 +978,20 @@ def run_ocr_stage(
                     f"ocr_failed_best_effort: provider={provider_choice}, page={page_index + 1}"
                 )
                 continue
+            elapsed_ms = int(
+                round(max(0.0, time.perf_counter() - ocr_call_started) * 1000.0)
+            )
+            logger.info(
+                "Finished OCR page (ocr_page=%s/%s, pdf_page=%s/%s, provider=%s, route=%s, elapsed_ms=%s, elements=%s)",
+                ocr_page_processed,
+                max(1, ocr_page_targets),
+                page_index + 1,
+                max(1, source_page_count),
+                effective_ocr_provider,
+                route_kind,
+                elapsed_ms,
+                len(ocr_elements or []),
+            )
 
             ocr_consecutive_timeouts = 0
             used_provider = getattr(ocr_manager, "last_provider_name", None)
@@ -410,114 +1059,34 @@ def run_ocr_stage(
             # Debug/self-check: write an overlay image with OCR bboxes drawn
             # on top of the rendered page. This makes coordinate issues
             # immediately visible without opening PowerPoint.
-            overlay_path: Path | None = None
-            bbox_stats: dict[str, Any] = {}
-            try:
-                from PIL import Image, ImageDraw
-
-                img = Image.open(image_path).convert("RGB")
-                gray = img.convert("L")
-                W, H = img.size
-                draw = ImageDraw.Draw(img)
-
-                stds: list[float] = []
-                out_of_bounds = 0
-                low_variance = 0
-                low_std_threshold = 5.0
-
-                sx = float(W) / float(page_w_pt) if page_w_pt else 1.0
-                sy = float(H) / float(page_h_pt) if page_h_pt else 1.0
-
-                for el in ocr_elements or []:
-                    bbox_pt = el.get("bbox_pt")
-                    if not isinstance(bbox_pt, list) or len(bbox_pt) != 4:
-                        continue
-                    try:
-                        x0, y0, x1, y1 = (
-                            float(bbox_pt[0]),
-                            float(bbox_pt[1]),
-                            float(bbox_pt[2]),
-                            float(bbox_pt[3]),
-                        )
-                    except Exception:
-                        continue
-
-                    x0p = int(round(x0 * sx))
-                    y0p = int(round(y0 * sy))
-                    x1p = int(round(x1 * sx))
-                    y1p = int(round(y1 * sy))
-
-                    if x0p < 0 or y0p < 0 or x1p > W or y1p > H:
-                        out_of_bounds += 1
-
-                    # Clamp for drawing/stat sampling.
-                    x0c = max(0, min(W - 1, x0p))
-                    y0c = max(0, min(H - 1, y0p))
-                    x1c = max(0, min(W, x1p))
-                    y1c = max(0, min(H, y1p))
-                    if x1c <= x0c or y1c <= y0c:
-                        continue
-
-                    draw.rectangle([x0c, y0c, x1c, y1c], outline=(255, 0, 0), width=2)
-
-                    crop = gray.crop((x0c, y0c, x1c, y1c))
-                    target_w = max(8, min(64, crop.width // 8))
-                    target_h = max(8, min(64, crop.height // 8))
-                    small = crop.resize((target_w, target_h))
-                    pixels = list(small.getdata())
-                    if not pixels:
-                        continue
-                    mean = sum(pixels) / len(pixels)
-                    var = sum((p - mean) ** 2 for p in pixels) / len(pixels)
-                    std = float(var**0.5)
-                    stds.append(std)
-                    if std <= low_std_threshold:
-                        low_variance += 1
-
-                overlay_path = ocr_dir / f"page-{page_index:04d}.overlay.png"
-                img.save(overlay_path)
-
-                bbox_stats = {
-                    "out_of_bounds": out_of_bounds,
-                    "low_variance": low_variance,
-                    "low_std_threshold": low_std_threshold,
-                    "median_std": (sorted(stds)[len(stds) // 2] if stds else None),
-                }
-            except Exception as e:
-                bbox_stats = {"overlay_error": str(e)}
+            overlay_path, bbox_stats = _maybe_export_ocr_overlay_image(
+                enabled=export_overlay_images,
+                image_path=image_path,
+                ocr_dir=ocr_dir,
+                page_index=page_index,
+                page_w_pt=page_w_pt,
+                page_h_pt=page_h_pt,
+                ocr_elements=ocr_elements if isinstance(ocr_elements, list) else None,
+            )
             if ocr_elements:
                 page.setdefault("elements", []).extend(ocr_elements)
                 page["ocr_used"] = True
                 # Keep has_text_layer=False for scanned PDFs so the PPTX
                 # generator can use the scanned-page strategy (background
                 # render + masking + editable overlay text).
-                ocr_debug["pages"].append(
-                    {
-                        "page_index": page_index,
-                        "elements": len(ocr_elements),
-                        "image_regions": len(detected_image_regions_pt),
-                        "image_region_detection_error": image_region_error,
-                        "used_provider": used_provider,
-                        "fallback_reason": fallback_reason,
-                        "quality_notes": quality_notes,
-                        "overlay_image": str(overlay_path) if overlay_path else None,
-                        "bbox_stats": bbox_stats,
-                    }
-                )
-            else:
-                ocr_debug["pages"].append(
-                    {
-                        "page_index": page_index,
-                        "elements": 0,
-                        "image_regions": len(detected_image_regions_pt),
-                        "image_region_detection_error": image_region_error,
-                        "used_provider": used_provider,
-                        "fallback_reason": fallback_reason,
-                        "quality_notes": quality_notes,
-                        "overlay_image": str(overlay_path) if overlay_path else None,
-                        "bbox_stats": bbox_stats,
-                    }
-                )
+            ocr_debug["pages"].append(
+                {
+                    "page_index": page_index,
+                    "elements": len(ocr_elements or []),
+                    "image_regions": len(detected_image_regions_pt),
+                    "image_region_detection_error": image_region_error,
+                    "used_provider": used_provider,
+                    "fallback_reason": fallback_reason,
+                    "quality_notes": quality_notes,
+                    "overlay_image": str(overlay_path) if overlay_path else None,
+                    "bbox_stats": bbox_stats,
+                }
+            )
         set_processing_progress(
             JobStage.ocr,
             68,

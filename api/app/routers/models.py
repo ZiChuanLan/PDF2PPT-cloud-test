@@ -90,7 +90,7 @@ def _is_explicit_ocr_model(model_id: str, item: Any) -> bool:
 def _is_ocr_model(model_id: str, item: Any) -> bool:
     # OCR capability in product settings now means a *dedicated OCR model*.
     # Generic vision/VL models remain available via `capability=vision` for
-    # layout assist / OCR post-process use, but should not appear in the
+    # local OCR post-process use, but should not appear in the
     # explicit OCR model picker.
     return _is_explicit_ocr_model(model_id, item)
 

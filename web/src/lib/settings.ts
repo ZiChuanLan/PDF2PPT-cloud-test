@@ -9,10 +9,10 @@ export type OcrProvider =
   | "tesseract"
   | "paddle_local"
 export type OcrAiProvider = "auto" | "openai" | "siliconflow" | "deepseek" | "ppio" | "novita"
-export type OcrAiLinebreakAssistMode = "auto" | "on" | "off"
+export type OcrAiChainMode = "direct" | "doc_parser" | "layout_block"
+export type OcrAiLayoutModel = "pp_doclayout_v3"
 export type LayoutAssistMode = "off" | "on" | "auto"
 export type VisionAssistMode = LayoutAssistMode
-export type OcrGeometryMode = "auto" | "local_tesseract" | "direct_ai"
 export type ScannedPageMode = "segmented" | "fullpage"
 export type MineruModelVersion = "pipeline" | "vlm" | "MinerU-HTML"
 export type TextEraseMode = "smart" | "fill"
@@ -64,9 +64,14 @@ export type Settings = {
   ocrAiProvider: OcrAiProvider
   ocrAiBaseUrl: string
   ocrAiModel: string
+  ocrAiChainMode: OcrAiChainMode
+  ocrAiLayoutModel: OcrAiLayoutModel
   ocrPaddleVlDocparserMaxSidePx: string
-  ocrAiLinebreakAssistMode: OcrAiLinebreakAssistMode
-  ocrGeometryMode: OcrGeometryMode
+  ocrAiPageConcurrency: string
+  ocrAiBlockConcurrency: string
+  ocrAiRequestsPerMinute: string
+  ocrAiTokensPerMinute: string
+  ocrAiMaxRetries: string
 }
 
 export const SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
@@ -136,20 +141,21 @@ export const defaultSettings: Settings = {
   ocrBaiduAppId: "",
   ocrBaiduApiKey: "",
   ocrBaiduSecretKey: "",
-  // Lower confidence improves recall on scan-heavy slide decks; text refinement (AI) can clean up later.
+  // Lower confidence improves recall on scan-heavy slide decks.
   ocrTesseractMinConfidence: "35",
   ocrTesseractLanguage: "chi_sim+eng",
   ocrAiApiKey: "",
   ocrAiProvider: "auto",
   ocrAiBaseUrl: "",
   ocrAiModel: "",
+  ocrAiChainMode: "direct",
+  ocrAiLayoutModel: "pp_doclayout_v3",
   ocrPaddleVlDocparserMaxSidePx: "2200",
-  // AI OCR line-break post-process policy. `auto` lets the backend decide
-  // based on the selected OCR model instead of piggybacking on layout assist.
-  ocrAiLinebreakAssistMode: "auto",
-  // OCR geometry strategy for AI OCR models.
-  // auto: use stable local geometry for generic VL, keep direct AI geometry for OCR-specialized models.
-  ocrGeometryMode: "auto",
+  ocrAiPageConcurrency: "1",
+  ocrAiBlockConcurrency: "",
+  ocrAiRequestsPerMinute: "",
+  ocrAiTokensPerMinute: "",
+  ocrAiMaxRetries: "0",
 }
 
 export function safeParseSettings(value: string | null): Partial<Settings> | null {
@@ -168,7 +174,14 @@ export function loadStoredSettings(): Settings {
   if (typeof window === "undefined") return defaultSettings
 
   const parsed = safeParseSettings(localStorage.getItem(SETTINGS_STORAGE_KEY))
-  const merged = { ...defaultSettings, ...(parsed ?? {}) } as Settings
+  const merged = {
+    ...defaultSettings,
+    ...(parsed ?? {}),
+  } as Settings & {
+    ocrGeometryMode?: unknown
+    ocrAiLinebreakAssist?: unknown
+    ocrAiLinebreakAssistMode?: unknown
+  }
   const parsedProvider = (parsed as { provider?: string } | null)?.provider
   const parsedPreferredMainProvider = (
     parsed as { preferredMainProvider?: string } | null
@@ -185,7 +198,7 @@ export function loadStoredSettings(): Settings {
   }
   if (parsedProvider === "v2" || parsedParseProvider === "v2") {
     // Backward compatibility: legacy "v2 full-page OCR" maps to the normal
-    // pipeline with `scannedPageMode=fullpage` + AI OCR settings.
+    // pipeline with `scannedPageMode=fullpage` + AIOCR settings.
     merged.provider = "siliconflow"
     merged.enableOcr = true
     merged.scannedPageMode = "fullpage"
@@ -332,6 +345,14 @@ export function loadStoredSettings(): Settings {
   if (!validOcrAiProviders.includes(merged.ocrAiProvider)) {
     merged.ocrAiProvider = "auto"
   }
+  const validOcrAiChainModes: OcrAiChainMode[] = ["direct", "doc_parser", "layout_block"]
+  if (!validOcrAiChainModes.includes(merged.ocrAiChainMode)) {
+    merged.ocrAiChainMode = "direct"
+  }
+  const validOcrAiLayoutModels: OcrAiLayoutModel[] = ["pp_doclayout_v3"]
+  if (!validOcrAiLayoutModels.includes(merged.ocrAiLayoutModel)) {
+    merged.ocrAiLayoutModel = "pp_doclayout_v3"
+  }
   const validTextEraseModes: TextEraseMode[] = ["smart", "fill"]
   if (!validTextEraseModes.includes(merged.textEraseMode)) {
     merged.textEraseMode = "fill"
@@ -377,53 +398,71 @@ export function loadStoredSettings(): Settings {
     merged.ocrPaddleVlDocparserMaxSidePx,
     defaultSettings.ocrPaddleVlDocparserMaxSidePx
   )
+  merged.ocrAiPageConcurrency = toNumberLikeString(
+    merged.ocrAiPageConcurrency,
+    defaultSettings.ocrAiPageConcurrency
+  )
+  merged.ocrAiBlockConcurrency = toNumberLikeString(
+    merged.ocrAiBlockConcurrency,
+    defaultSettings.ocrAiBlockConcurrency
+  )
+  merged.ocrAiRequestsPerMinute = toNumberLikeString(
+    merged.ocrAiRequestsPerMinute,
+    defaultSettings.ocrAiRequestsPerMinute
+  )
+  merged.ocrAiTokensPerMinute = toNumberLikeString(
+    merged.ocrAiTokensPerMinute,
+    defaultSettings.ocrAiTokensPerMinute
+  )
+  merged.ocrAiMaxRetries = toNumberLikeString(
+    merged.ocrAiMaxRetries,
+    defaultSettings.ocrAiMaxRetries
+  )
   const paddleDocMaxSidePx = Number(merged.ocrPaddleVlDocparserMaxSidePx)
   if (!Number.isFinite(paddleDocMaxSidePx) || paddleDocMaxSidePx < 0) {
     merged.ocrPaddleVlDocparserMaxSidePx = defaultSettings.ocrPaddleVlDocparserMaxSidePx
   } else {
     merged.ocrPaddleVlDocparserMaxSidePx = String(Math.round(paddleDocMaxSidePx))
   }
-  if (typeof merged.layoutAssistApplyImageRegions !== "boolean") {
-    merged.layoutAssistApplyImageRegions = false
+  const pageConcurrency = Number(merged.ocrAiPageConcurrency)
+  if (!Number.isFinite(pageConcurrency) || pageConcurrency < 1) {
+    merged.ocrAiPageConcurrency = defaultSettings.ocrAiPageConcurrency
+  } else {
+    merged.ocrAiPageConcurrency = String(Math.min(8, Math.round(pageConcurrency)))
   }
+  const normalizeOptionalPositiveIntString = (value: string): string => {
+    const trimmed = value.trim()
+    if (!trimmed) return ""
+    const parsed = Number(trimmed)
+    if (!Number.isFinite(parsed) || parsed <= 0) return ""
+    return String(Math.round(parsed))
+  }
+  merged.ocrAiBlockConcurrency = normalizeOptionalPositiveIntString(
+    merged.ocrAiBlockConcurrency
+  )
+  merged.ocrAiRequestsPerMinute = normalizeOptionalPositiveIntString(
+    merged.ocrAiRequestsPerMinute
+  )
+  merged.ocrAiTokensPerMinute = normalizeOptionalPositiveIntString(
+    merged.ocrAiTokensPerMinute
+  )
+  const maxRetries = Number(merged.ocrAiMaxRetries)
+  if (!Number.isFinite(maxRetries) || maxRetries < 0) {
+    merged.ocrAiMaxRetries = defaultSettings.ocrAiMaxRetries
+  } else {
+    merged.ocrAiMaxRetries = String(Math.min(8, Math.round(maxRetries)))
+  }
+  merged.enableLayoutAssist = false
+  merged.layoutAssistApplyImageRegions = false
   if (typeof merged.ocrStrictMode !== "boolean") {
     merged.ocrStrictMode = true
   }
-  const validLinebreakAssistModes: OcrAiLinebreakAssistMode[] = ["auto", "on", "off"]
-  const legacyLinebreakAssist = (parsed as { ocrAiLinebreakAssist?: unknown } | null)
-    ?.ocrAiLinebreakAssist
-  const legacyLinebreakMode = (parsed as { ocrAiLinebreakAssistMode?: unknown } | null)
-    ?.ocrAiLinebreakAssistMode
-  if (
-    typeof legacyLinebreakMode === "string" &&
-    validLinebreakAssistModes.includes(legacyLinebreakMode as OcrAiLinebreakAssistMode)
-  ) {
-    merged.ocrAiLinebreakAssistMode = legacyLinebreakMode as OcrAiLinebreakAssistMode
-  } else if (typeof legacyLinebreakAssist === "boolean") {
-    merged.ocrAiLinebreakAssistMode = legacyLinebreakAssist ? "on" : "off"
-  }
-  if (!validLinebreakAssistModes.includes(merged.ocrAiLinebreakAssistMode)) {
-    merged.ocrAiLinebreakAssistMode = "off"
-  }
-
-  const validLayoutAssistModes: LayoutAssistMode[] = ["off", "on", "auto"]
-  const legacyLayoutAssistMode: LayoutAssistMode = merged.enableLayoutAssist ? "auto" : "off"
-  if (!validLayoutAssistModes.includes(merged.visualAssistModeLocal)) {
-    merged.visualAssistModeLocal = legacyLayoutAssistMode
-  }
-  if (!validLayoutAssistModes.includes(merged.visualAssistModeRemote)) {
-    merged.visualAssistModeRemote = legacyLayoutAssistMode
-  }
-  if (!validLayoutAssistModes.includes(merged.visualAssistModeBaiduDoc)) {
-    merged.visualAssistModeBaiduDoc = "off"
-  }
-  if (!validLayoutAssistModes.includes(merged.visualAssistModeMineru)) {
-    merged.visualAssistModeMineru = merged.enableLayoutAssist ? "auto" : "off"
-  }
-
-  const validOcrGeometryModes: OcrGeometryMode[] = ["auto", "local_tesseract", "direct_ai"]
-  if (!validOcrGeometryModes.includes(merged.ocrGeometryMode)) {
-    merged.ocrGeometryMode = "auto"
-  }
+  merged.visualAssistModeLocal = "off"
+  merged.visualAssistModeRemote = "off"
+  merged.visualAssistModeBaiduDoc = "off"
+  merged.visualAssistModeMineru = "off"
+  delete merged.ocrGeometryMode
+  delete merged.ocrAiLinebreakAssist
+  delete merged.ocrAiLinebreakAssistMode
   return merged
 }
