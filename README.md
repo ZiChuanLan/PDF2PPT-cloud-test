@@ -1,4 +1,4 @@
-# ppt-opencode
+# pdf2ppt
 
 将 PDF（尤其是扫描版/图片版）转换为**高保真、可编辑**的 PPTX。
 
