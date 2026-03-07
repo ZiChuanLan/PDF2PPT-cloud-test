@@ -1,11 +1,22 @@
 """AI OCR client and text refinement utilities."""
 
+import contextvars
+import hashlib
 import json
 import logging
 import math
 import os
+from pathlib import Path
 import re
+import tempfile
+import threading
+import time
 from typing import Any, Dict, List
+
+try:
+    import fcntl
+except Exception:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 from PIL import Image
 
@@ -21,7 +32,6 @@ from .base import (
     _normalize_paddle_doc_server_url,
     _resolve_paddle_doc_model_and_pipeline,
     _run_in_daemon_thread_with_timeout,
-    _strip_loc_tokens,
     OcrProvider,
 )
 from .deepseek_parser import (
@@ -33,6 +43,14 @@ from .json_extraction import (
     _extract_json_list,
     _extract_message_text,
     _extract_partial_json_object_list,
+)
+from .result_parsing import (
+    _derive_paddle_doc_predict_max_pixels,
+    _extract_deepseek_image_regions,
+    _extract_image_regions_json,
+    _extract_paddle_doc_parser_output,
+    _normalize_bbox_px,
+    _scale_paddle_doc_parser_output,
 )
 from .utils import (
     _coerce_bbox_xyxy,
@@ -59,23 +77,6 @@ def _env_int(name: str, default: int) -> int:
     return int(value)
 
 
-def _normalize_bbox_px(bbox: Any) -> tuple[float, float, float, float] | None:
-    if not isinstance(bbox, list) or len(bbox) != 4:
-        return None
-    try:
-        x0, y0, x1, y1 = (
-            float(bbox[0]),
-            float(bbox[1]),
-            float(bbox[2]),
-            float(bbox[3]),
-        )
-    except Exception:
-        return None
-    if math.isnan(x0) or math.isnan(y0) or math.isnan(x1) or math.isnan(y1):
-        return None
-    return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
-
-
 class AiOcrClient(OcrProvider):
     """AI OCR using OpenAI-compatible vision models."""
 
@@ -86,6 +87,7 @@ class AiOcrClient(OcrProvider):
         base_url: str | None = None,
         model: str | None = None,
         provider: str | None = None,
+        paddle_doc_max_side_px: int | None = None,
     ):
         import openai
 
@@ -99,6 +101,11 @@ class AiOcrClient(OcrProvider):
         self._paddle_doc_pipeline_version: str | None = None
         self._paddle_doc_server_url: str | None = None
         self._paddle_doc_backend: str | None = None
+        self.last_image_regions_px: list[list[float]] = []
+        self.last_layout_blocks: list[dict[str, Any]] = []
+        self._last_layout_image_path: str | None = None
+        self._image_region_cache_path: str | None = None
+        self._image_region_cache_ready: bool = False
 
         self.vendor_adapter = _create_ai_ocr_vendor_adapter(
             provider=provider,
@@ -127,6 +134,16 @@ class AiOcrClient(OcrProvider):
             "OCR_PADDLE_VL_ALLOW_PROMPT_FALLBACK",
             default=False,
         )
+        self._paddle_doc_max_side_px_override: int | None = None
+        if paddle_doc_max_side_px is not None:
+            try:
+                normalized_max_side = int(paddle_doc_max_side_px)
+            except Exception:
+                normalized_max_side = None
+            if normalized_max_side is not None:
+                self._paddle_doc_max_side_px_override = max(
+                    0, min(6000, int(normalized_max_side))
+                )
 
         if _is_paddleocr_vl_model(self.model):
             should_use_doc_parser = self._should_use_paddle_doc_parser()
@@ -259,9 +276,10 @@ class AiOcrClient(OcrProvider):
             and str(self.provider_id or "").strip().lower() == "siliconflow"
         ):
             # PaddleOCR-VL upstream default max_concurrency=200 can overload some
-            # OpenAI-compatible gateways (notably SiliconFlow) and cause long tail
-            # latency/timeouts. Use single-flight default for v1.5 unless overridden.
-            kwargs["vl_rec_max_concurrency"] = 1
+            # OpenAI-compatible gateways (notably SiliconFlow) and cause long-tail
+            # latency/timeouts. A small bounded fan-out keeps per-page latency
+            # reasonable without reopening the 200-way burst.
+            kwargs["vl_rec_max_concurrency"] = 4
 
         raw_use_queues = os.getenv("OCR_PADDLE_VL_DOCPARSER_USE_QUEUES")
         if raw_use_queues is not None:
@@ -277,7 +295,19 @@ class AiOcrClient(OcrProvider):
             _env_float("OCR_PADDLE_VL_DOCPARSER_PREDICT_TIMEOUT_S", 120.0),
         )
         lowered_model = str(self.model or "").strip().lower()
+        provider_id = str(self.provider_id or "").strip().lower()
         if "paddleocr-vl-1.5" in lowered_model:
+            if provider_id == "siliconflow":
+                return max(
+                    10.0,
+                    _env_float(
+                        "OCR_PADDLE_VL_DOCPARSER_PREDICT_TIMEOUT_S_V15_SILICONFLOW",
+                        _env_float(
+                            "OCR_PADDLE_VL_DOCPARSER_PREDICT_TIMEOUT_S_V15",
+                            60.0,
+                        ),
+                    ),
+                )
             v15_default_timeout = max(default_timeout, 180.0)
             return max(
                 10.0,
@@ -288,248 +318,545 @@ class AiOcrClient(OcrProvider):
             )
         return default_timeout
 
+    def _resolve_paddle_doc_retry_timeout_s(self, *, predict_timeout_s: float) -> float:
+        default_retry_timeout_s = min(90.0, predict_timeout_s)
+        lowered_model = str(self.model or "").strip().lower()
+        provider_id = str(self.provider_id or "").strip().lower()
+        if "paddleocr-vl-1.5" in lowered_model and provider_id == "siliconflow":
+            return max(
+                10.0,
+                _env_float(
+                    "OCR_PADDLE_VL_DOCPARSER_RETRY_TIMEOUT_S_V15_SILICONFLOW",
+                    _env_float(
+                        "OCR_PADDLE_VL_DOCPARSER_RETRY_TIMEOUT_S",
+                        min(20.0, predict_timeout_s),
+                    ),
+                ),
+            )
+        return max(
+            10.0,
+            _env_float(
+                "OCR_PADDLE_VL_DOCPARSER_RETRY_TIMEOUT_S",
+                default_retry_timeout_s,
+            ),
+        )
+
+    def _is_siliconflow_paddle_doc_v15(self) -> bool:
+        lowered_model = str(self.model or "").strip().lower()
+        provider_id = str(self.provider_id or "").strip().lower()
+        return "paddleocr-vl-1.5" in lowered_model and provider_id == "siliconflow"
+
+    def _should_retry_paddle_doc_timeout(self) -> bool:
+        raw_specific = os.getenv(
+            "OCR_PADDLE_VL_DOCPARSER_RETRY_ON_TIMEOUT_V15_SILICONFLOW"
+        )
+        raw_general = os.getenv("OCR_PADDLE_VL_DOCPARSER_RETRY_ON_TIMEOUT")
+        if self._is_siliconflow_paddle_doc_v15():
+            if raw_specific is not None:
+                return _env_flag(
+                    "OCR_PADDLE_VL_DOCPARSER_RETRY_ON_TIMEOUT_V15_SILICONFLOW",
+                    default=False,
+                )
+            if raw_general is not None:
+                return _env_flag(
+                    "OCR_PADDLE_VL_DOCPARSER_RETRY_ON_TIMEOUT",
+                    default=False,
+                )
+            return False
+        return _env_flag("OCR_PADDLE_VL_DOCPARSER_RETRY_ON_TIMEOUT", default=True)
+
+    def _should_use_paddle_doc_singleflight(self) -> bool:
+        raw_specific = os.getenv(
+            "OCR_PADDLE_VL_DOCPARSER_SINGLEFLIGHT_V15_SILICONFLOW"
+        )
+        raw_general = os.getenv("OCR_PADDLE_VL_DOCPARSER_SINGLEFLIGHT")
+        if self._is_siliconflow_paddle_doc_v15():
+            if raw_specific is not None:
+                return _env_flag(
+                    "OCR_PADDLE_VL_DOCPARSER_SINGLEFLIGHT_V15_SILICONFLOW",
+                    default=True,
+                )
+            if raw_general is not None:
+                return _env_flag(
+                    "OCR_PADDLE_VL_DOCPARSER_SINGLEFLIGHT",
+                    default=True,
+                )
+            return True
+        return _env_flag("OCR_PADDLE_VL_DOCPARSER_SINGLEFLIGHT", default=False)
+
+    def _resolve_paddle_doc_singleflight_wait_s(self) -> float:
+        default_wait_s = 1.0 if self._is_siliconflow_paddle_doc_v15() else 3.0
+        return max(
+            0.0,
+            _env_float("OCR_PADDLE_VL_DOCPARSER_SINGLEFLIGHT_WAIT_S", default_wait_s),
+        )
+
+    def _resolve_paddle_doc_singleflight_lock_path(self) -> Path:
+        raw_lock_dir = _clean_str(
+            os.getenv("OCR_PADDLE_VL_DOCPARSER_SINGLEFLIGHT_LOCK_DIR")
+        )
+        lock_dir = Path(raw_lock_dir) if raw_lock_dir else Path("/tmp")
+        lock_key = "|".join(
+            [
+                str(self.provider_id or "").strip().lower(),
+                str(self.base_url or "").strip().lower(),
+                str(self.model or "").strip().lower(),
+                str(self._paddle_doc_pipeline_version or "").strip().lower(),
+            ]
+        )
+        digest = hashlib.sha1(lock_key.encode("utf-8")).hexdigest()[:24]
+        return lock_dir / f"paddleocr-vl-docparser-{digest}.lock"
+
+    def _resolve_paddle_doc_max_side_px(self) -> int:
+        if self._paddle_doc_max_side_px_override is not None:
+            return int(self._paddle_doc_max_side_px_override)
+        return max(0, _env_int("OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX", 2200))
+
+    def _prepare_paddle_doc_predict_image(
+        self, image_path: str
+    ) -> tuple[str, float, float, Path | None]:
+        max_side_px = self._resolve_paddle_doc_max_side_px()
+        if max_side_px <= 0:
+            return image_path, 1.0, 1.0, None
+
+        try:
+            with Image.open(image_path).convert("RGB") as image:
+                width, height = image.size
+                largest = max(int(width), int(height))
+                if largest <= int(max_side_px):
+                    return image_path, 1.0, 1.0, None
+
+                ratio = float(max_side_px) / float(largest)
+                new_width = max(32, int(round(float(width) * ratio)))
+                new_height = max(32, int(round(float(height) * ratio)))
+                resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+                source_stat = Path(image_path).stat()
+                digest = hashlib.sha1(
+                    f"{image_path}|{source_stat.st_mtime_ns}|{source_stat.st_size}|{max_side_px}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest()[:16]
+                temp_path = Path(tempfile.gettempdir()) / (
+                    f"paddleocr-vl-{digest}-{new_width}x{new_height}.png"
+                )
+                resized.save(temp_path)
+                logger.info(
+                    "Downscaled PaddleOCR-VL doc_parser image from %sx%s to %sx%s (max_side=%s)",
+                    width,
+                    height,
+                    new_width,
+                    new_height,
+                    max_side_px,
+                )
+                return (
+                    str(temp_path),
+                    float(width) / float(new_width),
+                    float(height) / float(new_height),
+                    temp_path,
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to prepare downscaled PaddleOCR-VL image for %s: %s",
+                image_path,
+                e,
+            )
+        return image_path, 1.0, 1.0, None
+
+    def _run_paddle_doc_predict_with_timeout(
+        self,
+        func: Any,
+        *,
+        timeout_s: float,
+        label: str,
+    ) -> Any:
+        effective_timeout = max(1.0, float(timeout_s))
+        if not self._should_use_paddle_doc_singleflight() or fcntl is None:
+            return _run_in_daemon_thread_with_timeout(
+                func,
+                timeout_s=effective_timeout,
+                label=label,
+            )
+
+        lock_path = self._resolve_paddle_doc_singleflight_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        wait_timeout_s = self._resolve_paddle_doc_singleflight_wait_s()
+        wait_deadline = time.monotonic() + float(wait_timeout_s)
+        lock_file = None
+
+        while True:
+            candidate = lock_path.open("a+b")
+            try:
+                fcntl.flock(candidate.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_file = candidate
+                break
+            except BlockingIOError:
+                candidate.close()
+                if time.monotonic() >= wait_deadline:
+                    raise TimeoutError(
+                        f"{label} blocked by another in-flight PaddleOCR-VL doc_parser request "
+                        f"after {wait_timeout_s:.1f}s"
+                    )
+                time.sleep(min(0.1, max(0.01, wait_deadline - time.monotonic())))
+
+        done = threading.Event()
+        result: dict[str, Any] = {}
+        error: dict[str, BaseException] = {}
+        ctx = contextvars.copy_context()
+
+        def _runner() -> None:
+            def _run_with_context() -> None:
+                try:
+                    result["value"] = func()
+                except BaseException as exc:  # noqa: BLE001
+                    error["error"] = exc
+                finally:
+                    try:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)  # type: ignore[arg-type]
+                    except Exception:
+                        pass
+                    try:
+                        lock_file.close()  # type: ignore[union-attr]
+                    except Exception:
+                        pass
+                    done.set()
+
+            ctx.run(_run_with_context)
+
+        thread = threading.Thread(target=_runner, name=f"timeout:{label}", daemon=True)
+        thread.start()
+
+        if not done.wait(timeout=effective_timeout):
+            raise TimeoutError(f"{label} timed out after {effective_timeout:.0f}s")
+        if "error" in error:
+            raise error["error"]
+        return result.get("value")
+
     def _ocr_image_with_paddle_doc_parser(self, image_path: str) -> List[Dict]:
+        max_side_px = self._resolve_paddle_doc_max_side_px()
+        predict_image_path, scale_x, scale_y, temp_image_path = (
+            self._prepare_paddle_doc_predict_image(image_path)
+        )
+        predict_kwargs: dict[str, Any] = {}
+        predict_max_pixels = _derive_paddle_doc_predict_max_pixels(
+            max_side_px=max_side_px,
+            did_downscale=temp_image_path is not None,
+        )
+        if predict_max_pixels is not None:
+            predict_kwargs["max_pixels"] = int(predict_max_pixels)
+            logger.info(
+                "Constraining PaddleOCR-VL doc_parser predict max_pixels=%s (max_side=%s, downscaled=%s)",
+                predict_max_pixels,
+                max_side_px,
+                temp_image_path is not None,
+            )
+
         def _predict_once() -> Any:
             parser_local = self._get_paddle_doc_parser()
             try:
-                return parser_local.predict(input=image_path)
+                return parser_local.predict(input=predict_image_path, **predict_kwargs)
             except TypeError:
-                return parser_local.predict(image_path)
+                try:
+                    return parser_local.predict(predict_image_path, **predict_kwargs)
+                except TypeError:
+                    try:
+                        return parser_local.predict(input=predict_image_path)
+                    except TypeError:
+                        return parser_local.predict(predict_image_path)
 
         try:
-            predict_timeout_s = self._resolve_paddle_doc_predict_timeout_s()
-            output = _run_in_daemon_thread_with_timeout(
-                _predict_once,
-                timeout_s=predict_timeout_s,
-                label="paddleocr-vl:predict",
-            )
-        except Exception as first_error:
-            wants_v15 = (
-                str(self.model or "").strip().lower()
-                == _PADDLE_OCR_VL_MODEL_V15.lower()
-            )
-            can_downgrade = bool(self.allow_model_downgrade)
-            error_to_raise: Exception | None = first_error
-            if (
-                isinstance(first_error, TimeoutError)
-                and wants_v15
-                and _env_flag("OCR_PADDLE_VL_DOCPARSER_RETRY_ON_TIMEOUT", default=True)
-            ):
-                retry_timeout_s = max(
-                    10.0,
-                    _env_float(
-                        "OCR_PADDLE_VL_DOCPARSER_RETRY_TIMEOUT_S",
-                        min(90.0, predict_timeout_s),
-                    ),
+            try:
+                predict_timeout_s = self._resolve_paddle_doc_predict_timeout_s()
+                output = self._run_paddle_doc_predict_with_timeout(
+                    _predict_once,
+                    timeout_s=predict_timeout_s,
+                    label="paddleocr-vl:predict",
                 )
-                logger.warning(
-                    "PaddleOCR-VL-1.5 predict timed out after %.0fs; retrying once with a fresh parser (retry_timeout=%.0fs)",
-                    predict_timeout_s,
-                    retry_timeout_s,
+            except Exception as first_error:
+                wants_v15 = (
+                    str(self.model or "").strip().lower()
+                    == _PADDLE_OCR_VL_MODEL_V15.lower()
                 )
-                self._paddle_doc_parser = None
-                self._paddle_doc_parser_disabled = False
-                try:
-                    output = _run_in_daemon_thread_with_timeout(
-                        _predict_once,
-                        timeout_s=retry_timeout_s,
-                        label="paddleocr-vl:predict:retry",
+                can_downgrade = bool(self.allow_model_downgrade)
+                error_to_raise: Exception | None = first_error
+                if (
+                    isinstance(first_error, TimeoutError)
+                    and wants_v15
+                    and self._should_retry_paddle_doc_timeout()
+                ):
+                    retry_timeout_s = self._resolve_paddle_doc_retry_timeout_s(
+                        predict_timeout_s=predict_timeout_s
                     )
-                    error_to_raise = None
-                except Exception as retry_error:
-                    error_to_raise = retry_error
-            if error_to_raise is not None and isinstance(error_to_raise, TimeoutError):
-                self._paddle_doc_parser_disabled = True
-            if (
-                wants_v15
-                and can_downgrade
-                and error_to_raise is not None
-                and _is_probably_model_unsupported_error(error_to_raise)
-            ):
-                logger.warning(
-                    "PaddleOCR-VL-1.5 request failed and downgrade is allowed; retrying with %s",
-                    _PADDLE_OCR_VL_MODEL_V1,
-                )
-                self._paddle_doc_parser = None
-                self._paddle_doc_effective_model = _PADDLE_OCR_VL_MODEL_V1
-                self._paddle_doc_pipeline_version = "v1"
-                self._paddle_doc_server_url = None
-                self._paddle_doc_backend = None
-                original_model = self.model
-                try:
-                    self.model = _PADDLE_OCR_VL_MODEL_V1
-                    output = _run_in_daemon_thread_with_timeout(
-                        _predict_once,
-                        timeout_s=predict_timeout_s,
-                        label="paddleocr-vl:predict",
+                    logger.warning(
+                        "PaddleOCR-VL-1.5 predict timed out after %.0fs; retrying once with a fresh parser (retry_timeout=%.0fs)",
+                        predict_timeout_s,
+                        retry_timeout_s,
                     )
-                except Exception:
-                    self.model = original_model
-                    raise error_to_raise
-            else:
+                    self._paddle_doc_parser = None
+                    self._paddle_doc_parser_disabled = False
+                    try:
+                        output = self._run_paddle_doc_predict_with_timeout(
+                            _predict_once,
+                            timeout_s=retry_timeout_s,
+                            label="paddleocr-vl:predict:retry",
+                        )
+                        error_to_raise = None
+                    except Exception as retry_error:
+                        error_to_raise = retry_error
+                if (
+                    error_to_raise is not None
+                    and isinstance(error_to_raise, TimeoutError)
+                ):
+                    self._paddle_doc_parser_disabled = True
                 if (
                     wants_v15
-                    and (not can_downgrade)
+                    and can_downgrade
                     and error_to_raise is not None
                     and _is_probably_model_unsupported_error(error_to_raise)
                 ):
-                    raise RuntimeError(
-                        "PaddleOCR-VL-1.5 is not available on current endpoint and strict mode forbids downgrade; "
-                        "switch to PaddlePaddle/PaddleOCR-VL or disable strict mode explicitly."
-                    ) from error_to_raise
-                if error_to_raise is not None:
-                    raise error_to_raise
+                    logger.warning(
+                        "PaddleOCR-VL-1.5 request failed and downgrade is allowed; retrying with %s",
+                        _PADDLE_OCR_VL_MODEL_V1,
+                    )
+                    self._paddle_doc_parser = None
+                    self._paddle_doc_effective_model = _PADDLE_OCR_VL_MODEL_V1
+                    self._paddle_doc_pipeline_version = "v1"
+                    self._paddle_doc_server_url = None
+                    self._paddle_doc_backend = None
+                    original_model = self.model
+                    try:
+                        self.model = _PADDLE_OCR_VL_MODEL_V1
+                        output = _run_in_daemon_thread_with_timeout(
+                            _predict_once,
+                            timeout_s=predict_timeout_s,
+                            label="paddleocr-vl:predict",
+                        )
+                    except Exception:
+                        self.model = original_model
+                        raise error_to_raise
+                else:
+                    if (
+                        wants_v15
+                        and (not can_downgrade)
+                        and error_to_raise is not None
+                        and _is_probably_model_unsupported_error(error_to_raise)
+                    ):
+                        raise RuntimeError(
+                            "PaddleOCR-VL-1.5 is not available on current endpoint and strict mode forbids downgrade; "
+                            "switch to PaddlePaddle/PaddleOCR-VL or disable strict mode explicitly."
+                        ) from error_to_raise
+                    if error_to_raise is not None:
+                        raise error_to_raise
 
-        if isinstance(output, list):
-            results_iter = output
-        elif isinstance(output, tuple):
-            results_iter = list(output)
-        else:
-            try:
-                results_iter = list(output)
-            except Exception:
-                results_iter = [output]
+            raw_elements, image_regions, layout_blocks = _extract_paddle_doc_parser_output(
+                output
+            )
+            raw_elements, image_regions, layout_blocks = _scale_paddle_doc_parser_output(
+                raw_elements,
+                image_regions,
+                layout_blocks,
+                scale_x=scale_x,
+                scale_y=scale_y,
+            )
+            self.last_layout_blocks = list(layout_blocks)
+            self.last_image_regions_px = [list(region) for region in image_regions]
+            self._last_layout_image_path = str(image_path)
+            self._image_region_cache_path = str(image_path)
+            self._image_region_cache_ready = True
 
-        raw_elements: list[dict] = []
+            if not raw_elements:
+                logger.warning(
+                    "PaddleOCR-VL doc_parser produced no usable text blocks "
+                    "(provider=%s, requested_model=%s, effective_model=%s, pipeline_version=%s)",
+                    self.provider_id,
+                    self.model,
+                    self._paddle_doc_effective_model or self.model,
+                    self._paddle_doc_pipeline_version or "<default>",
+                )
+                raise RuntimeError(
+                    "PaddleOCR-VL doc_parser returned no valid text blocks in parsing_res_list"
+                )
 
-        def _extract_parsing_blocks(result_obj: Any) -> list[Any]:
-            payload_candidates: list[Any] = []
-
-            json_payload = getattr(result_obj, "json", None)
-            if callable(json_payload):
+            logger.info(
+                "PaddleOCR-VL doc_parser parsed %s text blocks and %s image-like regions",
+                len(raw_elements),
+                len(self.last_image_regions_px),
+            )
+            return raw_elements
+        finally:
+            if temp_image_path is not None:
                 try:
-                    json_payload = json_payload()
-                except Exception:
-                    json_payload = None
-            if json_payload is not None:
-                payload_candidates.append(json_payload)
-
-            to_dict_payload = getattr(result_obj, "to_dict", None)
-            if callable(to_dict_payload):
-                try:
-                    payload_candidates.append(to_dict_payload())
+                    temp_image_path.unlink(missing_ok=True)
                 except Exception:
                     pass
 
-            payload_candidates.append(result_obj)
+    def _detect_image_regions_with_prompt(self, image_path: str) -> list[list[float]]:
+        from ..llm_adapter import _validate_image_regions_px
 
-            for payload in payload_candidates:
-                if not isinstance(payload, dict):
-                    continue
-                root = (
-                    payload.get("res")
-                    if isinstance(payload.get("res"), dict)
-                    else payload
-                )
-                if not isinstance(root, dict):
-                    continue
-                blocks = root.get("parsing_res_list")
-                if isinstance(blocks, list):
-                    return blocks
+        image = Image.open(image_path).convert("RGB")
+        width, height = image.size
+        if width <= 0 or height <= 0:
             return []
 
-        def _extract_block_fields(block: Any) -> tuple[str, Any, Any]:
-            if isinstance(block, dict):
-                text = _strip_loc_tokens(
-                    block.get("block_content")
-                    or block.get("content")
-                    or block.get("text")
-                    or ""
-                )
-                bbox_raw: Any = None
-                for key in ("block_bbox", "bbox", "box", "b"):
-                    if key in block and block[key] is not None:
-                        bbox_raw = block[key]
-                        break
+        import base64
+        import io
 
-                confidence_raw: Any = None
-                for key in ("confidence", "score", "prob"):
-                    if key in block and block[key] is not None:
-                        confidence_raw = block[key]
-                        break
-                return text, bbox_raw, confidence_raw
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        data_uri = f"data:image/png;base64,{b64}"
 
-            text = _strip_loc_tokens(
-                getattr(block, "block_content", None)
-                or getattr(block, "content", None)
-                or getattr(block, "text", None)
-                or ""
-            )
-            bbox_raw: Any = None
-            for attr in ("block_bbox", "bbox", "box", "b"):
-                value = getattr(block, attr, None)
-                if value is not None:
-                    bbox_raw = value
-                    break
-
-            confidence_raw: Any = None
-            for attr in ("confidence", "score", "prob"):
-                value = getattr(block, attr, None)
-                if value is not None:
-                    confidence_raw = value
-                    break
-            return text, bbox_raw, confidence_raw
-
-        first_result_type: str | None = None
-        first_block_type: str | None = None
-
-        for result in results_iter:
-            if first_result_type is None:
-                first_result_type = type(result).__name__
-
-            blocks = _extract_parsing_blocks(result)
-            for block in blocks:
-                if first_block_type is None:
-                    first_block_type = type(block).__name__
-
-                text, bbox_raw, confidence_raw = _extract_block_fields(block)
-                bbox = _coerce_bbox_xyxy(bbox_raw)
-                if not text or not bbox:
-                    continue
-
-                try:
-                    confidence = (
-                        float(confidence_raw) if confidence_raw is not None else 0.9
-                    )
-                except Exception:
-                    confidence = 0.9
-                if confidence > 1.0:
-                    confidence = confidence / 100.0 if confidence <= 100.0 else 1.0
-                confidence = max(0.0, min(confidence, 1.0))
-
-                raw_elements.append(
-                    {
-                        "text": text,
-                        "bbox": [
-                            float(bbox[0]),
-                            float(bbox[1]),
-                            float(bbox[2]),
-                            float(bbox[3]),
-                        ],
-                        "confidence": confidence,
-                    }
-                )
-
-        if not raw_elements:
-            logger.warning(
-                "PaddleOCR-VL doc_parser produced no usable text blocks "
-                "(provider=%s, requested_model=%s, effective_model=%s, pipeline_version=%s, result_type=%s, block_type=%s)",
-                self.provider_id,
-                self.model,
-                self._paddle_doc_effective_model or self.model,
-                self._paddle_doc_pipeline_version or "<default>",
-                first_result_type,
-                first_block_type,
-            )
-            raise RuntimeError(
-                "PaddleOCR-VL doc_parser returned no valid text blocks in parsing_res_list"
-            )
-
-        logger.info(
-            "PaddleOCR-VL doc_parser parsed %s blocks",
-            len(raw_elements),
+        effective_model = str(self.model)
+        is_deepseek_model = _is_deepseek_ocr_model(effective_model)
+        request_timeout_s = max(
+            8.0,
+            _env_float("OCR_AI_IMAGE_REGION_TIMEOUT_S", 30.0),
         )
-        return raw_elements
+        max_tokens_image_regions = self.vendor_adapter.clamp_max_tokens(
+            1024, kind="ocr"
+        )
+
+        if is_deepseek_model:
+            prompt = (
+                "<image>\n<|grounding|>Locate <|ref|>screenshots, charts, diagrams, "
+                "illustrations, photos, logos, and icons<|/ref|> in the image."
+            )
+        else:
+            prompt = (
+                "Locate standalone non-text visual regions on this page. "
+                "Return ONLY minified JSON array, no markdown. "
+                f"Image size: {width}x{height} px. "
+                'Each item must be {"bbox":[x0,y0,x1,y1]}. '
+                "Regions include screenshots, charts, diagrams, illustrations, photos, logos, and icons. "
+                "Use tight pixel bbox around the visual asset only. "
+                "Exclude surrounding text, card backgrounds, tables, formulas, and the full-page background. "
+                "Keep output <= 12 items."
+            )
+
+        user_content = self.vendor_adapter.build_user_content(
+            prompt=prompt,
+            image_data_uri=data_uri,
+            image_first=_should_send_image_first_for_ai_ocr(
+                provider_id=self.provider_id,
+                model_name=effective_model,
+            ),
+        )
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": "Return JSON array only, no markdown.",
+            },
+            {
+                "role": "user",
+                "content": user_content,
+            },
+        ]
+        if is_deepseek_model:
+            messages = [
+                {
+                    "role": "user",
+                    "content": user_content,
+                }
+            ]
+
+        completion = self.client.with_options(
+            timeout=request_timeout_s,
+            max_retries=0,
+        ).chat.completions.create(
+            model=effective_model,
+            temperature=0,
+            max_tokens=max_tokens_image_regions,
+            messages=messages,  # type: ignore[arg-type]
+        )
+        content_obj = (
+            completion.choices[0].message.content
+            if getattr(completion, "choices", None)
+            else ""
+        )
+        content = _extract_message_text(content_obj)
+        region_items = _extract_image_regions_json(content)
+        if not region_items and (is_deepseek_model or "<|det|>" in (content or "")):
+            region_items = _extract_deepseek_image_regions(content)
+        if not region_items and (is_deepseek_model or "<|det|>" in (content or "")):
+            tagged_items = _extract_deepseek_tagged_items(content)
+            if tagged_items:
+                region_items = []
+                for item in tagged_items:
+                    bbox = _coerce_bbox_xyxy(item.get("bbox"))
+                    if bbox is None:
+                        continue
+                    region_items.append(
+                        [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])]
+                    )
+
+        if region_items:
+            normalized_candidates = [
+                {
+                    "text": "image_region",
+                    "bbox": list(region),
+                    "confidence": 1.0,
+                }
+                for region in region_items
+                if isinstance(region, list) and len(region) == 4
+            ]
+            normalized_items, _ = self._normalize_items_to_pixels(
+                normalized_candidates,
+                image=image,
+            )
+            normalized_regions = [
+                list(bbox)
+                for bbox in (
+                    item.get("bbox") if isinstance(item, dict) else None
+                    for item in normalized_items
+                )
+                if isinstance(bbox, list) and len(bbox) == 4
+            ]
+            if normalized_regions:
+                region_items = normalized_regions
+
+        validated = _validate_image_regions_px(
+            region_items or [],
+            width_px=int(width),
+            height_px=int(height),
+            max_regions=12,
+        )
+        return validated or []
+
+    def detect_image_regions(self, image_path: str) -> list[list[float]]:
+        requested_path = str(image_path)
+        if (
+            self._image_region_cache_ready
+            and str(self._image_region_cache_path or "") == requested_path
+        ):
+            return [list(region) for region in self.last_image_regions_px]
+
+        self.last_image_regions_px = []
+        self.last_layout_blocks = []
+        self._last_layout_image_path = requested_path
+        self._image_region_cache_path = requested_path
+        self._image_region_cache_ready = False
+
+        if _is_paddleocr_vl_model(self.model) and self._should_use_paddle_doc_parser():
+            try:
+                self._ocr_image_with_paddle_doc_parser(image_path)
+                return [list(region) for region in self.last_image_regions_px]
+            except Exception as e:
+                logger.warning(
+                    "PaddleOCR-VL image-region extraction failed; falling back to prompt detection: %s",
+                    e,
+                )
+
+        try:
+            self.last_image_regions_px = [
+                list(region)
+                for region in self._detect_image_regions_with_prompt(image_path)
+            ]
+        except Exception as e:
+            logger.warning("AI OCR image-region detection failed: %s", e)
+            self.last_image_regions_px = []
+
+        self._image_region_cache_ready = True
+        return [list(region) for region in self.last_image_regions_px]
 
     def _score_bbox_transform(
         self,
@@ -845,6 +1172,11 @@ class AiOcrClient(OcrProvider):
         return default_timeout
 
     def ocr_image(self, image_path: str) -> List[Dict]:
+        self.last_image_regions_px = []
+        self.last_layout_blocks = []
+        self._last_layout_image_path = str(image_path)
+        self._image_region_cache_path = None
+        self._image_region_cache_ready = False
         image = Image.open(image_path).convert("RGB")
         width, height = image.size
         if width <= 0 or height <= 0:

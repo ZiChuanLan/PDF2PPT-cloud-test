@@ -63,30 +63,13 @@ bash scripts/dev/local_dev.sh
 - `segmented`（分块）：尽量把截图/图表等区域裁为可编辑图片块，文字仍可编辑
 - `fullpage`（全页）：整页作为背景图，仅覆盖可编辑文字，通常最接近原图（图片不可单独编辑）
 
-## 质量对比（自动生成对比图）
+## 项目结构
 
-仓库内置基准脚本，会生成“原图 vs 合成预览图”的对比图和热力图，便于快速定位错位/换行/重影：
+- `api/`：FastAPI 接口、任务队列、PDF 解析、OCR 和 PPTX 生成
+- `web/`：Next.js 前端，负责上传、运行配置、结果跟踪和设置页
+- `scripts/dev/`：本地开发辅助脚本
+- `packaging/windows/`：Windows 启动器与发布打包脚本
 
-```bash
-python api/scripts/benchmark_engines.py \
-  --pdf ./your.pdf \
-  --pages random:10 \
-  --out-dir ./test/benchmark-engines
-```
-
-如果需要跑远程 OCR，引入你的远程 Key（推荐用环境变量注入）：
-
-```bash
-SILICONFLOW_API_KEY=... \
-SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1 \
-SILICONFLOW_MODEL=PaddlePaddle/PaddleOCR-VL-1.5 \
-python api/scripts/benchmark_engines.py \
-  --pdf ./your.pdf \
-  --pages random:10 \
-  --out-dir ./test/benchmark-engines
-```
-
-输出目录内会生成：
-- `page-XXX/compare-source-vs-ENGINE.png`
-- `page-XXX/heat-source-vs-ENGINE.png`
-- `report.json`
+说明：
+- 公开仓库默认不保留测试样本、截图对比产物和临时基准脚本
+- OCR 的真实密钥、样本 PDF、运行缓存也不应提交

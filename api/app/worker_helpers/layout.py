@@ -3,6 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 
+def _normalize_optional_list(value: Any) -> Any:
+    if value is None:
+        return []
+    return value
+
+
 def _apply_ai_tables(ir: dict[str, Any]) -> dict[str, Any]:
     pages = ir.get("pages")
     if not isinstance(pages, list):
@@ -142,9 +148,9 @@ def _layout_page_signature(page: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     return {
         "elements": page.get("elements"),
-        "reading_order": page.get("reading_order"),
-        "table_grids": page.get("table_grids"),
-        "image_regions": page.get("image_regions"),
+        "reading_order": _normalize_optional_list(page.get("reading_order")),
+        "table_grids": _normalize_optional_list(page.get("table_grids")),
+        "image_regions": _normalize_optional_list(page.get("image_regions")),
     }
 
 

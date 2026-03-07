@@ -1,17 +1,22 @@
 import {
+  BAIDU_DOC_PARSE_TYPE_LABELS,
+  PARSE_ENGINE_MODE_LABELS as SETTINGS_PARSE_ENGINE_MODE_LABELS,
   SILICONFLOW_BASE_URL,
+  type BaiduDocParseType,
   type LayoutAssistMode,
   type MainProvider,
   type OcrAiLinebreakAssistMode,
   type OcrProvider,
+  type ParseEngineMode,
   type Settings,
 } from "./settings.ts"
 
-export type ParseEngineMode = "local_ocr" | "remote_ocr" | "mineru_cloud"
 export type OcrConfigSource = "dedicated" | "main" | "none"
+export type { ParseEngineMode } from "./settings.ts"
 
 export type RunConfig = {
-  parseProvider: "local" | "mineru"
+  parseProvider: "local" | "baidu_doc" | "mineru"
+  baiduDocParseType: BaiduDocParseType
   llmProvider: "openai" | "claude"
   mainApiKey: string
   mainBaseUrl: string
@@ -40,6 +45,7 @@ export type ValidationResult = {
 
 export type OcrSettingsState = {
   isMineruProvider: boolean
+  isBaiduDocParseMode: boolean
   isOcrEnabledForCurrentEngine: boolean
   hasBaiduCredentials: boolean
   canUseAiOcr: boolean
@@ -62,6 +68,7 @@ export type OcrSettingsState = {
   hasAnyOcrAiConfigValue: boolean
   shouldExpandOptionalOcrAiConfig: boolean
   shouldShowAiVendorAdapter: boolean
+  shouldShowOcrProviderSelector: boolean
   shouldShowBaiduConfig: boolean
   shouldShowTesseractConfig: boolean
   shouldShowLocalOcrCheck: boolean
@@ -77,9 +84,9 @@ export type OcrSettingsState = {
 export const OCR_PROVIDER_LABELS: Record<OcrProvider, string> = {
   auto: "自动（混合）",
   aiocr: "AI OCR（OpenAI 兼容）",
-  paddle_local: "PaddleOCR（本地）",
+  paddle_local: "本地 OCR（PaddleOCR）",
   baidu: "百度 OCR",
-  tesseract: "Tesseract（本地）",
+  tesseract: "本地 OCR（Tesseract）",
 }
 
 export const OCR_GEOMETRY_MODE_LABELS: Record<Settings["ocrGeometryMode"], string> = {
@@ -94,12 +101,19 @@ const OCR_CONFIG_SOURCE_LABELS: Record<OcrConfigSource, string> = {
   none: "未配置",
 }
 
-export const LOCAL_PARSE_OCR_PROVIDERS: OcrProvider[] = [
-  "tesseract",
-  "paddle_local",
+export const PARSE_ENGINE_MODE_LABELS = SETTINGS_PARSE_ENGINE_MODE_LABELS
+
+export const PARSE_ENGINE_OPTIONS: Array<{ id: ParseEngineMode; label: string }> = [
+  { id: "baidu_doc", label: PARSE_ENGINE_MODE_LABELS.baidu_doc },
+  { id: "remote_ocr", label: PARSE_ENGINE_MODE_LABELS.remote_ocr },
+  { id: "local_ocr", label: PARSE_ENGINE_MODE_LABELS.local_ocr },
+  { id: "mineru_cloud", label: PARSE_ENGINE_MODE_LABELS.mineru_cloud },
 ]
 
-export const REMOTE_PARSE_OCR_PROVIDERS: OcrProvider[] = ["aiocr", "baidu"]
+export const LOCAL_PARSE_OCR_PROVIDERS: OcrProvider[] = ["tesseract", "paddle_local"]
+
+export const REMOTE_PARSE_OCR_PROVIDERS: OcrProvider[] = ["aiocr"]
+export const BAIDU_DOC_PARSE_OCR_PROVIDERS: OcrProvider[] = []
 export const MINERU_OCR_PROVIDERS: OcrProvider[] = []
 
 export function getOcrConfigSourceLabel(source: OcrConfigSource): string {
@@ -107,7 +121,39 @@ export function getOcrConfigSourceLabel(source: OcrConfigSource): string {
 }
 
 function getResolvedMainProvider(settings: Settings): MainProvider {
-  return settings.provider === "mineru" ? settings.preferredMainProvider : settings.provider
+  return settings.parseEngineMode === "mineru_cloud" || settings.provider === "mineru"
+    ? settings.preferredMainProvider
+    : settings.provider
+}
+
+function getPreferredLocalOcrProvider(settings: Settings): OcrProvider {
+  const rawProvider = (settings.ocrProvider || "").trim().toLowerCase()
+  if (rawProvider === "tesseract" || rawProvider === "paddle_local") {
+    return rawProvider
+  }
+  return "tesseract"
+}
+
+function resolveParseEngineMode(settings: Settings): ParseEngineMode {
+  const mode = settings.parseEngineMode
+  if (
+    mode === "local_ocr" ||
+    mode === "remote_ocr" ||
+    mode === "baidu_doc" ||
+    mode === "mineru_cloud"
+  ) {
+    return mode
+  }
+  if (settings.provider === "mineru") {
+    return "mineru_cloud"
+  }
+  if (settings.ocrProvider === "baidu") {
+    return "baidu_doc"
+  }
+  if (settings.ocrProvider === "aiocr") {
+    return "remote_ocr"
+  }
+  return "local_ocr"
 }
 
 export function getMainProviderConfig(settings: Settings) {
@@ -140,25 +186,21 @@ export function getMainProviderConfig(settings: Settings) {
 }
 
 export function normalizeVisibleOcrProvider(settings: Settings): OcrProvider {
-  const rawProvider = (settings.ocrProvider || "").trim().toLowerCase()
+  const parseEngineMode = resolveParseEngineMode(settings)
 
-  if (settings.provider === "mineru") {
-    if (rawProvider === "baidu" || rawProvider === "tesseract" || rawProvider === "auto") {
-      return rawProvider
-    }
+  if (parseEngineMode === "mineru_cloud" || settings.provider === "mineru") {
     return "auto"
   }
 
-  if (
-    rawProvider === "aiocr" ||
-    rawProvider === "baidu" ||
-    rawProvider === "tesseract" ||
-    rawProvider === "paddle_local"
-  ) {
-    return rawProvider
+  if (parseEngineMode === "remote_ocr") {
+    return "aiocr"
   }
 
-  return "tesseract"
+  if (parseEngineMode === "baidu_doc") {
+    return "baidu"
+  }
+
+  return getPreferredLocalOcrProvider(settings)
 }
 
 function predictGeometryMode(
@@ -202,10 +244,23 @@ function toFiniteFloatStringOrUndefined(value: string): string | undefined {
   return String(n)
 }
 
+function toFiniteIntStringOrUndefined(value: string): string | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const n = Number(trimmed)
+  if (!Number.isFinite(n) || n < 0) return undefined
+  return String(Math.round(n))
+}
+
 function appendBaiduFields(form: FormData, settings: Settings) {
   form.append("ocr_baidu_app_id", settings.ocrBaiduAppId.trim())
   form.append("ocr_baidu_api_key", settings.ocrBaiduApiKey.trim())
   form.append("ocr_baidu_secret_key", settings.ocrBaiduSecretKey.trim())
+}
+
+function appendBaiduDocFields(form: FormData, settings: Settings) {
+  appendBaiduFields(form, settings)
+  form.append("baidu_doc_parse_type", settings.baiduDocParseType)
 }
 
 function appendTesseractFields(form: FormData, settings: Settings) {
@@ -225,13 +280,17 @@ function getDedicatedOcrAiBaseUrl(settings: Settings): string {
 }
 
 export function resolveRunConfig(settings: Settings): RunConfig {
+  const parseEngineMode = resolveParseEngineMode(settings)
   const parseProvider: RunConfig["parseProvider"] =
-    settings.provider === "mineru" ? "mineru" : "local"
+    parseEngineMode === "mineru_cloud"
+      ? "mineru"
+      : parseEngineMode === "baidu_doc"
+        ? "baidu_doc"
+        : "local"
   const main = getMainProviderConfig(settings)
   const selectedOcrProvider = normalizeVisibleOcrProvider(settings)
   const effectiveOcrProvider = selectedOcrProvider
-  const explicitAiOcrSelected =
-    parseProvider === "local" && effectiveOcrProvider === "aiocr"
+  const explicitAiOcrSelected = parseEngineMode === "remote_ocr"
   const dedicatedOcrAiKey = settings.ocrAiApiKey.trim()
   const ocrAiConfigSource = resolveOcrAiConfigSource({
     explicitAiOcrSelected,
@@ -250,14 +309,11 @@ export function resolveRunConfig(settings: Settings): RunConfig {
     ? (settings.ocrAiProvider || "auto").trim() || "auto"
     : "auto"
 
-  const layoutAssistChain: ParseEngineMode =
-    parseProvider === "mineru"
-      ? "mineru_cloud"
-      : effectiveOcrProvider === "aiocr" || effectiveOcrProvider === "baidu"
-        ? "remote_ocr"
-        : "local_ocr"
+  const layoutAssistChain = parseEngineMode
   const layoutAssistMode: LayoutAssistMode =
-    layoutAssistChain === "local_ocr"
+    layoutAssistChain === "baidu_doc"
+      ? "off"
+      : layoutAssistChain === "local_ocr"
       ? settings.visualAssistModeLocal
       : layoutAssistChain === "remote_ocr"
         ? settings.visualAssistModeRemote
@@ -266,18 +322,16 @@ export function resolveRunConfig(settings: Settings): RunConfig {
   const ocrLinebreakAssistMode: OcrAiLinebreakAssistMode =
     parseProvider === "local" ? settings.ocrAiLinebreakAssistMode : "off"
   const visionGeometryMode: Settings["ocrGeometryMode"] =
-    effectiveOcrProvider === "aiocr" ? "direct_ai" : "auto"
+    explicitAiOcrSelected ? "direct_ai" : "auto"
   const geometryPrediction = predictGeometryMode(
     effectiveOcrProvider,
     visionGeometryMode
   )
-  const shouldAttachOcrAiParams =
-    parseProvider === "local" &&
-    effectiveOcrProvider === "aiocr" &&
-    Boolean(effectiveOcrAiKey)
+  const shouldAttachOcrAiParams = explicitAiOcrSelected && Boolean(effectiveOcrAiKey)
 
   return {
     parseProvider,
+    baiduDocParseType: settings.baiduDocParseType,
     llmProvider: main.provider,
     mainApiKey: main.apiKey,
     mainBaseUrl: main.baseUrl,
@@ -302,27 +356,31 @@ export function resolveRunConfig(settings: Settings): RunConfig {
 
 export function resolveOcrSettingsState(settings: Settings): OcrSettingsState {
   const runConfig = resolveRunConfig(settings)
-  const isMineruProvider = settings.provider === "mineru"
+  const parseEngineMode = runConfig.layoutAssistChain
+  const isMineruProvider = parseEngineMode === "mineru_cloud"
+  const isBaiduDocParseMode = parseEngineMode === "baidu_doc"
   const isOcrEnabledForCurrentEngine = !isMineruProvider
   const hasBaiduCredentials =
-    Boolean(settings.ocrBaiduAppId.trim()) &&
     Boolean(settings.ocrBaiduApiKey.trim()) &&
     Boolean(settings.ocrBaiduSecretKey.trim())
-  const canUseAiOcr = !isMineruProvider
+  const canUseAiOcr = parseEngineMode === "local_ocr" || parseEngineMode === "remote_ocr"
   const selectedOcrProvider = runConfig.selectedOcrProvider
-  const parseEngineMode = runConfig.layoutAssistChain
   const currentLayoutAssistMode = runConfig.layoutAssistMode
   const isLayoutAssistEnabledForCurrentEngine = currentLayoutAssistMode !== "off"
   const currentOcrLinebreakAssistMode = runConfig.ocrLinebreakAssistMode
-  const canConfigureOcrLinebreakAssist = !isMineruProvider && isOcrEnabledForCurrentEngine
   const isRemoteOcrMode = parseEngineMode === "remote_ocr"
   const isOcrProviderAuto = selectedOcrProvider === "auto"
   const isOcrProviderAi = selectedOcrProvider === "aiocr"
   const isOcrProviderPaddleLocal = selectedOcrProvider === "paddle_local"
   const isOcrProviderBaidu = selectedOcrProvider === "baidu"
   const isOcrProviderTesseract = selectedOcrProvider === "tesseract"
+  const supportsOcrAiPostprocess =
+    !isMineruProvider &&
+    !isBaiduDocParseMode &&
+    (isOcrProviderAi || isOcrProviderTesseract || isOcrProviderPaddleLocal)
+  const canConfigureOcrLinebreakAssist = supportsOcrAiPostprocess
   const isAiOcrProviderSelected = isOcrProviderAi || isOcrProviderAuto
-  const needsRequiredOcrAiConfig = !isMineruProvider && isOcrProviderAi
+  const needsRequiredOcrAiConfig = parseEngineMode === "remote_ocr" && isOcrProviderAi
   const supportsOptionalOcrAiConfig = false
   const hasAnyOcrAiConfigValue =
     Boolean(settings.ocrAiApiKey.trim()) ||
@@ -330,12 +388,18 @@ export function resolveOcrSettingsState(settings: Settings): OcrSettingsState {
     Boolean(settings.ocrAiModel.trim())
   const shouldExpandOptionalOcrAiConfig = false
   const shouldShowAiVendorAdapter = canUseAiOcr && needsRequiredOcrAiConfig
-  const shouldShowBaiduConfig = isOcrProviderBaidu
-  const shouldShowTesseractConfig = isOcrProviderTesseract
+  const shouldShowOcrProviderSelector =
+    parseEngineMode === "local_ocr" || parseEngineMode === "remote_ocr"
+  const shouldShowBaiduConfig = isBaiduDocParseMode || isOcrProviderBaidu
+  const shouldShowTesseractConfig = parseEngineMode === "local_ocr" && isOcrProviderTesseract
   const shouldShowLocalOcrCheck =
-    !isMineruProvider && (isOcrProviderTesseract || isOcrProviderPaddleLocal)
+    !isMineruProvider &&
+    !isBaiduDocParseMode &&
+    (isOcrProviderTesseract || isOcrProviderPaddleLocal)
   const availableOcrProviders = isMineruProvider
     ? MINERU_OCR_PROVIDERS
+    : isBaiduDocParseMode
+      ? BAIDU_DOC_PARSE_OCR_PROVIDERS
     : isRemoteOcrMode
       ? REMOTE_PARSE_OCR_PROVIDERS
       : LOCAL_PARSE_OCR_PROVIDERS
@@ -355,6 +419,7 @@ export function resolveOcrSettingsState(settings: Settings): OcrSettingsState {
 
   return {
     isMineruProvider,
+    isBaiduDocParseMode,
     isOcrEnabledForCurrentEngine,
     hasBaiduCredentials,
     canUseAiOcr,
@@ -377,6 +442,7 @@ export function resolveOcrSettingsState(settings: Settings): OcrSettingsState {
     hasAnyOcrAiConfigValue,
     shouldExpandOptionalOcrAiConfig,
     shouldShowAiVendorAdapter,
+    shouldShowOcrProviderSelector,
     shouldShowBaiduConfig,
     shouldShowTesseractConfig,
     shouldShowLocalOcrCheck,
@@ -392,9 +458,16 @@ export function resolveOcrSettingsState(settings: Settings): OcrSettingsState {
 
 export const deriveSettingsUiState = resolveOcrSettingsState
 
+export function getRunParseEngineLabel(runConfig: RunConfig): string {
+  return PARSE_ENGINE_MODE_LABELS[runConfig.layoutAssistChain]
+}
+
 export function getRunModelLabel(runConfig: RunConfig): string {
   if (runConfig.parseProvider === "mineru") {
     return "MinerU 云端解析"
+  }
+  if (runConfig.parseProvider === "baidu_doc") {
+    return BAIDU_DOC_PARSE_TYPE_LABELS[runConfig.baiduDocParseType]
   }
   if (runConfig.effectiveOcrProvider === "tesseract" || runConfig.effectiveOcrProvider === "paddle_local") {
     return "本地 OCR（无需远程模型）"
@@ -418,15 +491,27 @@ export function validateRunConfig(settings: Settings): ValidationResult {
 
   if (run.parseProvider === "mineru") return { ok: true }
 
-  if (run.effectiveOcrProvider === "baidu") {
+  if (run.parseProvider === "baidu_doc") {
     const ok =
-      Boolean(settings.ocrBaiduAppId.trim()) &&
       Boolean(settings.ocrBaiduApiKey.trim()) &&
       Boolean(settings.ocrBaiduSecretKey.trim())
     if (!ok) {
       return {
         ok: false,
-        message: "当前 OCR 提供方为百度，请在设置页补全 app_id / api_key / secret_key。",
+        message: "当前为百度解析，请在设置页补全 api_key / secret_key。",
+      }
+    }
+    return { ok: true }
+  }
+
+  if (run.effectiveOcrProvider === "baidu") {
+    const ok =
+      Boolean(settings.ocrBaiduApiKey.trim()) &&
+      Boolean(settings.ocrBaiduSecretKey.trim())
+    if (!ok) {
+      return {
+        ok: false,
+        message: "当前 OCR 提供方为百度，请在设置页补全 api_key / secret_key。",
       }
     }
   }
@@ -469,7 +554,7 @@ export function createJobFormData(
     "layout_assist_apply_image_regions",
     String(Boolean(run.layoutAssistEnabled && settings.layoutAssistApplyImageRegions))
   )
-  form.append("enable_ocr", String(run.parseProvider === "mineru" ? false : Boolean(settings.enableOcr)))
+  form.append("enable_ocr", String(run.parseProvider === "local" ? Boolean(settings.enableOcr) : false))
   form.append("text_erase_mode", settings.textEraseMode)
   form.append("scanned_page_mode", settings.scannedPageMode)
   const imageBgClearExpandMinPt = toFiniteFloatStringOrUndefined(settings.imageBgClearExpandMinPt)
@@ -514,6 +599,10 @@ export function createJobFormData(
     if (settings.mineruLanguage.trim()) form.append("mineru_language", settings.mineruLanguage.trim())
   }
 
+  if (run.parseProvider === "baidu_doc") {
+    appendBaiduDocFields(form, settings)
+  }
+
   if (run.parseProvider === "local") {
     form.append("ocr_provider", run.effectiveOcrProvider)
 
@@ -522,11 +611,19 @@ export function createJobFormData(
       if (run.effectiveOcrAiBaseUrl) form.append("ocr_ai_base_url", run.effectiveOcrAiBaseUrl)
       if (run.effectiveOcrAiModel) form.append("ocr_ai_model", run.effectiveOcrAiModel)
       form.append("ocr_ai_provider", run.effectiveOcrAiProvider)
+      const paddleDocMaxSidePx = toFiniteIntStringOrUndefined(
+        settings.ocrPaddleVlDocparserMaxSidePx
+      )
+      if (paddleDocMaxSidePx !== undefined) {
+        form.append("ocr_paddle_vl_docparser_max_side_px", paddleDocMaxSidePx)
+      }
     }
-    if (run.ocrLinebreakAssistMode === "on") {
-      form.append("ocr_ai_linebreak_assist", "true")
-    } else if (run.ocrLinebreakAssistMode === "off") {
-      form.append("ocr_ai_linebreak_assist", "false")
+    if (run.effectiveOcrProvider !== "baidu") {
+      if (run.ocrLinebreakAssistMode === "on") {
+        form.append("ocr_ai_linebreak_assist", "true")
+      } else if (run.ocrLinebreakAssistMode === "off") {
+        form.append("ocr_ai_linebreak_assist", "false")
+      }
     }
 
     if (run.effectiveOcrProvider === "baidu") {
@@ -555,6 +652,7 @@ export function applyParseEngineMode(
   if (nextMode === "mineru_cloud") {
     return {
       ...settings,
+      parseEngineMode: nextMode,
       provider: "mineru",
       preferredMainProvider: mainProvider,
     }
@@ -563,19 +661,27 @@ export function applyParseEngineMode(
   if (nextMode === "remote_ocr") {
     return {
       ...settings,
+      parseEngineMode: nextMode,
       provider: mainProvider,
       preferredMainProvider: mainProvider,
-      ocrProvider:
-        settings.ocrProvider === "aiocr" || settings.ocrProvider === "baidu"
-          ? settings.ocrProvider
-          : "aiocr",
+    }
+  }
+
+  if (nextMode === "baidu_doc") {
+    return {
+      ...settings,
+      parseEngineMode: nextMode,
+      provider: mainProvider,
+      preferredMainProvider: mainProvider,
+      visualAssistModeBaiduDoc: "off",
     }
   }
 
   return {
     ...settings,
+    parseEngineMode: nextMode,
     provider: mainProvider,
     preferredMainProvider: mainProvider,
-    ocrProvider: settings.ocrProvider === "paddle_local" ? "paddle_local" : "tesseract",
+    ocrProvider: getPreferredLocalOcrProvider(settings),
   }
 }

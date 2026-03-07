@@ -127,6 +127,9 @@ def run_ocr_stage(
     ocr_page_processed = 0
     ocr_page_timeout = int(getattr(settings, "ocr_page_timeout_s", 300) or 300)
     ocr_total_timeout = int(getattr(settings, "ocr_total_timeout_s", 3600) or 3600)
+    ocr_image_region_timeout = int(
+        getattr(settings, "ocr_image_region_timeout_s", 12) or 12
+    )
     ocr_timeout_break_after = int(
         getattr(settings, "ocr_max_consecutive_timeouts", 2) or 2
     )
@@ -362,6 +365,44 @@ def run_ocr_stage(
                     f"{note}:page={page_index + 1}"
                 )
 
+            detected_image_regions_pt: list[list[float]] = []
+            image_region_error: str | None = None
+            try:
+                from PIL import Image
+
+                with Image.open(image_path) as img_probe:
+                    image_width_px, image_height_px = img_probe.size
+
+                detected_image_regions_px = run_in_daemon_thread_with_timeout(
+                    lambda: ocr_manager.detect_image_regions(str(image_path)),
+                    timeout_s=float(max(1, ocr_image_region_timeout)),
+                    label=f"worker:ocr_image_regions:{page_index}",
+                )
+                for bbox in detected_image_regions_px or []:
+                    if not isinstance(bbox, list) or len(bbox) != 4:
+                        continue
+                    try:
+                        bbox_pt = ocr_manager.convert_bbox_to_pdf_coords(
+                            bbox=bbox,
+                            image_width=int(image_width_px),
+                            image_height=int(image_height_px),
+                            page_width_pt=page_w_pt,
+                            page_height_pt=page_h_pt,
+                        )
+                    except Exception:
+                        continue
+                    detected_image_regions_pt.append(list(bbox_pt))
+            except TimeoutError:
+                image_region_error = (
+                    "image_region_detection_timeout:"
+                    f"{int(max(1, ocr_image_region_timeout))}s"
+                )
+            except Exception as e:
+                image_region_error = str(e)
+
+            if detected_image_regions_pt:
+                page["image_regions"] = detected_image_regions_pt
+
             # Strict policy: do not switch to local Tesseract geometry
             # unless the user explicitly selected `tesseract/local`.
             # Keep the original provider result as-is.
@@ -454,6 +495,8 @@ def run_ocr_stage(
                     {
                         "page_index": page_index,
                         "elements": len(ocr_elements),
+                        "image_regions": len(detected_image_regions_pt),
+                        "image_region_detection_error": image_region_error,
                         "used_provider": used_provider,
                         "fallback_reason": fallback_reason,
                         "quality_notes": quality_notes,
@@ -466,6 +509,8 @@ def run_ocr_stage(
                     {
                         "page_index": page_index,
                         "elements": 0,
+                        "image_regions": len(detected_image_regions_pt),
+                        "image_region_detection_error": image_region_error,
                         "used_provider": used_provider,
                         "fallback_reason": fallback_reason,
                         "quality_notes": quality_notes,

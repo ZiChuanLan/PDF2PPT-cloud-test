@@ -70,16 +70,12 @@ validate:
 
 # Local QA
 #
-# Keep these targets lightweight and dependency-free:
-# - `test` runs the Python unit tests (backend).
-# - `lint` runs a cheap backend sanity check + frontend eslint.
+# Public repo keeps runtime code only. `test` stays as a placeholder so
+# common workflows do not fail after test fixtures are removed.
+# `lint` remains the cheap sanity check.
 
 test:
-	@set -eu; \
-	if [ -x "api/.venv/bin/python" ]; then PYTHON="api/.venv/bin/python"; \
-	elif [ -x ".venv/bin/python" ]; then PYTHON=".venv/bin/python"; \
-	else PYTHON="python3"; fi; \
-	"$${PYTHON}" -m pytest -q
+	@echo "No repository tests are kept in this public branch."
 
 lint: lint-api lint-web
 

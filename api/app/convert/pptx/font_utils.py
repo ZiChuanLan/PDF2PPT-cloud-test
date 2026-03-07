@@ -577,7 +577,26 @@ def _fit_mineru_text_style(
         except Exception:
             text_level = None
 
-    is_heading = bool(block_type in {"title", "heading", "header", "h1", "h2"}) or (
+    semantic_heading_tokens = {
+        "title",
+        "heading",
+        "header",
+        "h1",
+        "h2",
+        "subtitle",
+        "subheading",
+        "section_title",
+        "paragraph_title",
+        "title_1",
+        "title_2",
+        "title_3",
+    }
+    is_semantic_heading = bool(
+        block_type in semantic_heading_tokens
+        or any(token in block_type for token in ("title", "heading", "header", "subtitle"))
+    )
+
+    is_heading = bool(is_semantic_heading) or (
         (text_level is not None and text_level <= 2 and plain_len <= 60)
         or (
             y0_pt <= 0.22 * page_h_pt

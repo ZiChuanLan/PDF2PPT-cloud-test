@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import Image, { type ImageLoader } from "next/image"
+import { useRouter } from "next/navigation"
 import { useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 
@@ -9,9 +10,12 @@ import {
   JOB_STAGE_LABELS,
   JOB_STATUS_LABELS,
   normalizeJobListResponse,
+  normalizeJobStatusResponse,
+  TERMINAL_JOB_STATUSES,
   QUEUE_STATE_LABELS,
   type JobListItem,
   type JobListResponse,
+  type JobStatusResponse,
   type JobStatusValue,
 } from "@/lib/job-status"
 import {
@@ -24,6 +28,7 @@ import { cn } from "@/lib/utils"
 import { apiFetch, normalizeFetchError, resolveApiOrigin } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { JobDebugPanel } from "@/components/job-debug-panel"
 import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
 import {
@@ -118,23 +123,57 @@ function TrackingPageContent() {
   const [queueSize, setQueueSize] = React.useState(0)
   const [isJobsLoading, setIsJobsLoading] = React.useState(false)
   const [jobsError, setJobsError] = React.useState<string | null>(null)
+  const [deletingJobId, setDeletingJobId] = React.useState<string | null>(null)
 
   const [trackedArtifacts, setTrackedArtifacts] = React.useState<JobArtifactsResponse | null>(
     null
   )
+  const [trackedJobId, setTrackedJobId] = React.useState<string | null>(requestedJobId || null)
+  const [trackedJobStatus, setTrackedJobStatus] = React.useState<JobStatusResponse | null>(null)
   const [trackedArtifactsLoading, setTrackedArtifactsLoading] = React.useState(false)
   const [trackedArtifactsError, setTrackedArtifactsError] = React.useState<string | null>(null)
+  const [trackedJobStatusError, setTrackedJobStatusError] = React.useState<string | null>(null)
   const [trackedArtifactsPage, setTrackedArtifactsPage] = React.useState<number | null>(null)
   const [trackingMenu, setTrackingMenu] = React.useState<"frames" | "compare">("compare")
   const [compareSplitRatio, setCompareSplitRatio] = React.useState(0.5)
   const [showInlinePdf, setShowInlinePdf] = React.useState(false)
   const [jobKeyword, setJobKeyword] = React.useState("")
   const [statusFilter, setStatusFilter] = React.useState<"all" | JobStatusValue>("all")
+  const router = useRouter()
 
   const currentTrackedJob = React.useMemo(() => {
-    if (!trackedArtifacts?.job_id) return null
-    return jobRecords.find((r) => r.job_id === trackedArtifacts.job_id) || null
-  }, [jobRecords, trackedArtifacts?.job_id])
+    if (!trackedJobId) return null
+    return jobRecords.find((r) => r.job_id === trackedJobId) || null
+  }, [jobRecords, trackedJobId])
+
+  const trackedJobDetail = React.useMemo<
+    (JobStatusResponse & {
+      queue_position?: number | null
+      queue_state?: string | null
+    }) | null
+  >(() => {
+    if (!currentTrackedJob && !trackedJobStatus) return null
+    if (!currentTrackedJob && trackedJobStatus) {
+      return {
+        ...trackedJobStatus,
+        queue_position: null,
+        queue_state: null,
+      }
+    }
+    if (currentTrackedJob && !trackedJobStatus) {
+      return {
+        ...normalizeJobStatusResponse(currentTrackedJob),
+        queue_position: currentTrackedJob.queue_position,
+        queue_state: currentTrackedJob.queue_state,
+      }
+    }
+    if (!currentTrackedJob || !trackedJobStatus) return null
+    return {
+      ...trackedJobStatus,
+      queue_position: currentTrackedJob.queue_position,
+      queue_state: currentTrackedJob.queue_state,
+    }
+  }, [currentTrackedJob, trackedJobStatus])
 
   const filteredJobRecords = React.useMemo(() => {
     const keyword = jobKeyword.trim().toLowerCase()
@@ -170,6 +209,9 @@ function TrackingPageContent() {
   }, [])
 
   const fetchJobArtifacts = React.useCallback(async (targetJobId: string) => {
+    setTrackedJobId(targetJobId)
+    setTrackedJobStatus(null)
+    setTrackedJobStatusError(null)
     setTrackedArtifactsLoading(true)
     setTrackedArtifactsError(null)
     setShowInlinePdf(false)
@@ -211,6 +253,18 @@ function TrackingPageContent() {
     }
   }, [])
 
+  const fetchTrackedJobStatus = React.useCallback(async (targetJobId: string) => {
+    const response = await apiFetch(`/jobs/${targetJobId}`)
+    const body = await response.json().catch(() => null)
+    if (!response.ok) {
+      throw new Error(body?.message || `加载任务状态失败（HTTP ${response.status}）`)
+    }
+    if (!body || typeof body !== "object") {
+      throw new Error("加载任务状态失败")
+    }
+    return normalizeJobStatusResponse(body)
+  }, [])
+
   const handleDownloadByJobId = React.useCallback(async (targetJobId: string) => {
     const response = await apiFetch(`/jobs/${targetJobId}/download`)
     if (!response.ok) {
@@ -227,6 +281,40 @@ function TrackingPageContent() {
     a.remove()
     window.URL.revokeObjectURL(url)
   }, [])
+
+  const handleDeleteJobById = React.useCallback(
+    async (targetJobId: string) => {
+      if (!window.confirm(`确定删除任务 ${targetJobId.slice(0, 8)} 吗？这会移除任务记录和本地产物。`)) {
+        return
+      }
+      setDeletingJobId(targetJobId)
+      try {
+        const response = await apiFetch(`/jobs/${targetJobId}`, { method: "DELETE" })
+        const body = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(body?.message || `删除失败（HTTP ${response.status}）`)
+        }
+        if (trackedJobId === targetJobId) {
+          setTrackedArtifacts(null)
+          setTrackedJobId(null)
+          setTrackedJobStatus(null)
+          setTrackedJobStatusError(null)
+          setTrackedArtifactsError(null)
+          setTrackedArtifactsPage(null)
+          setShowInlinePdf(false)
+          router.replace("/tracking", { scroll: false })
+        }
+        setJobRecords((prev) => prev.filter((row) => row.job_id !== targetJobId))
+        toast.success("任务已删除")
+        void fetchJobs(true)
+      } catch (e) {
+        toast.error(normalizeFetchError(e, "删除任务失败"))
+      } finally {
+        setDeletingJobId((current) => (current === targetJobId ? null : current))
+      }
+    },
+    [fetchJobs, router, trackedJobId]
+  )
 
   React.useEffect(() => {
     let mounted = true
@@ -250,8 +338,53 @@ function TrackingPageContent() {
 
   React.useEffect(() => {
     if (!requestedJobId) return
+    setTrackedJobId(requestedJobId)
     void fetchJobArtifacts(requestedJobId)
   }, [fetchJobArtifacts, requestedJobId])
+
+  React.useEffect(() => {
+    if (!trackedJobId) {
+      setTrackedJobStatus(null)
+      setTrackedJobStatusError(null)
+      return
+    }
+
+    let mounted = true
+    let timer: number | null = null
+
+    const stopPolling = () => {
+      if (timer !== null) {
+        window.clearInterval(timer)
+        timer = null
+      }
+    }
+
+    const poll = async () => {
+      try {
+        const status = await fetchTrackedJobStatus(trackedJobId)
+        if (!mounted) return
+        setTrackedJobStatus(status)
+        setTrackedJobStatusError(null)
+        if (TERMINAL_JOB_STATUSES.has(status.status)) {
+          stopPolling()
+        }
+      } catch (e) {
+        if (!mounted) return
+        setTrackedJobStatus(null)
+        setTrackedJobStatusError(normalizeFetchError(e, "加载任务状态失败"))
+      }
+    }
+
+    void poll()
+    timer = window.setInterval(() => {
+      void poll()
+    }, 2000)
+
+    return () => {
+      mounted = false
+      stopPolling()
+    }
+  }, [fetchTrackedJobStatus, trackedJobId])
 
   React.useEffect(() => {
     const pages = trackedArtifacts?.available_pages || []
@@ -403,9 +536,13 @@ function TrackingPageContent() {
               {filteredJobRecords.length ? (
                 <div className="max-h-[70vh] overflow-y-auto border border-border/80 bg-background/80">
                   {filteredJobRecords.map((record) => {
-                    const isCurrent = record.job_id === trackedArtifacts?.job_id
+                    const isCurrent = record.job_id === trackedJobId
                     const statusLabel = JOB_STATUS_LABELS[record.status] || record.status
                     const stageLabel = JOB_STAGE_LABELS[record.stage] || record.stage
+                    const canDelete =
+                      record.status === "completed" ||
+                      record.status === "failed" ||
+                      record.status === "cancelled"
                     const detailMessage =
                       (record.status === "failed" &&
                         typeof record.error?.message === "string" &&
@@ -477,6 +614,17 @@ function TrackingPageContent() {
                               下载
                             </Button>
                           ) : null}
+                          {canDelete ? (
+                            <Button
+                              type="button"
+                              size="xs"
+                              variant="outline"
+                              disabled={deletingJobId === record.job_id}
+                              onClick={() => void handleDeleteJobById(record.job_id)}
+                            >
+                              {deletingJobId === record.job_id ? "删除中..." : "删除"}
+                            </Button>
+                          ) : null}
                         </div>
                       </div>
                     )
@@ -498,7 +646,7 @@ function TrackingPageContent() {
                   <CardDescription>支持逐页查看，也可切换前后对比。</CardDescription>
                 </div>
                 <Badge variant="outline">
-                  {trackedArtifacts?.job_id ? trackedArtifacts.job_id.slice(0, 8) : "未选择任务"}
+                  {trackedJobId ? trackedJobId.slice(0, 8) : "未选择任务"}
                 </Badge>
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
@@ -519,40 +667,54 @@ function TrackingPageContent() {
                   前后对比
                 </Button>
               </div>
-              {currentTrackedJob ? (
+              {trackedJobDetail ? (
                 <div className="mt-3 grid gap-1 border border-border bg-muted/40 px-3 py-2">
                   <div className="text-xs text-muted-foreground">
-                    {JOB_STAGE_LABELS[currentTrackedJob.stage] || currentTrackedJob.stage} ·{" "}
-                    {currentTrackedJob.progress}%
+                    {JOB_STAGE_LABELS[trackedJobDetail.stage] || trackedJobDetail.stage} ·{" "}
+                    {trackedJobDetail.progress}%
                   </div>
-                  {(currentTrackedJob.status === "failed" &&
-                    typeof currentTrackedJob.error?.message === "string" &&
-                    currentTrackedJob.error.message.trim()) ||
-                  (currentTrackedJob.message && currentTrackedJob.message.trim()) ? (
+                  {(trackedJobDetail.status === "failed" &&
+                    typeof trackedJobDetail.error?.message === "string" &&
+                    trackedJobDetail.error.message.trim()) ||
+                  (trackedJobDetail.message && trackedJobDetail.message.trim()) ? (
                     <div className="text-xs text-muted-foreground">
-                      {(currentTrackedJob.status === "failed" &&
-                        typeof currentTrackedJob.error?.message === "string" &&
-                        currentTrackedJob.error.message.trim()) ||
-                        currentTrackedJob.message}
+                      {(trackedJobDetail.status === "failed" &&
+                        typeof trackedJobDetail.error?.message === "string" &&
+                        trackedJobDetail.error.message.trim()) ||
+                        trackedJobDetail.message}
                     </div>
                   ) : null}
                   <div className="font-mono text-[11px] text-muted-foreground">
-                    阶段代码：{currentTrackedJob.stage}
+                    阶段代码：{trackedJobDetail.stage}
                   </div>
-                  {currentTrackedJob.queue_state === "queued" &&
-                  typeof currentTrackedJob.queue_position === "number" ? (
+                  {trackedJobDetail.queue_state === "queued" &&
+                  typeof trackedJobDetail.queue_position === "number" ? (
                     <div className="font-mono text-[11px] text-muted-foreground">
-                      排队位置：第 {currentTrackedJob.queue_position} 位
+                      排队位置：第 {trackedJobDetail.queue_position} 位
                     </div>
-                  ) : currentTrackedJob.queue_state ? (
+                  ) : trackedJobDetail.queue_state ? (
                     <div className="font-mono text-[11px] text-muted-foreground">
-                      队列状态：{QUEUE_STATE_LABELS[currentTrackedJob.queue_state] || currentTrackedJob.queue_state}
+                      队列状态：
+                      {QUEUE_STATE_LABELS[trackedJobDetail.queue_state] || trackedJobDetail.queue_state}
                     </div>
                   ) : null}
                 </div>
               ) : null}
             </CardHeader>
             <CardContent className="grid gap-4 py-5">
+              {trackedJobId ? (
+                <JobDebugPanel
+                  events={trackedJobStatus?.debug_events || []}
+                  title="任务调试日志"
+                  emptyLabel="选中任务后会在这里显示后端逐行调试信息"
+                  compact
+                />
+              ) : null}
+              {trackedJobStatusError ? (
+                <div className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {trackedJobStatusError}
+                </div>
+              ) : null}
               {trackedArtifactsError ? (
                 <div className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                   {trackedArtifactsError}

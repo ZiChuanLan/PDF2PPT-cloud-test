@@ -63,6 +63,11 @@ _MD_CODE_RE = re.compile(r"`([^`]+)`")
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^\)]+)\)")
 
 
+def _is_layout_parse_source(source_id: Any) -> bool:
+    normalized = str(source_id or "").strip().lower()
+    return normalized in {"mineru", "baidu_doc"}
+
+
 def _sanitize_markdown_text(text: str) -> str:
     """Remove common markdown markers while preserving readable content."""
 
@@ -324,10 +329,7 @@ def generate_pptx_from_ir(
             if page_ocr_text_elements
             else 12.0
         )
-        has_mineru_elements = any(
-            str(el.get("source") or "").strip().lower() == "mineru"
-            for el in page_elements
-        )
+        has_mineru_elements = any(_is_layout_parse_source(el.get("source")) for el in page_elements)
 
         if not has_text_layer:
             overlay_scanned_image_crops = scanned_page_mode_id != "fullpage"
@@ -472,6 +474,10 @@ def generate_pptx_from_ir(
                 min_area_ratio=scanned_image_region_min_area_ratio_id,
                 max_area_ratio=scanned_image_region_max_area_ratio_id,
                 max_aspect_ratio=scanned_image_region_max_aspect_ratio_id,
+            )
+            overlay_image_region_infos = list(image_region_infos)
+            overlay_scanned_image_crops = bool(overlay_image_region_infos) and (
+                scanned_page_mode_id != "fullpage"
             )
             ocr_text_elements = _filter_scanned_ocr_text_elements(
                 ocr_text_elements=ocr_text_elements,
@@ -668,14 +674,16 @@ def generate_pptx_from_ir(
                 # In non-fill mode keep conservative behavior and clear only
                 # transparent/icon-like crops.
                 if is_fill_mode:
-                    clear_regions_pt = [info.bbox_pt for info in image_region_infos]
+                    clear_regions_pt = [
+                        info.bbox_pt for info in overlay_image_region_infos
+                    ]
                     clear_out_name = (
                         f"page-{page_index:04d}.clean.images-bg-cleared.png"
                     )
                 else:
                     clear_regions_pt = [
                         info.bbox_pt
-                        for info in image_region_infos
+                        for info in overlay_image_region_infos
                         if info.background_removed
                     ]
                     clear_out_name = f"page-{page_index:04d}.clean.icons-bg-cleared.png"
@@ -703,7 +711,7 @@ def generate_pptx_from_ir(
 
             # 2) Cropped images
             if overlay_scanned_image_crops:
-                for info in image_region_infos:
+                for info in overlay_image_region_infos:
                     try:
                         left, top, width, height = _bbox_pt_to_slide_emu(
                             info.bbox_pt, transform=transform
@@ -946,7 +954,8 @@ def generate_pptx_from_ir(
                 artifacts_dir=artifacts,
                 dpi=int(scanned_render_dpi),
                 scanned_image_region_crops=[
-                    (list(info.bbox_pt), info.crop_path) for info in image_region_infos
+                    (list(info.bbox_pt), info.crop_path)
+                    for info in overlay_image_region_infos
                 ]
                 if overlay_scanned_image_crops
                 else [],
@@ -959,9 +968,10 @@ def generate_pptx_from_ir(
         ocr_sampling_pix: Any | None = None
         if has_mineru_elements and source_pdf.exists():
             try:
-                # MinerU text-page output targets visual fidelity to source PDF.
-                # Force fill-mode erasing here so the cleaned background remains
-                # deterministic and uniformly flat behind re-laid text.
+                # Layout-parse text-page output (MinerU / Baidu parser) targets
+                # visual fidelity to source PDF. Force fill-mode erasing here so
+                # the cleaned background remains deterministic and uniformly flat
+                # behind re-laid text and overlaid image crops.
                 mineru_text_erase_mode = "fill"
                 render_path = (
                     artifacts / "page_renders" / f"page-{page_index:04d}.mineru.png"
@@ -979,7 +989,7 @@ def generate_pptx_from_ir(
                 mineru_image_regions_pt: list[list[float]] = []
 
                 for el in _iter_page_elements(page, type_name="text"):
-                    if str(el.get("source") or "").strip().lower() != "mineru":
+                    if not _is_layout_parse_source(el.get("source")):
                         continue
                     try:
                         x0, y0, x1, y1 = _coerce_bbox_pt(el.get("bbox_pt"))
@@ -995,7 +1005,7 @@ def generate_pptx_from_ir(
                     )
 
                 for el in _iter_page_elements(page, type_name="image"):
-                    if str(el.get("source") or "").strip().lower() != "mineru":
+                    if not _is_layout_parse_source(el.get("source")):
                         continue
                     if not str(el.get("image_path") or "").strip():
                         continue
@@ -1179,7 +1189,7 @@ def generate_pptx_from_ir(
 
             x0, y0, x1, y1 = _coerce_bbox_pt(bbox_pt)
             source_id = str(el.get("source") or "").strip().lower()
-            is_mineru_text = source_id == "mineru"
+            is_mineru_text = _is_layout_parse_source(source_id)
             is_ocr_text = source_id == "ocr"
             ocr_linebreak_assisted = bool(el.get("ocr_linebreak_assisted"))
             raw_text = str(el.get("text") or "")

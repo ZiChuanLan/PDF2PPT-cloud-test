@@ -26,6 +26,7 @@ Thumbs.db
 
 # pytest
 .pytest_cache/
+.ruff_cache/
 
 # OMC state
 .omc/

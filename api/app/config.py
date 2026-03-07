@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     # Keepalive heartbeat interval for long-running blocking stages.
     # Used to refresh job metadata TTL while no progress update is emitted.
     job_keepalive_interval_s: int = 15
+    # Maximum number of per-job debug events retained in job status payloads.
+    job_debug_events_limit: int = 200
     # Root directory for per-job runtime artifacts.
     # Relative paths are resolved under the `api/` directory.
     job_root_dir: str = "data/jobs"
@@ -42,6 +44,9 @@ class Settings(BaseSettings):
     # Overall OCR stage timeout in seconds.  When exceeded the remaining pages
     # are skipped and the job continues to PPTX generation.
     ocr_total_timeout_s: int = 3600
+    # Best-effort timeout for AI image-region detection. This should stay much
+    # shorter than page OCR so image-region probing cannot make OCR appear stuck.
+    ocr_image_region_timeout_s: int = 12
     cors_allow_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     cors_allow_origin_regex: str | None = None
 

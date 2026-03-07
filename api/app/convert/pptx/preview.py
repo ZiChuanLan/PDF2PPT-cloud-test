@@ -22,6 +22,12 @@ from .scanned_page import _estimate_baseline_ocr_line_height_pt, _render_pdf_pag
 
 _PREVIEW_FONT_CACHE: dict[tuple[int, bool], Any] = {}
 
+
+def _is_layout_parse_source(source_id: Any) -> bool:
+    normalized = str(source_id or "").strip().lower()
+    return normalized in {"mineru", "baidu_doc"}
+
+
 def _load_preview_font(*, size_px: int, prefer_cjk: bool) -> Any:
     from PIL import ImageFont
 
@@ -267,7 +273,7 @@ def _export_final_preview_page_image(
 
         raw_text = str(el.get("text") or "")
         source_id = str(el.get("source") or "").strip().lower()
-        is_mineru_text = source_id == "mineru"
+        is_mineru_text = _is_layout_parse_source(source_id)
         is_scanned_ocr = bool(is_scanned_page and source_id == "ocr")
         is_layout_text = is_mineru_text or is_scanned_ocr
 

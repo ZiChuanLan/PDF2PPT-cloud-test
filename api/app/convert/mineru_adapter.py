@@ -822,6 +822,8 @@ def _build_ir_from_mineru_outputs(
     image_path_prefix: str | None = None,
     mineru_result_dir: Path | None = None,
     mineru_result_path_prefix: str | None = None,
+    layout_source: str = "mineru",
+    warning_prefix: str = "mineru",
 ) -> dict[str, Any]:
     item_page_pairs: list[tuple[dict[str, Any], int]] = [
         (item, _extract_page_idx(item, fallback=idx))
@@ -963,7 +965,7 @@ def _build_ir_from_mineru_outputs(
                         "type": "text",
                         "bbox_pt": bbox_pt,
                         "text": text,
-                        "source": "mineru",
+                        "source": layout_source,
                         "mineru_block_type": kind,
                     }
                     text_style = _extract_text_style(item)
@@ -1027,7 +1029,7 @@ def _build_ir_from_mineru_outputs(
                                     "type": "image",
                                     "bbox_pt": bbox_pt,
                                     "image_path": f"{result_prefix}/{normalized_rel}",
-                                    "source": "mineru",
+                                    "source": layout_source,
                                 }
                             )
                             image_added = True
@@ -1062,16 +1064,16 @@ def _build_ir_from_mineru_outputs(
                                 "bbox_pt": bbox_pt,
                                 "image_path": f"{image_prefix}/{image_name}",
                                 "mime": "image/png",
-                                "source": "mineru",
+                                "source": layout_source,
                             }
                         )
 
             elements.sort(key=lambda item: (item["bbox_pt"][1], item["bbox_pt"][0]))
             page_warnings: list[str] = []
             if dropped_items:
-                page_warnings.append(f"mineru_items_dropped={dropped_items}")
+                page_warnings.append(f"{warning_prefix}_items_dropped={dropped_items}")
             if not elements:
-                page_warnings.append("mineru_no_elements")
+                page_warnings.append(f"{warning_prefix}_no_elements")
             has_text_like_elements = any(
                 str(el.get("type") or "").strip().lower() in {"text", "table"}
                 for el in elements
@@ -1098,9 +1100,9 @@ def _build_ir_from_mineru_outputs(
 
     pages.sort(key=lambda page: int(page.get("page_index") or 0))
     if not pages:
-        ir_warnings.append("mineru_no_pages")
+        ir_warnings.append(f"{warning_prefix}_no_pages")
     if page_index_shift:
-        ir_warnings.append(f"mineru_page_index_shift={page_index_shift}")
+        ir_warnings.append(f"{warning_prefix}_page_index_shift={page_index_shift}")
 
     source_page_count = len(page_sizes) if page_sizes else len(pages)
     selected_start = (

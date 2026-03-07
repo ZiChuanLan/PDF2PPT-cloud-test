@@ -28,6 +28,7 @@ class OcrRuntimeSetup:
     effective_ocr_ai_api_key: str | None
     effective_ocr_ai_base_url: str | None
     effective_ocr_ai_model: str | None
+    effective_paddle_doc_max_side_px: int | None
     effective_tesseract_language: str
     effective_tesseract_min_conf: float | None
     strict_ocr_mode: bool
@@ -62,12 +63,13 @@ def setup_ocr_runtime(
     ocr_ai_provider: str | None,
     ocr_ai_base_url: str | None,
     ocr_ai_model: str | None,
+    ocr_paddle_vl_docparser_max_side_px: int | None = None,
     ocr_geometry_mode: str | None = None,
     ocr_ai_linebreak_assist: bool | None = None,
     ocr_strict_mode: bool | None = True,
 ) -> OcrRuntimeSetup:
     requested_ocr_provider = normalize_requested_ocr_provider(ocr_provider)
-    allow_main_ai_reuse = requested_ocr_provider not in {"aiocr", "paddle"}
+    allow_main_ai_reuse = requested_ocr_provider not in {"aiocr", "paddle", "baidu"}
 
     # If the user didn't configure separate AI OCR credentials, reuse
     # the layout-assist OpenAI-compatible settings (when available).
@@ -119,6 +121,20 @@ def setup_ocr_runtime(
             effective_tesseract_min_conf = 35.0
         else:
             effective_tesseract_min_conf = min(float(effective_tesseract_min_conf), 35.0)
+    effective_paddle_doc_max_side_px: int | None = None
+    if ocr_paddle_vl_docparser_max_side_px is not None:
+        try:
+            effective_paddle_doc_max_side_px = int(ocr_paddle_vl_docparser_max_side_px)
+        except Exception:
+            effective_paddle_doc_max_side_px = None
+        if effective_paddle_doc_max_side_px is not None:
+            effective_paddle_doc_max_side_px = max(
+                0, min(6000, int(effective_paddle_doc_max_side_px))
+            )
+            setup_notes.append(
+                "ocr_paddle_vl_docparser_max_side_px="
+                f"{effective_paddle_doc_max_side_px}"
+            )
 
     text_refiner: AiOcrTextRefiner | None = None
     linebreak_refiner: AiOcrTextRefiner | None = None
@@ -176,6 +192,7 @@ def setup_ocr_runtime(
             ai_api_key=effective_ocr_ai_api_key,
             ai_base_url=effective_ocr_ai_base_url,
             ai_model=effective_ocr_ai_model,
+            paddle_doc_max_side_px=effective_paddle_doc_max_side_px,
             baidu_app_id=ocr_baidu_app_id,
             baidu_api_key=ocr_baidu_api_key,
             baidu_secret_key=ocr_baidu_secret_key,
@@ -197,7 +214,6 @@ def setup_ocr_runtime(
                 "aiocr",
                 "tesseract",
                 "local",
-                "baidu",
                 "paddle_local",
             }
             linebreak_refiner_allowed = provider_choice in {
@@ -205,13 +221,19 @@ def setup_ocr_runtime(
                 "aiocr",
                 "tesseract",
                 "local",
-                "baidu",
                 "paddle",
                 "paddle_local",
             }
             linebreak_requested = ocr_ai_linebreak_assist
             linebreak_enabled = bool(linebreak_requested)
             auto_linebreak_enabled = False
+
+            if provider_choice == "baidu":
+                if linebreak_requested is not None:
+                    setup_notes.append(
+                        "ocr_ai_linebreak_assist_ignored_for_explicit_baidu"
+                    )
+                linebreak_enabled = False
 
             # PaddleOCR-VL doc_parser often returns paragraph-like bboxes.
             # Auto-enable line-break assist (when user didn't specify)
@@ -277,6 +299,7 @@ def setup_ocr_runtime(
             effective_ocr_ai_api_key=effective_ocr_ai_api_key,
             effective_ocr_ai_base_url=effective_ocr_ai_base_url,
             effective_ocr_ai_model=effective_ocr_ai_model,
+            effective_paddle_doc_max_side_px=effective_paddle_doc_max_side_px,
             effective_tesseract_language=effective_tesseract_language,
             effective_tesseract_min_conf=effective_tesseract_min_conf,
             strict_ocr_mode=strict_ocr_mode,
@@ -315,6 +338,7 @@ def setup_ocr_runtime(
             effective_ocr_ai_api_key=effective_ocr_ai_api_key,
             effective_ocr_ai_base_url=effective_ocr_ai_base_url,
             effective_ocr_ai_model=effective_ocr_ai_model,
+            effective_paddle_doc_max_side_px=effective_paddle_doc_max_side_px,
             effective_tesseract_language=effective_tesseract_language,
             effective_tesseract_min_conf=effective_tesseract_min_conf,
             strict_ocr_mode=strict_ocr_mode,
@@ -366,6 +390,7 @@ def build_ocr_debug_payload(
             "provider": setup.effective_ocr_ai_provider,
             "base_url": setup.effective_ocr_ai_base_url,
             "model": setup.effective_ocr_ai_model,
+            "paddle_doc_max_side_px": setup.effective_paddle_doc_max_side_px,
             "config_source": setup.ocr_ai_config_source,
             "sources": {
                 "api_key": setup.ocr_ai_api_key_source,

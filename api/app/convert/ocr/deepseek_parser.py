@@ -387,3 +387,103 @@ def _extract_deepseek_tagged_items(
         )
 
     return det_only or None
+
+
+def _extract_deepseek_grounding_regions(
+    text: Any, *, max_items: int = 256
+) -> list[dict] | None:
+    content = _extract_message_text(text)
+    if not content:
+        return None
+
+    normalized = content
+    for _ in range(2):
+        decoded = html.unescape(normalized)
+        if decoded == normalized:
+            break
+        normalized = decoded
+
+    out: list[dict] = []
+    seen: set[tuple[str, float, float, float, float]] = set()
+
+    def _append_region(label_raw: str, x0: str, y0: str, x1: str, y1: str) -> None:
+        if len(out) >= max_items:
+            return
+        label = _clean_deepseek_ref_text(label_raw)
+        if not label:
+            return
+        try:
+            fx0 = float(x0)
+            fy0 = float(y0)
+            fx1 = float(x1)
+            fy1 = float(y1)
+        except Exception:
+            return
+        key = (label, fx0, fy0, fx1, fy1)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(
+            {
+                "label": label,
+                "bbox": [fx0, fy0, fx1, fy1],
+            }
+        )
+
+    tokens: list[dict[str, Any]] = []
+    for match in _DEEPSEEK_TAG_TOKEN_PATTERN.finditer(normalized):
+        if match.group("ref") is not None:
+            tokens.append(
+                {
+                    "type": "ref",
+                    "text": str(match.group("ref_text") or ""),
+                }
+            )
+            continue
+        if match.group("det") is not None:
+            tokens.append(
+                {
+                    "type": "det",
+                    "bbox": (
+                        str(match.group("x0") or ""),
+                        str(match.group("y0") or ""),
+                        str(match.group("x1") or ""),
+                        str(match.group("y1") or ""),
+                    ),
+                }
+            )
+
+    i = 0
+    while (i + 1) < len(tokens) and len(out) < max_items:
+        a = tokens[i]
+        b = tokens[i + 1]
+        a_type = str(a.get("type") or "")
+        b_type = str(b.get("type") or "")
+
+        if a_type == "ref" and b_type == "det":
+            x0, y0, x1, y1 = b.get("bbox") or ("", "", "", "")
+            _append_region(str(a.get("text") or ""), x0, y0, x1, y1)
+            i += 2
+            continue
+
+        if a_type == "det" and b_type == "ref":
+            x0, y0, x1, y1 = a.get("bbox") or ("", "", "", "")
+            _append_region(str(b.get("text") or ""), x0, y0, x1, y1)
+            i += 2
+            continue
+
+        i += 1
+
+    if not out:
+        for match in _DEEPSEEK_REF_THEN_DET_PATTERN.finditer(normalized):
+            _append_region(
+                str(match.group("text") or ""),
+                str(match.group("x0") or ""),
+                str(match.group("y0") or ""),
+                str(match.group("x1") or ""),
+                str(match.group("y1") or ""),
+            )
+            if len(out) >= max_items:
+                break
+
+    return out or None

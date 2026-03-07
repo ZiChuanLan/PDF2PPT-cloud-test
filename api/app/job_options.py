@@ -6,9 +6,10 @@ from .models.error import AppException, ErrorCode
 from .utils.text import clean_str
 
 
-VALID_PARSE_PROVIDERS = {"local", "mineru", "v2"}
+VALID_PARSE_PROVIDERS = {"local", "mineru", "baidu_doc", "v2"}
 VALID_OCR_PROVIDERS = {"auto", "aiocr", "baidu", "tesseract", "paddle", "paddle_local"}
 VALID_LAYOUT_PROVIDERS = {"openai", "claude"}
+VALID_BAIDU_DOC_PARSE_TYPES = {"general", "paddle_vl"}
 VALID_OCR_AI_PROVIDERS = {
     "auto",
     "openai",
@@ -47,12 +48,23 @@ LAYOUT_PROVIDER_ALIASES = VALID_LAYOUT_PROVIDERS | {
     "openai_compatible",
     "anthropic",
 }
+BAIDU_DOC_PARSE_TYPE_ALIASES = VALID_BAIDU_DOC_PARSE_TYPES | {
+    "default",
+    "normal",
+    "ordinary",
+    "common",
+    "paddle-vl",
+    "paddleocr-vl",
+    "paddleocr_vl",
+    "vl",
+}
 
 
 @dataclass(frozen=True)
 class NormalizedJobOptions:
     parse_provider: str
     provider: str
+    baidu_doc_parse_type: str
     ocr_provider: str
     ocr_ai_provider: str
     ocr_geometry_mode: str
@@ -86,6 +98,15 @@ def normalize_layout_provider(value: str | None) -> str:
     if provider_id == "anthropic":
         return "claude"
     return provider_id
+
+
+def normalize_baidu_doc_parse_type(value: str | None) -> str:
+    parse_type = (clean_str(_unwrap_form_default(value)) or "paddle_vl").lower()
+    if parse_type in {"default", "normal", "ordinary", "common"}:
+        return "general"
+    if parse_type in {"paddle-vl", "paddleocr-vl", "paddleocr_vl", "vl"}:
+        return "paddle_vl"
+    return parse_type if parse_type in VALID_BAIDU_DOC_PARSE_TYPES else "paddle_vl"
 
 
 def normalize_ai_ocr_provider(value: str | None) -> str:
@@ -153,6 +174,7 @@ def validate_and_normalize_job_options(
     mineru_api_token: str | None,
     provider: str | None = None,
     api_key: str | None = None,
+    baidu_doc_parse_type: str | None = None,
     ocr_provider: str | None,
     ocr_ai_provider: str | None,
     ocr_ai_api_key: str | None,
@@ -168,6 +190,7 @@ def validate_and_normalize_job_options(
 ) -> NormalizedJobOptions:
     api_key = _unwrap_form_default(api_key)
     provider = _unwrap_form_default(provider)
+    baidu_doc_parse_type = _unwrap_form_default(baidu_doc_parse_type)
     _ = api_key
     mineru_api_token = _unwrap_form_default(mineru_api_token)
     ocr_ai_api_key = _unwrap_form_default(ocr_ai_api_key)
@@ -205,6 +228,20 @@ def validate_and_normalize_job_options(
         raise AppException(
             code=ErrorCode.VALIDATION_ERROR,
             message="mineru_api_token is required when parse_provider=mineru",
+            status_code=400,
+        )
+
+    normalized_baidu_doc_parse_type = normalize_baidu_doc_parse_type(baidu_doc_parse_type)
+    raw_baidu_doc_parse_type = (clean_str(baidu_doc_parse_type) or "").lower()
+    if (
+        normalized_parse_provider == "baidu_doc"
+        and raw_baidu_doc_parse_type
+        and raw_baidu_doc_parse_type not in BAIDU_DOC_PARSE_TYPE_ALIASES
+    ):
+        raise AppException(
+            code=ErrorCode.VALIDATION_ERROR,
+            message="Unsupported Baidu document parser type",
+            details={"baidu_doc_parse_type": baidu_doc_parse_type},
             status_code=400,
         )
 
@@ -292,19 +329,33 @@ def validate_and_normalize_job_options(
     if normalized_ocr_provider == "baidu":
         has_baidu_credentials = all(
             bool((value or "").strip())
-            for value in (ocr_baidu_app_id, ocr_baidu_api_key, ocr_baidu_secret_key)
+            for value in (ocr_baidu_api_key, ocr_baidu_secret_key)
         )
         if not has_baidu_credentials:
             raise AppException(
                 code=ErrorCode.VALIDATION_ERROR,
-                message="Baidu OCR requires app_id / api_key / secret_key",
+                message="Baidu OCR requires api_key / secret_key",
                 details={"ocr_provider": normalized_ocr_provider},
+                status_code=400,
+            )
+
+    if normalized_parse_provider == "baidu_doc":
+        has_baidu_doc_credentials = all(
+            bool((value or "").strip())
+            for value in (ocr_baidu_api_key, ocr_baidu_secret_key)
+        )
+        if not has_baidu_doc_credentials:
+            raise AppException(
+                code=ErrorCode.VALIDATION_ERROR,
+                message="Baidu document parser requires api_key / secret_key",
+                details={"parse_provider": normalized_parse_provider},
                 status_code=400,
             )
 
     return NormalizedJobOptions(
         parse_provider=normalized_parse_provider,
         provider=normalized_provider,
+        baidu_doc_parse_type=normalized_baidu_doc_parse_type,
         ocr_provider=normalized_ocr_provider,
         ocr_ai_provider=normalized_ocr_ai_provider,
         ocr_geometry_mode=normalized_geometry_mode,

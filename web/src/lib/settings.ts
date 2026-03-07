@@ -1,5 +1,7 @@
 export type MainProvider = "openai" | "claude" | "siliconflow"
 export type Provider = MainProvider | "mineru"
+export type ParseEngineMode = "local_ocr" | "remote_ocr" | "baidu_doc" | "mineru_cloud"
+export type BaiduDocParseType = "general" | "paddle_vl"
 export type OcrProvider =
   | "auto"
   | "aiocr"
@@ -18,6 +20,7 @@ export type TextEraseMode = "smart" | "fill"
 export type Settings = {
   provider: Provider
   preferredMainProvider: MainProvider
+  parseEngineMode: ParseEngineMode
   openaiApiKey: string
   openaiBaseUrl: string
   openaiModel: string
@@ -37,6 +40,7 @@ export type Settings = {
   layoutAssistApplyImageRegions: boolean
   visualAssistModeLocal: LayoutAssistMode
   visualAssistModeRemote: LayoutAssistMode
+  visualAssistModeBaiduDoc: LayoutAssistMode
   visualAssistModeMineru: LayoutAssistMode
   enableOcr: boolean
   textEraseMode: TextEraseMode
@@ -49,6 +53,7 @@ export type Settings = {
   scannedImageRegionMaxAspectRatio: string
   ocrStrictMode: boolean
   ocrProvider: OcrProvider
+  baiduDocParseType: BaiduDocParseType
   ocrBaiduAppId: string
   ocrBaiduApiKey: string
   ocrBaiduSecretKey: string
@@ -58,6 +63,7 @@ export type Settings = {
   ocrAiProvider: OcrAiProvider
   ocrAiBaseUrl: string
   ocrAiModel: string
+  ocrPaddleVlDocparserMaxSidePx: string
   ocrAiLinebreakAssistMode: OcrAiLinebreakAssistMode
   ocrGeometryMode: OcrGeometryMode
 }
@@ -65,10 +71,22 @@ export type Settings = {
 export const SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 
 export const SETTINGS_STORAGE_KEY = "pdf-to-ppt.settings.v1"
+export const BAIDU_DOC_PARSE_TYPE_LABELS: Record<BaiduDocParseType, string> = {
+  general: "普通文档解析",
+  paddle_vl: "PaddleOCR-VL",
+}
+
+export const PARSE_ENGINE_MODE_LABELS: Record<ParseEngineMode, string> = {
+  local_ocr: "传统 OCR",
+  remote_ocr: "AIOCR",
+  baidu_doc: "百度解析",
+  mineru_cloud: "云端 MinerU",
+}
 
 export const defaultSettings: Settings = {
   provider: "openai",
   preferredMainProvider: "openai",
+  parseEngineMode: "local_ocr",
   openaiApiKey: "",
   openaiBaseUrl: "",
   openaiModel: "",
@@ -88,9 +106,10 @@ export const defaultSettings: Settings = {
   enableLayoutAssist: false,
   // Keep off by default: some pages may over-match and hide decorative images.
   layoutAssistApplyImageRegions: false,
-  // AI layout-assist policy for the three parse chains. Keep all off by default.
+  // AI layout-assist policy for the four parse chains. Keep all off by default.
   visualAssistModeLocal: "off",
   visualAssistModeRemote: "off",
+  visualAssistModeBaiduDoc: "off",
   visualAssistModeMineru: "off",
   // Most real-world PDFs are scans. Default to OCR-on so output is editable.
   enableOcr: true,
@@ -110,6 +129,7 @@ export const defaultSettings: Settings = {
   ocrStrictMode: true,
   // Local mode now defaults to pure local OCR (no auto fallback).
   ocrProvider: "tesseract",
+  baiduDocParseType: "paddle_vl",
   ocrBaiduAppId: "",
   ocrBaiduApiKey: "",
   ocrBaiduSecretKey: "",
@@ -120,6 +140,7 @@ export const defaultSettings: Settings = {
   ocrAiProvider: "auto",
   ocrAiBaseUrl: "",
   ocrAiModel: "",
+  ocrPaddleVlDocparserMaxSidePx: "2200",
   // AI OCR line-break post-process policy. `auto` lets the backend decide
   // based on the selected OCR model instead of piggybacking on layout assist.
   ocrAiLinebreakAssistMode: "auto",
@@ -150,6 +171,12 @@ export function loadStoredSettings(): Settings {
     parsed as { preferredMainProvider?: string } | null
   )?.preferredMainProvider
   const parsedParseProvider = (parsed as { parseProvider?: string } | null)?.parseProvider
+  const parsedParseEngineMode = (
+    parsed as { parseEngineMode?: string } | null
+  )?.parseEngineMode
+  const parsedBaiduDocParseType = (
+    parsed as { baiduDocParseType?: string } | null
+  )?.baiduDocParseType
   if (parsedProvider === "domestic" || parsedParseProvider === "mineru") {
     merged.provider = "mineru"
   }
@@ -238,6 +265,59 @@ export function loadStoredSettings(): Settings {
   if (merged.provider !== "mineru" && merged.ocrProvider === "auto") {
     merged.ocrProvider = "tesseract"
   }
+  const validParseEngineModes: ParseEngineMode[] = [
+    "local_ocr",
+    "remote_ocr",
+    "baidu_doc",
+    "mineru_cloud",
+  ]
+  if (
+    typeof parsedParseEngineMode === "string" &&
+    validParseEngineModes.includes(parsedParseEngineMode as ParseEngineMode)
+  ) {
+    merged.parseEngineMode = parsedParseEngineMode as ParseEngineMode
+  } else if (parsedParseProvider === "baidu_doc") {
+    merged.parseEngineMode = "baidu_doc"
+  } else if (merged.ocrProvider === "baidu") {
+    merged.parseEngineMode = "baidu_doc"
+  } else if (merged.provider === "mineru") {
+    merged.parseEngineMode = "mineru_cloud"
+  } else if (parsedProvider === "v2" || parsedParseProvider === "v2" || merged.ocrProvider === "aiocr") {
+    merged.parseEngineMode = "remote_ocr"
+  } else {
+    merged.parseEngineMode = "local_ocr"
+  }
+  if (merged.parseEngineMode === "mineru_cloud") {
+    merged.provider = "mineru"
+  } else if (merged.provider === "mineru") {
+    merged.provider = merged.preferredMainProvider
+  }
+  if (merged.parseEngineMode === "local_ocr" && merged.ocrProvider === "baidu") {
+    merged.ocrProvider = "tesseract"
+  }
+  const validBaiduDocParseTypes: BaiduDocParseType[] = ["general", "paddle_vl"]
+  if (typeof parsedBaiduDocParseType === "string") {
+    const normalizedBaiduDocParseType = parsedBaiduDocParseType.trim().toLowerCase()
+    if (
+      normalizedBaiduDocParseType === "paddle_vl" ||
+      normalizedBaiduDocParseType === "paddle-vl" ||
+      normalizedBaiduDocParseType === "paddleocr-vl" ||
+      normalizedBaiduDocParseType === "paddleocr_vl" ||
+      normalizedBaiduDocParseType === "vl"
+    ) {
+      merged.baiduDocParseType = "paddle_vl"
+    } else if (
+      normalizedBaiduDocParseType === "general" ||
+      normalizedBaiduDocParseType === "normal" ||
+      normalizedBaiduDocParseType === "default" ||
+      normalizedBaiduDocParseType === "ordinary"
+    ) {
+      merged.baiduDocParseType = "general"
+    }
+  }
+  if (!validBaiduDocParseTypes.includes(merged.baiduDocParseType)) {
+    merged.baiduDocParseType = "paddle_vl"
+  }
   const validOcrAiProviders: OcrAiProvider[] = [
     "auto",
     "openai",
@@ -290,6 +370,16 @@ export function loadStoredSettings(): Settings {
     merged.scannedImageRegionMaxAspectRatio,
     defaultSettings.scannedImageRegionMaxAspectRatio
   )
+  merged.ocrPaddleVlDocparserMaxSidePx = toNumberLikeString(
+    merged.ocrPaddleVlDocparserMaxSidePx,
+    defaultSettings.ocrPaddleVlDocparserMaxSidePx
+  )
+  const paddleDocMaxSidePx = Number(merged.ocrPaddleVlDocparserMaxSidePx)
+  if (!Number.isFinite(paddleDocMaxSidePx) || paddleDocMaxSidePx < 0) {
+    merged.ocrPaddleVlDocparserMaxSidePx = defaultSettings.ocrPaddleVlDocparserMaxSidePx
+  } else {
+    merged.ocrPaddleVlDocparserMaxSidePx = String(Math.round(paddleDocMaxSidePx))
+  }
   if (typeof merged.layoutAssistApplyImageRegions !== "boolean") {
     merged.layoutAssistApplyImageRegions = false
   }
@@ -320,6 +410,9 @@ export function loadStoredSettings(): Settings {
   }
   if (!validLayoutAssistModes.includes(merged.visualAssistModeRemote)) {
     merged.visualAssistModeRemote = legacyLayoutAssistMode
+  }
+  if (!validLayoutAssistModes.includes(merged.visualAssistModeBaiduDoc)) {
+    merged.visualAssistModeBaiduDoc = "off"
   }
   if (!validLayoutAssistModes.includes(merged.visualAssistModeMineru)) {
     merged.visualAssistModeMineru = merged.enableLayoutAssist ? "auto" : "off"

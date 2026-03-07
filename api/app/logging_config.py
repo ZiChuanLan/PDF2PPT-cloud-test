@@ -9,6 +9,7 @@ from typing import Any
 # Context variables for request/job tracking
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 job_id_var: ContextVar[str | None] = ContextVar("job_id", default=None)
+job_stage_var: ContextVar[str | None] = ContextVar("job_stage", default=None)
 
 # Sensitive fields to filter from logs
 SENSITIVE_FIELDS = frozenset(
@@ -41,6 +42,7 @@ class StructuredFormatter(logging.Formatter):
         """Format log record with request/job context."""
         request_id = request_id_var.get()
         job_id = job_id_var.get()
+        job_stage = job_stage_var.get()
 
         # Build structured message
         parts = [f"[{record.levelname}]"]
@@ -49,10 +51,40 @@ class StructuredFormatter(logging.Formatter):
             parts.append(f"[req:{request_id[:8]}]")
         if job_id:
             parts.append(f"[job:{job_id[:8]}]")
+        if job_stage:
+            parts.append(f"[stage:{job_stage}]")
 
         parts.append(f"{record.name}: {record.getMessage()}")
 
         return " ".join(parts)
+
+
+class JobDebugHandler(logging.Handler):
+    """Mirror in-job log lines into the job status payload for the frontend."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        job_id = job_id_var.get()
+        if not job_id:
+            return
+
+        try:
+            from .services.redis_service import get_redis_service
+
+            message = str(record.getMessage() or "").strip()
+            if not message:
+                return
+
+            get_redis_service().append_debug_event(
+                job_id,
+                level=str(record.levelname or "INFO").lower(),
+                message=message,
+                source=record.name,
+                stage=job_stage_var.get(),
+                dedupe=True,
+            )
+        except Exception:
+            # Never let debug mirroring break the main job path.
+            return
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -72,6 +104,10 @@ def setup_logging(level: str = "INFO") -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(StructuredFormatter())
     root_logger.addHandler(handler)
+
+    debug_handler = JobDebugHandler()
+    debug_handler.setLevel(logging.INFO)
+    root_logger.addHandler(debug_handler)
 
     # Reduce noise from third-party libraries
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
@@ -98,6 +134,11 @@ def set_request_id(request_id: str | None = None) -> str:
 def set_job_id(job_id: str | None) -> None:
     """Set the job ID for the current context."""
     job_id_var.set(job_id)
+
+
+def set_job_stage(stage: str | None) -> None:
+    """Set the job stage for the current context."""
+    job_stage_var.set(stage)
 
 
 def get_request_id() -> str | None:

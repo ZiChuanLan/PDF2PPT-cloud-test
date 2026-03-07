@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import threading
 from typing import Any
 
@@ -21,14 +22,18 @@ def run_in_daemon_thread_with_timeout(
     done = threading.Event()
     result: dict[str, Any] = {}
     error: dict[str, BaseException] = {}
+    ctx = contextvars.copy_context()
 
     def _runner() -> None:
-        try:
-            result["value"] = func()
-        except BaseException as exc:  # noqa: BLE001
-            error["error"] = exc
-        finally:
-            done.set()
+        def _run_with_context() -> None:
+            try:
+                result["value"] = func()
+            except BaseException as exc:  # noqa: BLE001
+                error["error"] = exc
+            finally:
+                done.set()
+
+        ctx.run(_run_with_context)
 
     thread = threading.Thread(target=_runner, name=f"timeout:{label}", daemon=True)
     thread.start()

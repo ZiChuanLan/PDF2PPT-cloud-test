@@ -13,10 +13,13 @@ import {
   Card,
   CardContent,
 } from "@/components/ui/card"
+import { HoverHint } from "@/components/ui/hover-hint"
 import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
 
 import {
+  BAIDU_DOC_PARSE_TYPE_LABELS,
+  type BaiduDocParseType,
   type LayoutAssistMode,
   SILICONFLOW_BASE_URL,
   SETTINGS_STORAGE_KEY,
@@ -29,8 +32,9 @@ import {
   applyParseEngineMode,
   getMainProviderConfig,
   getOcrConfigSourceLabel,
+  PARSE_ENGINE_MODE_LABELS,
+  PARSE_ENGINE_OPTIONS,
   resolveOcrSettingsState,
-  type ParseEngineMode,
 } from "@/lib/run-config"
 import {
   apiFetch,
@@ -43,18 +47,6 @@ import {
 
 type SettingsSectionId = "api" | "strategy" | "ocr" | "vision"
 
-const parseEngineOptions: Array<{ id: ParseEngineMode; label: string }> = [
-  { id: "local_ocr", label: "本地 OCR" },
-  { id: "remote_ocr", label: "远程 OCR" },
-  { id: "mineru_cloud", label: "云端 MinerU" },
-]
-
-const parseEngineModeLabels: Record<ParseEngineMode, string> = {
-  local_ocr: "本地 OCR",
-  remote_ocr: "远程 OCR",
-  mineru_cloud: "云端 MinerU",
-}
-
 const settingsSectionItems: Array<{
   id: SettingsSectionId
   label: string
@@ -62,9 +54,43 @@ const settingsSectionItems: Array<{
 }> = [
   { id: "api", label: "接口配置", description: "密钥、模型与接口地址" },
   { id: "strategy", label: "处理策略", description: "输出方式与版式选项" },
-  { id: "ocr", label: "OCR 配置", description: "OCR 来源与能力检测" },
+  { id: "ocr", label: "识别配置", description: "OCR、文档解析与能力检测" },
   { id: "vision", label: "版式辅助", description: "页面结构修正与图片区建议" },
 ]
+
+function SectionTitle({
+  children,
+  hint,
+}: {
+  children: React.ReactNode
+  hint?: string
+}) {
+  return (
+    <div className="flex items-center gap-2 font-sans text-sm font-semibold uppercase tracking-[0.14em]">
+      <span>{children}</span>
+      {hint ? <HoverHint text={hint} /> : null}
+    </div>
+  )
+}
+
+function FieldLabel({
+  htmlFor,
+  children,
+  hint,
+}: {
+  htmlFor: string
+  children: React.ReactNode
+  hint?: string
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <label className="text-muted-foreground text-xs" htmlFor={htmlFor}>
+        {children}
+      </label>
+      {hint ? <HoverHint text={hint} /> : null}
+    </div>
+  )
+}
 
 function AdvancedReveal({
   show,
@@ -102,12 +128,17 @@ const ocrAiProviderOptions: Array<{ id: OcrAiProvider; label: string }> = [
   { id: "novita", label: "Novita" },
 ]
 
+const baiduDocParseTypeOptions: Array<{ id: BaiduDocParseType; label: string }> = [
+  { id: "general", label: BAIDU_DOC_PARSE_TYPE_LABELS.general },
+  { id: "paddle_vl", label: BAIDU_DOC_PARSE_TYPE_LABELS.paddle_vl },
+]
+
 const ocrProviderLabels: Record<Settings["ocrProvider"], string> = {
   auto: "自动（混合）",
   aiocr: "AI OCR（OpenAI 兼容）",
-  paddle_local: "PaddleOCR（本地）",
+  paddle_local: "本地 OCR（PaddleOCR）",
   baidu: "百度 OCR",
-  tesseract: "Tesseract（本地）",
+  tesseract: "本地 OCR（Tesseract）",
 }
 
 type LocalOcrCheckResult = {
@@ -245,6 +276,7 @@ export default function SettingsPage() {
 
   const ocrState = React.useMemo(() => resolveOcrSettingsState(settings), [settings])
   const isMineruProvider = ocrState.isMineruProvider
+  const isBaiduDocParseMode = ocrState.isBaiduDocParseMode
   const isOcrEnabledForCurrentEngine = ocrState.isOcrEnabledForCurrentEngine
   const canUseAiOcr = ocrState.canUseAiOcr
   const selectedOcrProvider = ocrState.selectedOcrProvider
@@ -275,12 +307,13 @@ export default function SettingsPage() {
   )
   const tesseractSuiteReady = Boolean(tesseractSuite?.runtime?.ok && tesseractSuite?.models?.ok)
   const paddleSuiteReady = Boolean(paddleSuite?.runtime?.ok && paddleSuite?.models?.ok)
+  const shouldShowOcrProviderSelector = ocrState.shouldShowOcrProviderSelector
   const shouldShowBaiduConfig = ocrState.shouldShowBaiduConfig
   const shouldShowTesseractConfig = ocrState.shouldShowTesseractConfig
   const shouldShowAiVendorAdapter = ocrState.shouldShowAiVendorAdapter
   const mainConfig = getMainProviderConfig(settings)
   const aiProvider =
-    settings.provider === "mineru" ? settings.preferredMainProvider : settings.provider
+    isMineruProvider ? settings.preferredMainProvider : settings.provider
   const mainModelsApiKeyRaw = mainConfig.apiKey
   const mainModelsBaseUrlRaw =
     aiProvider === "siliconflow"
@@ -295,8 +328,7 @@ export default function SettingsPage() {
     aiProvider === "openai" &&
     isOpenAiCompatibleEndpoint(modelsBaseUrl)
   const localOcrAiPostprocessRequested =
-    !isMineruProvider &&
-    isOcrEnabledForCurrentEngine &&
+    canConfigureOcrLinebreakAssist &&
     !isOcrProviderAi &&
     currentOcrLinebreakAssistMode === "on"
   const shouldShowVisionModelConfig =
@@ -397,9 +429,9 @@ export default function SettingsPage() {
       settingsSectionItems.filter(
         (section) =>
           (section.id !== "ocr" || isOcrEnabledForCurrentEngine) &&
-          (section.id !== "vision" || showAdvanced)
+          (section.id !== "vision" || (showAdvanced && !isBaiduDocParseMode))
       ),
-    [isOcrEnabledForCurrentEngine, showAdvanced]
+    [isBaiduDocParseMode, isOcrEnabledForCurrentEngine, showAdvanced]
   )
   const observableSectionItems = React.useMemo(
     () =>
@@ -782,12 +814,16 @@ export default function SettingsPage() {
     setAiOcrChecking(true)
     setAiOcrCheckError(null)
     try {
-      const payload: Record<string, string> = {
+      const payload: Record<string, string | number> = {
         provider,
         api_key: apiKey,
         model,
       }
       if (baseUrl) payload.base_url = baseUrl
+      const paddleDocMaxSidePx = Number(settings.ocrPaddleVlDocparserMaxSidePx.trim())
+      if (Number.isFinite(paddleDocMaxSidePx) && paddleDocMaxSidePx >= 0) {
+        payload.ocr_paddle_vl_docparser_max_side_px = Math.round(paddleDocMaxSidePx)
+      }
 
       const response = await apiFetch("/jobs/ocr/ai/check", {
         method: "POST",
@@ -826,6 +862,7 @@ export default function SettingsPage() {
     ocrState.ocrModelsConfigSource,
     settings.ocrAiModel,
     settings.ocrAiProvider,
+    settings.ocrPaddleVlDocparserMaxSidePx,
   ])
 
   return (
@@ -918,11 +955,11 @@ export default function SettingsPage() {
                   <div className="font-sans text-sm font-semibold uppercase tracking-[0.14em]">
                     解析引擎
                   </div>
-                  <Badge variant="secondary">{parseEngineModeLabels[parseEngineMode]}</Badge>
+                  <Badge variant="secondary">{PARSE_ENGINE_MODE_LABELS[parseEngineMode]}</Badge>
                 </div>
 
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-4">
-                  {parseEngineOptions.map((p) => (
+                  {PARSE_ENGINE_OPTIONS.map((p) => (
                     <Button
                       key={p.id}
                       type="button"
@@ -983,12 +1020,25 @@ export default function SettingsPage() {
               id="settings-section-api"
               className="scroll-mt-24 grid gap-4 border-b border-border p-5"
             >
-              <div className="font-sans text-sm font-semibold uppercase tracking-[0.14em]">
+              <SectionTitle
+                hint={
+                  isMineruProvider
+                    ? undefined
+                    : isBaiduDocParseMode
+                      ? "当前模式将使用下方文档解析配置中的参数。"
+                      : "当前模式将使用下方 OCR 配置中的参数。"
+                }
+              >
                 接口配置
-              </div>
+              </SectionTitle>
 
               <div className="grid gap-2 border border-border bg-muted/30 p-3">
-                <label className="text-muted-foreground text-xs">后端 API 地址（当前生效）</label>
+                <FieldLabel
+                  htmlFor="api-origin-input"
+                  hint="自动模式在公开部署优先使用同源地址；本地开发会探测 :8000 与 :8001。如需固定地址请设置 NEXT_PUBLIC_API_URL。"
+                >
+                  后端 API 地址（当前生效）
+                </FieldLabel>
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="font-mono break-all text-xs">{apiOrigin}</div>
                   <Badge variant="outline">
@@ -997,6 +1047,7 @@ export default function SettingsPage() {
                 </div>
                 <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
                   <Input
+                    id="api-origin-input"
                     type="text"
                     autoComplete="off"
                     value={apiOriginInput}
@@ -1019,9 +1070,6 @@ export default function SettingsPage() {
                   >
                     自动探测
                   </Button>
-                </div>
-                <div className="text-muted-foreground text-xs">
-                  自动模式在公开部署优先使用同源地址；本地开发会探测 `:8000` 与 `:8001`。如需固定地址请设置 `NEXT_PUBLIC_API_URL`。
                 </div>
                 {apiOriginError ? (
                   <div className="text-xs text-destructive">{apiOriginError}</div>
@@ -1156,11 +1204,7 @@ export default function SettingsPage() {
                   </label>
                 </>
               ) : (
-                <>
-                  <div className="text-muted-foreground text-sm">
-                    当前模式将使用下方 OCR 配置中的参数。
-                  </div>
-                </>
+                <></>
               )}
             </section>
 
@@ -1168,20 +1212,26 @@ export default function SettingsPage() {
               id="settings-section-strategy"
               className="scroll-mt-24 grid gap-4 border-b border-border p-5"
             >
-              <div className="font-sans text-sm font-semibold uppercase tracking-[0.14em]">
+              <SectionTitle
+                hint={
+                  isMineruProvider
+                    ? "MinerU 现在只使用自身解析与 OCR，不再叠加本地/远程 OCR 定位。"
+                    : "传统 OCR 与文档解析模式默认启用识别。"
+                }
+              >
                 处理策略
-              </div>
+              </SectionTitle>
 
               {isMineruProvider ? (
                 <>
                   <AdvancedReveal show={showAdvanced}>
                     <div className="grid gap-2 pt-1">
-                      <label
-                        className="text-muted-foreground text-xs"
+                      <FieldLabel
                         htmlFor="text-erase-mode"
+                        hint="默认推荐纯色填充，输出更稳定；智能消除保留为实验模式。"
                       >
                         文字消除模式
-                      </label>
+                      </FieldLabel>
                       <Select
                         id="text-erase-mode"
                         value={settings.textEraseMode}
@@ -1195,32 +1245,19 @@ export default function SettingsPage() {
                         <option value="fill">纯色填充（推荐）</option>
                         <option value="smart">智能消除（实验）</option>
                       </Select>
-                      <div className="text-muted-foreground text-xs">
-                        默认推荐纯色填充，输出更稳定；智能消除保留为实验模式。
-                      </div>
                     </div>
                   </AdvancedReveal>
-
-                  <div className="text-muted-foreground text-sm">
-                    MinerU 现在只使用自身解析与 OCR，不再叠加本地/远程 OCR 定位。
-                  </div>
                 </>
-              ) : (
-                <>
-                  <div className="text-muted-foreground text-sm">
-                    本地/远程 OCR 模式默认启用 OCR。
-                  </div>
-                </>
-              )}
+              ) : null}
 
               <AdvancedReveal show={!isMineruProvider && showAdvanced}>
                 <div className="grid gap-2 pt-1">
-                  <label
-                    className="text-muted-foreground text-xs"
+                  <FieldLabel
                     htmlFor="text-erase-mode"
+                    hint="默认推荐纯色填充，输出更稳定；智能消除保留为实验模式。"
                   >
                     文字消除模式
-                  </label>
+                  </FieldLabel>
                   <Select
                     id="text-erase-mode"
                     value={settings.textEraseMode}
@@ -1234,16 +1271,16 @@ export default function SettingsPage() {
                     <option value="fill">纯色填充（推荐）</option>
                     <option value="smart">智能消除（实验）</option>
                   </Select>
-                  <div className="text-muted-foreground text-xs">
-                    默认推荐纯色填充，输出更稳定；智能消除保留为实验模式。
-                  </div>
                 </div>
               </AdvancedReveal>
 
               <div className="grid gap-2">
-                <label className="text-muted-foreground text-xs" htmlFor="scanned-page-mode">
+                <FieldLabel
+                  htmlFor="scanned-page-mode"
+                  hint="分块模式会尝试把截图/图表等区域单独裁剪为可编辑图片；全页模式只保留一张整页背景并覆盖文字，通常更接近原图但图片不可单独编辑。"
+                >
                   扫描页合成模式
-                </label>
+                </FieldLabel>
                 <Select
                   id="scanned-page-mode"
                   value={settings.scannedPageMode}
@@ -1257,16 +1294,14 @@ export default function SettingsPage() {
                   <option value="segmented">分块（图片可编辑）</option>
                   <option value="fullpage">全页（更像原图）</option>
                 </Select>
-                <div className="text-muted-foreground text-xs">
-                  分块模式会尝试把截图/图表等区域单独裁剪为可编辑图片；全页模式只保留一张整页背景并覆盖文字，通常更接近原图但图片不可单独编辑。
-                </div>
               </div>
 
               <AdvancedReveal show={showAdvanced}>
                 <div className="grid gap-3 rounded-md border border-border/70 p-3">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="font-sans text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                      图片底图清除与图块阈值
+                    <div className="flex items-center gap-2 font-sans text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                      <span>图片底图清除与图块阈值</span>
+                      <HoverHint text="建议先使用默认值；仅在出现图片底图残留或图块误判时微调。修改后建议用 1 页样本先验证。" />
                     </div>
                     <Button
                       type="button"
@@ -1280,9 +1315,12 @@ export default function SettingsPage() {
                   </div>
                   <div className="grid gap-3 md:grid-cols-3">
                     <div className="grid gap-1.5">
-                      <label className="text-muted-foreground text-xs" htmlFor="image-bg-clear-min-pt">
+                      <FieldLabel
+                        htmlFor="image-bg-clear-min-pt"
+                        hint={`后端默认：${defaultSettings.imageBgClearExpandMinPt}`}
+                      >
                         清除扩边最小值（pt）
-                      </label>
+                      </FieldLabel>
                       <Input
                         id="image-bg-clear-min-pt"
                         type="number"
@@ -1293,15 +1331,15 @@ export default function SettingsPage() {
                           setSettings((s) => ({ ...s, imageBgClearExpandMinPt: e.target.value }))
                         }
                       />
-                      <div className="text-muted-foreground text-[11px]">
-                        后端默认：{defaultSettings.imageBgClearExpandMinPt}
-                      </div>
                     </div>
 
                     <div className="grid gap-1.5">
-                      <label className="text-muted-foreground text-xs" htmlFor="image-bg-clear-max-pt">
+                      <FieldLabel
+                        htmlFor="image-bg-clear-max-pt"
+                        hint={`后端默认：${defaultSettings.imageBgClearExpandMaxPt}`}
+                      >
                         清除扩边最大值（pt）
-                      </label>
+                      </FieldLabel>
                       <Input
                         id="image-bg-clear-max-pt"
                         type="number"
@@ -1312,15 +1350,15 @@ export default function SettingsPage() {
                           setSettings((s) => ({ ...s, imageBgClearExpandMaxPt: e.target.value }))
                         }
                       />
-                      <div className="text-muted-foreground text-[11px]">
-                        后端默认：{defaultSettings.imageBgClearExpandMaxPt}
-                      </div>
                     </div>
 
                     <div className="grid gap-1.5">
-                      <label className="text-muted-foreground text-xs" htmlFor="image-bg-clear-ratio">
+                      <FieldLabel
+                        htmlFor="image-bg-clear-ratio"
+                        hint={`后端默认：${defaultSettings.imageBgClearExpandRatio}`}
+                      >
                         清除扩边比例
-                      </label>
+                      </FieldLabel>
                       <Input
                         id="image-bg-clear-ratio"
                         type="number"
@@ -1331,17 +1369,17 @@ export default function SettingsPage() {
                           setSettings((s) => ({ ...s, imageBgClearExpandRatio: e.target.value }))
                         }
                       />
-                      <div className="text-muted-foreground text-[11px]">
-                        后端默认：{defaultSettings.imageBgClearExpandRatio}
-                      </div>
                     </div>
                   </div>
 
                   <div className="grid gap-3 md:grid-cols-3">
                     <div className="grid gap-1.5">
-                      <label className="text-muted-foreground text-xs" htmlFor="scanned-min-area-ratio">
+                      <FieldLabel
+                        htmlFor="scanned-min-area-ratio"
+                        hint={`后端默认：${defaultSettings.scannedImageRegionMinAreaRatio}`}
+                      >
                         图块最小面积比例
-                      </label>
+                      </FieldLabel>
                       <Input
                         id="scanned-min-area-ratio"
                         type="number"
@@ -1355,15 +1393,15 @@ export default function SettingsPage() {
                           }))
                         }
                       />
-                      <div className="text-muted-foreground text-[11px]">
-                        后端默认：{defaultSettings.scannedImageRegionMinAreaRatio}
-                      </div>
                     </div>
 
                     <div className="grid gap-1.5">
-                      <label className="text-muted-foreground text-xs" htmlFor="scanned-max-area-ratio">
+                      <FieldLabel
+                        htmlFor="scanned-max-area-ratio"
+                        hint={`后端默认：${defaultSettings.scannedImageRegionMaxAreaRatio}`}
+                      >
                         图块最大面积比例
-                      </label>
+                      </FieldLabel>
                       <Input
                         id="scanned-max-area-ratio"
                         type="number"
@@ -1377,15 +1415,15 @@ export default function SettingsPage() {
                           }))
                         }
                       />
-                      <div className="text-muted-foreground text-[11px]">
-                        后端默认：{defaultSettings.scannedImageRegionMaxAreaRatio}
-                      </div>
                     </div>
 
                     <div className="grid gap-1.5">
-                      <label className="text-muted-foreground text-xs" htmlFor="scanned-max-aspect-ratio">
+                      <FieldLabel
+                        htmlFor="scanned-max-aspect-ratio"
+                        hint={`后端默认：${defaultSettings.scannedImageRegionMaxAspectRatio}`}
+                      >
                         图块最大长宽比
-                      </label>
+                      </FieldLabel>
                       <Input
                         id="scanned-max-aspect-ratio"
                         type="number"
@@ -1399,14 +1437,7 @@ export default function SettingsPage() {
                           }))
                         }
                       />
-                      <div className="text-muted-foreground text-[11px]">
-                        后端默认：{defaultSettings.scannedImageRegionMaxAspectRatio}
-                      </div>
                     </div>
-                  </div>
-
-                  <div className="text-muted-foreground text-xs">
-                    建议先使用默认值；仅在出现图片底图残留或图块误判时微调。修改后建议用 1 页样本先验证。
                   </div>
                 </div>
               </AdvancedReveal>
@@ -1417,43 +1448,57 @@ export default function SettingsPage() {
                 id="settings-section-ocr"
                 className="scroll-mt-24 grid gap-4 p-5"
               >
-              <div className="font-sans text-sm font-semibold uppercase tracking-[0.14em]">
-                OCR 配置
-              </div>
+              <SectionTitle
+                hint={
+                  isBaiduDocParseMode
+                    ? "百度解析模式不使用 OCR provider 选择，直接在下方填写百度解析凭据。"
+                    : undefined
+                }
+              >
+                {isBaiduDocParseMode ? "文档解析配置" : "OCR 配置"}
+              </SectionTitle>
 
-              <div className="grid gap-2">
-                <label className="text-muted-foreground text-xs" htmlFor="ocr-provider">
-                  OCR 提供方
-                </label>
-                <Select
-                  id="ocr-provider"
-                  value={selectedOcrProvider}
-                  onChange={(e) =>
-                    setSettings((s) => ({
-                      ...s,
-                      ocrProvider: e.target.value as Settings["ocrProvider"],
-                    }))
-                  }
-                >
-                  {ocrState.availableOcrProviders.map((providerId) => (
-                    <option key={providerId} value={providerId}>
-                      {ocrProviderLabels[providerId]}
-                    </option>
-                  ))}
-                </Select>
-                  <div className="text-muted-foreground text-xs">
-                    当前模式：{ocrProviderLabels[selectedOcrProvider]}。
-                    {isOcrProviderAi
-                      ? " 显式 AI OCR 只使用专用 OCR 模型本身的识别与 bbox。"
-                      : isOcrProviderPaddleLocal
-                        ? " 使用本地 PaddleOCR；如需 AI 修字/拆行，可在下方开启 AI OCR 后处理。"
-                        : isOcrProviderBaidu
-                          ? " 使用百度 OCR；如需 AI 修字/拆行，可在下方开启 AI OCR 后处理。"
-                          : " 使用本地 Tesseract；如需 AI 修字/拆行，可在下方开启 AI OCR 后处理。"}
-                  </div>
-              </div>
+              {shouldShowOcrProviderSelector ? (
+                <div className="grid gap-2">
+                  <FieldLabel
+                    htmlFor="ocr-provider"
+                    hint={
+                      isOcrProviderAi
+                        ? "显式 AI OCR 只使用专用 OCR 模型本身的识别与 bbox。"
+                        : isOcrProviderPaddleLocal
+                          ? "使用本地 OCR（PaddleOCR）链路；如需 AI 修字/拆行，可在下方开启 AI OCR 后处理。"
+                          : isOcrProviderBaidu
+                            ? "使用百度 OCR API 直接识别并返回 bbox，不叠加 AI OCR 后处理。"
+                            : "使用本地 OCR（Tesseract）链路；如需 AI 修字/拆行，可在下方开启 AI OCR 后处理。"
+                    }
+                  >
+                    OCR 提供方
+                  </FieldLabel>
+                  <Select
+                    id="ocr-provider"
+                    value={selectedOcrProvider}
+                    onChange={(e) =>
+                      setSettings((s) => ({
+                        ...s,
+                        ocrProvider: e.target.value as Settings["ocrProvider"],
+                      }))
+                    }
+                  >
+                    {ocrState.availableOcrProviders.map((providerId) => (
+                      <option key={providerId} value={providerId}>
+                        {ocrProviderLabels[providerId]}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <Badge variant="outline">{PARSE_ENGINE_MODE_LABELS[parseEngineMode]}</Badge>
+                  <HoverHint text="当前链路会直接使用百度解析服务返回结构化结果。根据百度官方产品页，该服务基于 PaddleOCR-VL；这里只配置对应凭据，不再单独选择 OCR provider。" />
+                </div>
+              )}
 
-              <AdvancedReveal show={showAdvanced}>
+              <AdvancedReveal show={showAdvanced && !isBaiduDocParseMode}>
                 <>
                   <label className="flex items-center gap-2 text-sm">
                     <input
@@ -1467,23 +1512,21 @@ export default function SettingsPage() {
                         }))
                       }
                     />
-                    OCR 严格模式（默认开启；开启后禁止隐式 OCR provider 回退，初始化/运行失败即报错）
+                    <span>OCR 严格模式</span>
+                    <HoverHint text="默认开启。关闭后才启用最佳努力策略：允许 provider 降级，或在 OCR 失败时按图片页继续。" />
                   </label>
-                  <div className="text-muted-foreground text-xs">
-                    默认开启。关闭后才启用最佳努力策略：允许 provider 降级，或在 OCR 失败时按图片页继续。
-                  </div>
                 </>
               </AdvancedReveal>
 
               {shouldShowAiVendorAdapter ? (
                 <div className="grid gap-3">
                   <div className="grid gap-2">
-                    <label
-                      className="text-muted-foreground text-xs"
+                    <FieldLabel
                       htmlFor="ocr-ai-provider"
+                      hint="厂商适配会自动处理常见参数差异。"
                     >
                       AI OCR 厂商适配
-                    </label>
+                    </FieldLabel>
                     <Select
                       id="ocr-ai-provider"
                       value={settings.ocrAiProvider}
@@ -1500,18 +1543,15 @@ export default function SettingsPage() {
                         </option>
                       ))}
                     </Select>
-                    <div className="text-muted-foreground text-xs">
-                      厂商适配会自动处理常见参数差异。
-                    </div>
-
                   </div>
                 </div>
               ) : null}
 
               {needsRequiredOcrAiConfig ? (
                 <div className="grid gap-3 border border-border bg-muted/20 p-3">
-                  <div className="font-sans text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                    专用 OCR 接口参数
+                  <div className="flex items-center gap-2 font-sans text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                    <span>专用 OCR 接口参数</span>
+                    <HoverHint text="显式 AI OCR 现在固定走纯 AI OCR 链路，不再混用本地 Tesseract 几何定位；这里仅列专门的 OCR 模型。" />
                   </div>
                   <div className="flex flex-wrap gap-2 text-xs">
                     <Badge variant="outline">
@@ -1520,12 +1560,7 @@ export default function SettingsPage() {
                   </div>
 
                   <div className="grid gap-2">
-                    <label
-                      className="text-muted-foreground text-xs"
-                      htmlFor="ocr-ai-api-key"
-                    >
-                      OCR API Key
-                    </label>
+                    <FieldLabel htmlFor="ocr-ai-api-key">OCR API Key</FieldLabel>
                     <Input
                       id="ocr-ai-api-key"
                       type="password"
@@ -1542,12 +1577,7 @@ export default function SettingsPage() {
                   </div>
 
                   <div className="grid gap-2">
-                    <label
-                      className="text-muted-foreground text-xs"
-                      htmlFor="ocr-ai-base-url"
-                    >
-                      OCR Base URL（可选）
-                    </label>
+                    <FieldLabel htmlFor="ocr-ai-base-url">OCR Base URL（可选）</FieldLabel>
                     <Input
                       id="ocr-ai-base-url"
                       type="text"
@@ -1564,12 +1594,7 @@ export default function SettingsPage() {
                   </div>
 
                   <div className="grid gap-2">
-                    <label
-                      className="text-muted-foreground text-xs"
-                      htmlFor="ocr-ai-model"
-                    >
-                      专用 OCR 模型（必填）
-                    </label>
+                    <FieldLabel htmlFor="ocr-ai-model">专用 OCR 模型（必填）</FieldLabel>
                     <Select
                       id="ocr-ai-model"
                       value={settings.ocrAiModel}
@@ -1599,8 +1624,27 @@ export default function SettingsPage() {
                     ) : null}
                   </div>
 
-                  <div className="text-muted-foreground text-xs">
-                    显式 AI OCR 现在固定走纯 AI OCR 链路，不再混用本地 Tesseract 几何定位；这里仅列专门的 OCR 模型。
+                  <div className="grid gap-2">
+                    <FieldLabel
+                      htmlFor="ocr-paddle-vl-docparser-max-side"
+                      hint="仅对 PaddleOCR-VL 专用通道生效。会先把超大页图按长边缩到该像素值，再把 bbox 映射回原图坐标。0 表示不缩图；推荐 1800-2400。"
+                    >
+                      PaddleOCR-VL 长边上限
+                    </FieldLabel>
+                    <Input
+                      id="ocr-paddle-vl-docparser-max-side"
+                      type="number"
+                      min={0}
+                      step={100}
+                      value={settings.ocrPaddleVlDocparserMaxSidePx}
+                      onChange={(e) =>
+                        setSettings((s) => ({
+                          ...s,
+                          ocrPaddleVlDocparserMaxSidePx: e.target.value,
+                        }))
+                      }
+                      placeholder="2200"
+                    />
                   </div>
 
                   <div className="grid gap-2">
@@ -1614,9 +1658,7 @@ export default function SettingsPage() {
                       >
                         {aiOcrChecking ? "验证中..." : "验证 OCR 能力"}
                       </Button>
-                      <span className="text-muted-foreground text-xs">
-                        检查模型是否返回有效 bbox
-                      </span>
+                      <HoverHint text="检查模型是否返回有效 bbox。" />
                     </div>
                     {aiOcrCheckError ? (
                       <div className="text-xs text-destructive">{aiOcrCheckError}</div>
@@ -1656,20 +1698,20 @@ export default function SettingsPage() {
               ) : null}
 
               {!showAdvanced && canConfigureOcrLinebreakAssist ? (
-                <div className="text-muted-foreground text-xs">
-                  AI OCR 后处理属于高级功能，请展开“高级设置”后配置。启用后，非显式 AI OCR 会复用下方视觉模型做文字修正与逐行拆分。
+                <div className="text-right text-xs text-muted-foreground">
+                  如需给本地 OCR 增加 AI 修字/拆行，请展开“高级设置”后配置视觉模型。
                 </div>
               ) : null}
 
               <AdvancedReveal show={showAdvanced}>
                 {canConfigureOcrLinebreakAssist ? (
                   <div className="grid gap-2">
-                    <label
-                      className="text-muted-foreground text-xs"
+                    <FieldLabel
                       htmlFor="ocr-ai-linebreak-mode"
+                      hint="这是 OCR 后处理，不属于版式辅助。显式 AI OCR：自动模式会按 OCR 模型特性决定是否拆行。本地 OCR：开启后会尽量复用下方视觉模型做文字修正与逐行拆分；若没有可用视觉模型，则退回启发式处理。百度链路固定走纯百度返回，不参与这里的 AI 后处理。"
                     >
                       AI OCR 后处理
-                    </label>
+                    </FieldLabel>
                     <Select
                       id="ocr-ai-linebreak-mode"
                       value={currentOcrLinebreakAssistMode}
@@ -1684,28 +1726,49 @@ export default function SettingsPage() {
                       <option value="on">开启（本地 OCR 也可用）</option>
                       <option value="off">关闭</option>
                     </Select>
-                    <div className="text-muted-foreground text-xs">
-                      这是 OCR 后处理，不属于版式辅助。显式 AI OCR：自动模式会按 OCR 模型特性决定是否拆行。非显式 AI OCR：开启后会尽量复用下方视觉模型做文字修正与逐行拆分；若没有可用视觉模型，则退回启发式处理。
-                    </div>
                   </div>
                 ) : null}
               </AdvancedReveal>
 
-              {!canUseAiOcr ? null : !needsRequiredOcrAiConfig ? (
-                <div className="text-muted-foreground text-xs">
-                  当前链路不需要单独的专用 OCR 模型；如需给本地 OCR 增加 AI 修字/拆行，请开启上面的 AI OCR 后处理，并在下方配置视觉模型。
-                </div>
-              ) : null}
-
               {shouldShowBaiduConfig && (showAdvanced || isOcrProviderBaidu) ? (
                 <>
+                  {isBaiduDocParseMode ? (
+                    <div className="grid gap-2">
+                      <FieldLabel
+                        htmlFor="baidu-doc-parse-type"
+                        hint="根据百度 2026-03-07 官方文档：百度解析提供“普通文档解析”和“PaddleOCR-VL”两种类型。当前项目上传的是 PDF，两种都可选；PaddleOCR-VL 更偏复杂版式。"
+                      >
+                        文档解析类型
+                      </FieldLabel>
+                      <Select
+                        id="baidu-doc-parse-type"
+                        value={settings.baiduDocParseType}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            baiduDocParseType: e.target.value as BaiduDocParseType,
+                          }))
+                        }
+                      >
+                        {baiduDocParseTypeOptions.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                  ) : null}
                   <div className="grid gap-2">
-                    <label
-                      className="text-muted-foreground text-xs"
+                    <FieldLabel
                       htmlFor="ocr-baidu-app-id"
+                      hint={
+                        isBaiduDocParseMode
+                          ? "百度 OCR 官方鉴权方式使用 API Key 和 Secret Key 换取 access_token。App ID 作为兼容字段保留，可留空。"
+                          : "当前实现仅要求 API Key 和 Secret Key。App ID 保留为兼容字段，可留空。"
+                      }
                     >
-                      百度 OCR App ID
-                    </label>
+                      {isBaiduDocParseMode ? "百度解析 App ID（可选）" : "百度 OCR App ID（可选）"}
+                    </FieldLabel>
                     <Input
                       id="ocr-baidu-app-id"
                       type="text"
@@ -1721,12 +1784,9 @@ export default function SettingsPage() {
                     />
                   </div>
                   <div className="grid gap-2">
-                    <label
-                      className="text-muted-foreground text-xs"
-                      htmlFor="ocr-baidu-api-key"
-                    >
-                      百度 OCR API Key
-                    </label>
+                    <FieldLabel htmlFor="ocr-baidu-api-key">
+                      {isBaiduDocParseMode ? "百度解析 API Key" : "百度 OCR API Key"}
+                    </FieldLabel>
                     <Input
                       id="ocr-baidu-api-key"
                       type="password"
@@ -1742,12 +1802,9 @@ export default function SettingsPage() {
                     />
                   </div>
                   <div className="grid gap-2">
-                    <label
-                      className="text-muted-foreground text-xs"
-                      htmlFor="ocr-baidu-secret-key"
-                    >
-                      百度 OCR Secret Key
-                    </label>
+                    <FieldLabel htmlFor="ocr-baidu-secret-key">
+                      {isBaiduDocParseMode ? "百度解析 Secret Key" : "百度 OCR Secret Key"}
+                    </FieldLabel>
                     <Input
                       id="ocr-baidu-secret-key"
                       type="password"
@@ -1767,12 +1824,9 @@ export default function SettingsPage() {
 
               {shouldShowTesseractConfig && (showAdvanced || isOcrProviderTesseract) ? (
                 <div className="grid gap-2">
-                  <label
-                    className="text-muted-foreground text-xs"
-                    htmlFor="ocr-tesseract-min-conf"
-                  >
+                  <FieldLabel htmlFor="ocr-tesseract-min-conf">
                     Tesseract 最低置信度（0-100）
-                  </label>
+                  </FieldLabel>
                   <Input
                     id="ocr-tesseract-min-conf"
                     type="number"
@@ -1792,12 +1846,9 @@ export default function SettingsPage() {
 
               {shouldShowTesseractConfig && (showAdvanced || isOcrProviderTesseract) ? (
                 <div className="grid gap-2">
-                  <label
-                    className="text-muted-foreground text-xs"
-                    htmlFor="ocr-tesseract-lang"
-                  >
+                  <FieldLabel htmlFor="ocr-tesseract-lang">
                     Tesseract 语言（例如 eng、chi_sim）
-                  </label>
+                  </FieldLabel>
                   <Input
                     id="ocr-tesseract-lang"
                     type="text"
@@ -1817,8 +1868,9 @@ export default function SettingsPage() {
               {shouldShowLocalOcrCheck ? (
                 <div className="grid gap-3 border border-border bg-muted/20 p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="font-sans text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                      本地 OCR 综合检测
+                    <div className="flex items-center gap-2 font-sans text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                      <span>本地 OCR 综合检测</span>
+                      <HoverHint text="一次检测同时验证本地运行环境与模型文件，不会触发自动下载。" />
                     </div>
                     <div className="flex items-center gap-2">
                       <Button
@@ -1831,9 +1883,6 @@ export default function SettingsPage() {
                         {localOcrSuiteChecking ? "检测中..." : "检测本地 OCR（Tesseract + PaddleOCR）"}
                       </Button>
                     </div>
-                  </div>
-                  <div className="text-muted-foreground text-xs">
-                    一次检测同时验证运行环境与模型文件，不会触发自动下载。
                   </div>
                   {localOcrSuiteError ? (
                     <div className="text-xs text-destructive">{localOcrSuiteError}</div>
@@ -1932,23 +1981,30 @@ export default function SettingsPage() {
               </section>
             ) : null}
 
-            <AdvancedReveal show={showAdvanced}>
+            <AdvancedReveal show={showAdvanced && !isBaiduDocParseMode}>
               <section
                 id="settings-section-vision"
                 className="scroll-mt-24 grid gap-4 border-t border-border p-5"
               >
-                <div className="font-sans text-sm font-semibold uppercase tracking-[0.14em]">
+                <SectionTitle
+                  hint={
+                    isMineruProvider
+                      ? `当前链路：${PARSE_ENGINE_MODE_LABELS[parseEngineMode]}。这里只控制 AI 版式辅助。`
+                      : isBaiduDocParseMode
+                        ? `当前链路：${PARSE_ENGINE_MODE_LABELS[parseEngineMode]}。这里只控制可选 AI 版式辅助；百度解析本身不使用 OCR provider 选择，也不参与 AI OCR 后处理。`
+                        : `当前链路：${PARSE_ENGINE_MODE_LABELS[parseEngineMode]}。这里配置页面结构分析使用的视觉模型；识字由当前解析链路决定，AI 修字/拆行在识别配置中单独开关。本地 OCR 开启“AI OCR 后处理”时，也会复用这里的模型做文字修正与拆行。`
+                  }
+                >
                   AI 视觉辅助
-                </div>
-
-                <div className="rounded-md border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
-                  当前链路：{parseEngineModeLabels[parseEngineMode]}。这里配置页面结构分析使用的视觉模型；当本地 OCR 开启“AI OCR 后处理”时，也会复用这里的模型做文字修正与拆行。
-                </div>
+                </SectionTitle>
 
                 <div className="grid gap-2">
-                  <label className="text-muted-foreground text-xs" htmlFor="vision-mode-current">
+                  <FieldLabel
+                    htmlFor="vision-mode-current"
+                    hint="关闭：禁用当前链路的 AI 版式辅助。强制开启：始终启用版式辅助。自动：由后端按模型能力决定。它不会改变 OCR 提供方，也不会替你切换成另一条 OCR 链路。"
+                  >
                     版式辅助模式
-                  </label>
+                  </FieldLabel>
                   <Select
                     id="vision-mode-current"
                     value={currentLayoutAssistMode}
@@ -1959,7 +2015,11 @@ export default function SettingsPage() {
                           ? { ...s, visualAssistModeLocal: nextMode }
                           : parseEngineMode === "remote_ocr"
                             ? { ...s, visualAssistModeRemote: nextMode }
-                            : { ...s, visualAssistModeMineru: nextMode }
+                            : parseEngineMode === "baidu_doc"
+                              ? { ...s, visualAssistModeBaiduDoc: nextMode }
+                          : parseEngineMode === "mineru_cloud"
+                            ? { ...s, visualAssistModeMineru: nextMode }
+                            : s
                       )
                     }}
                   >
@@ -1967,34 +2027,25 @@ export default function SettingsPage() {
                     <option value="on">强制开启</option>
                     <option value="auto">自动（按模型能力）</option>
                   </Select>
-                  <div className="text-muted-foreground text-xs">
-                    关闭：禁用当前链路的 AI 版式辅助。强制开启：始终启用版式辅助。自动：由后端按模型能力决定。它不会改变 OCR 提供方，也不会替你切换成另一条 OCR 链路。
-                  </div>
                 </div>
 
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-[#111111]"
-                    checked={settings.layoutAssistApplyImageRegions}
-                    disabled={!isLayoutAssistEnabledForCurrentEngine}
-                    onChange={(e) =>
-                      setSettings((s) => ({
-                        ...s,
-                        layoutAssistApplyImageRegions: e.target.checked,
-                      }))
-                    }
-                  />
-                  应用 AI 图片区域建议（高风险实验）
-                </label>
-                <div className="text-muted-foreground text-xs">
-                  仅当当前链路的版式辅助模式不为“关闭”时生效。开启后可能让图片更干净，也可能误判导致图片缺失；默认关闭更稳妥。
-                </div>
-
-                <div className="rounded-md border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
-                  {isMineruProvider
-                    ? "当前为云端 MinerU 链路：这里只控制 AI 版式辅助。"
-                    : "当前为 OCR 链路：这里控制页面结构修正与视觉模型；OCR 识字由 OCR 提供方决定，AI 修字/拆行在 OCR 配置中单独开关。"}
+                <div className="flex items-center gap-1.5">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-[#111111]"
+                      checked={settings.layoutAssistApplyImageRegions}
+                      disabled={!isLayoutAssistEnabledForCurrentEngine}
+                      onChange={(e) =>
+                        setSettings((s) => ({
+                          ...s,
+                          layoutAssistApplyImageRegions: e.target.checked,
+                        }))
+                      }
+                    />
+                    <span>应用 AI 图片区域建议（高风险实验）</span>
+                  </label>
+                  <HoverHint text="仅当当前链路的版式辅助模式不为“关闭”时生效。开启后可能让图片更干净，也可能误判导致图片缺失；默认关闭更稳妥。" />
                 </div>
 
                 {shouldShowVisionModelConfig ? (

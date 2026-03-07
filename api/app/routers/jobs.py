@@ -137,6 +137,7 @@ def _run_ai_ocr_capability_check(
     api_key: str,
     base_url: str | None,
     model: str,
+    ocr_paddle_vl_docparser_max_side_px: int | None = None,
 ) -> AiOcrCheckResponse:
     """Run AI OCR capability check and validate whether bbox items are returned."""
     start = time.perf_counter()
@@ -151,6 +152,7 @@ def _run_ai_ocr_capability_check(
             provider=normalized_provider,
             base_url=normalized_base_url,
             model=normalized_model,
+            paddle_doc_max_side_px=ocr_paddle_vl_docparser_max_side_px,
         )
         raw_items: list[dict[str, Any]] = client.ocr_image(str(image_path))
 
@@ -252,6 +254,7 @@ async def check_ai_ocr(payload: AiOcrCheckRequest):
             api_key=api_key,
             base_url=payload.base_url,
             model=model,
+            ocr_paddle_vl_docparser_max_side_px=payload.ocr_paddle_vl_docparser_max_side_px,
         )
     except AppException:
         raise
@@ -400,7 +403,7 @@ async def create_job(
     parse_provider: str = Form(
         "local",
         description=(
-            "Parser provider (local, mineru). Legacy `v2` is accepted for backward compatibility "
+            "Parser provider (local, baidu_doc, mineru). Legacy `v2` is accepted for backward compatibility "
             "and maps to local+fullpage+AI OCR."
         ),
     ),
@@ -409,6 +412,10 @@ async def create_job(
         description="LLM provider identifier (openai, claude, siliconflow, domestic)",
     ),
     api_key: str | None = Form(None, description="Optional API key for AI services"),
+    baidu_doc_parse_type: str | None = Form(
+        "paddle_vl",
+        description="Optional Baidu parser variant when parse_provider=baidu_doc (general, paddle_vl)",
+    ),
     base_url: str | None = Form(
         None, description="Optional OpenAI-compatible base URL"
     ),
@@ -475,6 +482,15 @@ async def create_job(
         None, description="Optional AI OCR base URL (OpenAI-compatible)"
     ),
     ocr_ai_model: str | None = Form(None, description="Optional AI OCR model name"),
+    ocr_paddle_vl_docparser_max_side_px: int | None = Form(
+        None,
+        ge=0,
+        le=6000,
+        description=(
+            "Optional max long-edge in pixels for PaddleOCR-VL doc_parser input images; "
+            "0 disables downscale"
+        ),
+    ),
     ocr_geometry_mode: str | None = Form(
         "auto",
         description=(
@@ -537,6 +553,7 @@ async def create_job(
         mineru_api_token=mineru_api_token,
         provider=provider,
         api_key=api_key,
+        baidu_doc_parse_type=baidu_doc_parse_type,
         ocr_provider=ocr_provider,
         ocr_ai_provider=ocr_ai_provider,
         ocr_ai_api_key=ocr_ai_api_key,
@@ -617,6 +634,7 @@ async def create_job(
                     "layout_assist_apply_image_regions": layout_assist_apply_image_regions,
                     "provider": normalized_options.provider,
                     "api_key": api_key,
+                    "baidu_doc_parse_type": normalized_options.baidu_doc_parse_type,
                     "base_url": base_url,
                     "model": model,
                     "page_start": page_start,
@@ -640,6 +658,7 @@ async def create_job(
                     "ocr_ai_provider": normalized_options.ocr_ai_provider,
                     "ocr_ai_base_url": ocr_ai_base_url,
                     "ocr_ai_model": ocr_ai_model,
+                    "ocr_paddle_vl_docparser_max_side_px": ocr_paddle_vl_docparser_max_side_px,
                     "ocr_geometry_mode": normalized_options.ocr_geometry_mode,
                     "text_erase_mode": normalized_options.text_erase_mode,
                     "scanned_page_mode": normalized_options.scanned_page_mode,
@@ -670,6 +689,7 @@ async def create_job(
                 layout_assist_apply_image_regions=layout_assist_apply_image_regions,
                 provider=normalized_options.provider,
                 api_key=api_key,
+                baidu_doc_parse_type=normalized_options.baidu_doc_parse_type,
                 base_url=base_url,
                 model=model,
                 page_start=page_start,
@@ -693,6 +713,7 @@ async def create_job(
                 ocr_ai_provider=normalized_options.ocr_ai_provider,
                 ocr_ai_base_url=ocr_ai_base_url,
                 ocr_ai_model=ocr_ai_model,
+                ocr_paddle_vl_docparser_max_side_px=ocr_paddle_vl_docparser_max_side_px,
                 ocr_geometry_mode=normalized_options.ocr_geometry_mode,
                 text_erase_mode=normalized_options.text_erase_mode,
                 scanned_page_mode=normalized_options.scanned_page_mode,
@@ -778,6 +799,7 @@ async def get_job_status(job_id: str):
         expires_at=job.expires_at,
         message=job.message,
         error=job.error,
+        debug_events=job.debug_events,
     )
 
 
@@ -907,6 +929,56 @@ async def cancel_job(job_id: str):
         "job_id": job_id,
         "status": "cancelled",
         "message": "Cancellation requested",
+    }
+
+
+@router.delete("/{job_id}")
+async def delete_job(job_id: str):
+    """Delete terminal job metadata and on-disk artifacts."""
+    redis_service = get_redis_service()
+    job = redis_service.get_job(job_id)
+    job_dir = get_job_dir(job_id)
+
+    if not job and not job_dir.exists():
+        raise AppException(
+            code=ErrorCode.JOB_NOT_FOUND,
+            message=f"Job {job_id} not found",
+            status_code=404,
+        )
+
+    if job and job.status in [JobStatus.pending, JobStatus.processing]:
+        raise AppException(
+            code=ErrorCode.VALIDATION_ERROR,
+            message="Cannot delete an active job; cancel it first",
+            details={"status": job.status},
+            status_code=400,
+        )
+
+    artifacts_deleted = False
+    if job_dir.exists():
+        try:
+            shutil.rmtree(job_dir)
+            artifacts_deleted = True
+        except Exception as e:
+            raise AppException(
+                code=ErrorCode.INTERNAL_ERROR,
+                message="Failed to delete job artifacts",
+                details={"job_id": job_id, "error": str(e)},
+                status_code=500,
+            ) from e
+
+    redis_service.delete_job(job_id)
+    logger.info(
+        "Deleted job %s (had_metadata=%s, artifacts_deleted=%s)",
+        job_id,
+        bool(job),
+        artifacts_deleted,
+    )
+
+    return {
+        "job_id": job_id,
+        "status": "deleted",
+        "artifacts_deleted": artifacts_deleted,
     }
 
 

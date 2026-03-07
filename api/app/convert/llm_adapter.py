@@ -695,6 +695,7 @@ class LlmLayoutService:
             )
             suggested_image_region_pages = 0
             applied_image_region_pages = 0
+            preserved_existing_image_region_pages = 0
 
             for page in out_pages:
                 if not isinstance(page, dict):
@@ -743,6 +744,10 @@ class LlmLayoutService:
                     suggestion.get("reading_order"), n=len(elements)
                 )
                 tg = _validate_table_grids(suggestion.get("table_grids"))
+                if ro == [] and not page.get("reading_order"):
+                    ro = None
+                if tg == [] and not page.get("table_grids"):
+                    tg = None
                 ir_image_regions: list[list[float]] | None = None
                 if img_w_px and img_h_px:
                     regions_px = _validate_image_regions_px(
@@ -775,10 +780,22 @@ class LlmLayoutService:
                 if ir_image_regions is not None:
                     suggested_image_region_pages += 1
                     if image_regions_enabled:
-                        if page.get("image_regions") != ir_image_regions:
-                            page_changed = True
-                        page["image_regions"] = ir_image_regions
-                        applied_image_region_pages += 1
+                        existing_image_regions = page.get("image_regions")
+                        has_existing_image_regions = (
+                            isinstance(existing_image_regions, list)
+                            and len(existing_image_regions) > 0
+                        )
+                        # Treat an empty layout-assist suggestion as "no opinion"
+                        # when OCR has already provided image regions. Otherwise
+                        # layout assist can wipe authoritative OCR/Paddle boxes
+                        # and force PPT generation back onto heuristic crops.
+                        if (not ir_image_regions) and has_existing_image_regions:
+                            preserved_existing_image_region_pages += 1
+                        else:
+                            if page.get("image_regions") != ir_image_regions:
+                                page_changed = True
+                            page["image_regions"] = ir_image_regions
+                            applied_image_region_pages += 1
                 if page_changed:
                     pages_changed += 1
 
@@ -790,6 +807,11 @@ class LlmLayoutService:
                     out.setdefault("warnings", []).append(
                         f"layout_assist_image_regions=applied:{applied_image_region_pages}/{suggested_image_region_pages}"
                     )
+                    if preserved_existing_image_region_pages > 0:
+                        out.setdefault("warnings", []).append(
+                            "layout_assist_image_regions_preserved_existing="
+                            f"{preserved_existing_image_region_pages}"
+                        )
                 else:
                     out.setdefault("warnings", []).append(
                         f"layout_assist_image_regions=ignored:{suggested_image_region_pages}"

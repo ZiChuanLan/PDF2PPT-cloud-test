@@ -20,6 +20,7 @@ from rq import Connection, Queue, Worker
 from .config import get_settings
 from .job_options import (
     LAYOUT_PROVIDER_ALIASES,
+    normalize_baidu_doc_parse_type,
     normalize_ai_ocr_provider,
     normalize_layout_provider,
     normalize_parse_provider,
@@ -28,11 +29,12 @@ from .job_options import (
     normalize_text_erase_mode,
 )
 from .job_paths import get_job_dir
+from .convert.baidu_doc_adapter import parse_pdf_to_ir_with_baidu_doc
 from .convert.mineru_adapter import parse_pdf_to_ir_with_mineru
 from .convert.pdf_parser import parse_pdf_to_ir
 from .convert.llm_adapter import AnthropicProvider, OpenAiProvider
 from .logging_config import get_logger
-from .logging_config import set_job_id, setup_logging
+from .logging_config import set_job_id, set_job_stage, setup_logging
 from .models.error import AppException, ErrorCode
 from .models.job import JobStage, JobStatus
 from .services.redis_service import get_redis_service
@@ -119,6 +121,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
     layout_assist_apply_image_regions: bool = False,
     provider: str | None = None,
     api_key: str | None = None,
+    baidu_doc_parse_type: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
     page_start: int | None = None,
@@ -142,6 +145,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
     ocr_ai_provider: str | None = None,
     ocr_ai_base_url: str | None = None,
     ocr_ai_model: str | None = None,
+    ocr_paddle_vl_docparser_max_side_px: int | None = None,
     ocr_geometry_mode: str | None = None,
     scanned_page_mode: str | None = None,
     image_bg_clear_expand_min_pt: float | None = None,
@@ -163,6 +167,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         layout_assist_apply_image_regions,
         provider,
         api_key,
+        baidu_doc_parse_type,
         base_url,
         model,
         page_start,
@@ -186,6 +191,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         ocr_ai_provider,
         ocr_ai_base_url,
         ocr_ai_model,
+        ocr_paddle_vl_docparser_max_side_px,
         ocr_geometry_mode,
         scanned_page_mode,
         image_bg_clear_expand_min_pt,
@@ -200,6 +206,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
     )
     redis_service = get_redis_service()
     set_job_id(job_id)
+    set_job_stage(None)
     settings = get_settings()
     ocr_render_dpi = int(getattr(settings, "ocr_render_dpi", 200) or 200)
     scanned_render_dpi = int(getattr(settings, "scanned_render_dpi", 200) or 200)
@@ -215,6 +222,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     if redis_service.is_cancelled(job_id):
+        set_job_stage(JobStage.cleanup.value)
         redis_service.update_job(
             job_id,
             status=JobStatus.cancelled,
@@ -222,6 +230,8 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             progress=100,
             message="Job cancelled",
         )
+        set_job_stage(None)
+        set_job_id(None)
         return
 
     def _select_provider() -> OpenAiProvider | AnthropicProvider | None:
@@ -263,6 +273,23 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         if num > high:
             num = float(high)
         return float(num)
+
+    def _normalize_int(
+        value: int | None,
+        *,
+        default: int,
+        low: int,
+        high: int,
+    ) -> int:
+        try:
+            num = int(value) if value is not None else int(default)
+        except Exception:
+            num = int(default)
+        if num < low:
+            num = int(low)
+        if num > high:
+            num = int(high)
+        return int(num)
 
     normalized_image_bg_clear_expand_min_pt = _normalize_float(
         image_bg_clear_expand_min_pt,
@@ -315,6 +342,12 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         low=1.2,
         high=30.0,
     )
+    normalized_ocr_paddle_vl_docparser_max_side_px = _normalize_int(
+        ocr_paddle_vl_docparser_max_side_px,
+        default=2200,
+        low=0,
+        high=6000,
+    )
 
     try:
         if not input_pdf.exists():
@@ -326,7 +359,8 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             )
 
         parse_provider_id = normalize_parse_provider(parse_provider)
-        if parse_provider_id not in {"local", "mineru", "v2"}:
+        baidu_doc_parse_type_id = normalize_baidu_doc_parse_type(baidu_doc_parse_type)
+        if parse_provider_id not in {"local", "mineru", "baidu_doc", "v2"}:
             raise AppException(
                 code=ErrorCode.VALIDATION_ERROR,
                 message="Unsupported parse provider",
@@ -339,6 +373,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             stage: JobStage, progress: int, message: str
         ) -> None:
             nonlocal reported_progress
+            set_job_stage(stage.value)
             if redis_service.is_cancelled(job_id):
                 redis_service.update_job(
                     job_id,
@@ -365,6 +400,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         ) -> None:
             if not redis_service.is_cancelled(job_id):
                 return
+            set_job_stage((stage or JobStage.cleanup).value)
             redis_service.update_job(
                 job_id,
                 status=JobStatus.cancelled,
@@ -391,6 +427,12 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             (
                 "正在调用 MinerU 解析文档…"
                 if parse_provider_id == "mineru"
+                else (
+                    "正在调用百度解析（PaddleOCR-VL）…"
+                    if baidu_doc_parse_type_id == "paddle_vl"
+                    else "正在调用百度解析（普通）…"
+                )
+                if parse_provider_id == "baidu_doc"
                 else "正在解析文档结构…"
             ),
         )
@@ -468,6 +510,24 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 data_id=job_id,
                 cancel_check=_mineru_poll_check,
             )
+        elif parse_provider_id == "baidu_doc":
+
+            def _baidu_poll_check() -> None:
+                _abort_if_cancelled(stage=JobStage.parsing, message="Job cancelled")
+                _refresh_job_ttl()
+
+            enable_ocr = False
+            enable_layout_assist = False
+            ir = parse_pdf_to_ir_with_baidu_doc(
+                input_pdf,
+                artifacts_dir / "baidu_doc",
+                api_key=clean_str(ocr_baidu_api_key),
+                secret_key=clean_str(ocr_baidu_secret_key),
+                parse_type=baidu_doc_parse_type_id,
+                page_start=page_start,
+                page_end=page_end,
+                cancel_check=_baidu_poll_check,
+            )
         else:
             ir = parse_pdf_to_ir(
                 input_pdf,
@@ -499,7 +559,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             for page in (ir.get("pages") or [])
         )
         should_attempt_ocr = (
-            parse_provider_id != "mineru"
+            parse_provider_id == "local"
             and scanned_pages_exist
             and (bool(enable_ocr) or bool(enable_layout_assist))
         )
@@ -560,6 +620,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
                 ocr_ai_provider=ocr_ai_provider,
                 ocr_ai_base_url=ocr_ai_base_url,
                 ocr_ai_model=ocr_ai_model,
+                ocr_paddle_vl_docparser_max_side_px=normalized_ocr_paddle_vl_docparser_max_side_px,
                 ocr_geometry_mode=ocr_geometry_mode,
                 ocr_ai_linebreak_assist=ocr_ai_linebreak_assist,
                 ocr_strict_mode=ocr_strict_mode,
@@ -741,9 +802,11 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         )
 
     except JobCancelledError:
+        set_job_stage(JobStage.cleanup.value)
         logger.info("Job %s cancelled", job_id)
         return
     except AppException as e:
+        set_job_stage(JobStage.cleanup.value)
         logger.warning(f"Job {job_id} failed: {e.code} {e.message}")
         redis_service.update_job(
             job_id,
@@ -755,6 +818,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         )
         return
     except Exception as e:
+        set_job_stage(JobStage.cleanup.value)
         logger.exception(f"Job {job_id} crashed: {e!s}")
         redis_service.update_job(
             job_id,
@@ -765,6 +829,9 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
             error={"code": ErrorCode.INTERNAL_ERROR.value, "message": str(e)},
         )
         return
+    finally:
+        set_job_stage(None)
+        set_job_id(None)
 
 
 def run_worker() -> None:

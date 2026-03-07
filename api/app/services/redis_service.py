@@ -12,7 +12,7 @@ from typing import Any, Optional, cast
 import redis
 
 from ..config import get_settings
-from ..models.job import Job, JobStage, JobStatus, LayoutMode
+from ..models.job import Job, JobDebugEvent, JobStage, JobStatus, LayoutMode
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,7 @@ class RedisService:
     def __init__(self):
         settings = get_settings()
         self.ttl_seconds = settings.job_ttl_minutes * 60
+        self.debug_events_limit = max(20, int(settings.job_debug_events_limit or 200))
         self._memory_backend = False
         redis_url = str(settings.redis_url or "").strip()
         if redis_url.startswith("memory://"):
@@ -147,6 +148,87 @@ class RedisService:
         )
         return job
 
+    def _append_debug_event_to_job(
+        self,
+        job: Job,
+        *,
+        level: str,
+        message: str,
+        source: str | None = None,
+        stage: str | None = None,
+        progress: int | None = None,
+        dedupe: bool = True,
+    ) -> bool:
+        text = str(message or "").strip()
+        if not text:
+            return False
+
+        normalized_stage = str(stage or "").strip() or None
+        normalized_source = str(source or "").strip() or None
+        normalized_progress: int | None = None
+        if progress is not None:
+            try:
+                normalized_progress = max(0, min(100, int(progress)))
+            except Exception:
+                normalized_progress = None
+
+        last_event = job.debug_events[-1] if job.debug_events else None
+        if (
+            dedupe
+            and last_event is not None
+            and last_event.level == str(level or "info").lower()
+            and last_event.message == text
+            and last_event.source == normalized_source
+            and last_event.stage == normalized_stage
+            and last_event.progress == normalized_progress
+        ):
+            return False
+
+        next_seq = job.debug_events[-1].seq + 1 if job.debug_events else 1
+        job.debug_events.append(
+            JobDebugEvent(
+                seq=next_seq,
+                level=str(level or "info").lower(),
+                message=text,
+                source=normalized_source,
+                stage=normalized_stage,
+                progress=normalized_progress,
+            )
+        )
+        if len(job.debug_events) > self.debug_events_limit:
+            job.debug_events = job.debug_events[-self.debug_events_limit :]
+        return True
+
+    def append_debug_event(
+        self,
+        job_id: str,
+        *,
+        level: str,
+        message: str,
+        source: str | None = None,
+        stage: str | None = None,
+        progress: int | None = None,
+        dedupe: bool = True,
+    ) -> Optional[Job]:
+        """Append a single debug event to a job and persist it."""
+        job = self.get_job(job_id)
+        if not job:
+            return None
+
+        appended = self._append_debug_event_to_job(
+            job,
+            level=level,
+            message=message,
+            source=source,
+            stage=stage,
+            progress=progress,
+            dedupe=dedupe,
+        )
+        if not appended:
+            return job
+
+        return self._persist_job(job)
+
     def create_job(self, job_id: str) -> Job:
         """Create a new job in Redis."""
         now = datetime.now(timezone.utc)
@@ -162,6 +244,15 @@ class RedisService:
             message="Job created, waiting to be queued",
             error=None,
             layout_mode=LayoutMode.fidelity,
+        )
+        self._append_debug_event_to_job(
+            job,
+            level="info",
+            message=job.message or "Job created",
+            source="job_status",
+            stage=job.stage.value,
+            progress=job.progress,
+            dedupe=False,
         )
 
         # Store job metadata with TTL
@@ -196,6 +287,14 @@ class RedisService:
         if job.status in _TERMINAL_JOB_STATUSES and status != job.status:
             return job
 
+        previous_snapshot = (
+            job.status,
+            job.stage,
+            job.progress,
+            job.message,
+            job.error,
+        )
+
         # Update fields
         if status is not None:
             job.status = status
@@ -207,6 +306,34 @@ class RedisService:
             job.message = message
         if error is not None:
             job.error = error
+
+        current_snapshot = (
+            job.status,
+            job.stage,
+            job.progress,
+            job.message,
+            job.error,
+        )
+        if current_snapshot != previous_snapshot:
+            effective_message = (
+                (job.error or {}).get("message")
+                if isinstance(job.error, dict)
+                else None
+            ) or job.message or job.status.value
+            event_level = "info"
+            if job.status == JobStatus.failed or bool(job.error):
+                event_level = "error"
+            elif job.status == JobStatus.cancelled:
+                event_level = "warning"
+            self._append_debug_event_to_job(
+                job,
+                level=event_level,
+                message=str(effective_message),
+                source="job_status",
+                stage=job.stage.value,
+                progress=job.progress,
+                dedupe=False,
+            )
 
         return self._persist_job(job)
 

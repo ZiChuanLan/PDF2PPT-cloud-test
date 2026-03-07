@@ -1498,6 +1498,346 @@ class _ScannedImageRegionInfo:
     background_removed: bool = False
 
 
+def _build_scanned_image_region_suppress_bbox(
+    bbox_pt: list[float],
+    *,
+    page_w_pt: float,
+    page_h_pt: float,
+    shape_confirmed: bool,
+) -> list[float]:
+    x0, y0, x1, y1 = _coerce_bbox_pt(bbox_pt)
+    w_pt = float(x1 - x0)
+    h_pt = float(y1 - y0)
+    if shape_confirmed:
+        pad_x = max(1.5, min(8.0, 0.05 * w_pt))
+        pad_y = max(1.0, min(6.0, 0.07 * h_pt))
+    else:
+        pad_x = max(0.8, min(3.5, 0.02 * w_pt))
+        pad_y = max(0.8, min(3.0, 0.03 * h_pt))
+    return [
+        max(0.0, float(x0) - pad_x),
+        max(0.0, float(y0) - pad_y),
+        min(float(page_w_pt), float(x1) + pad_x),
+        min(float(page_h_pt), float(y1) + pad_y),
+    ]
+
+
+def _tighten_scanned_image_region_bbox_by_visual_bounds(
+    *,
+    img: Any,
+    bbox_pt: list[float],
+    page_w_pt: float,
+    page_h_pt: float,
+    scanned_render_dpi: int,
+    shape_confirmed: bool,
+    ocr_text_elements: list[dict[str, Any]] | None = None,
+) -> list[float] | None:
+    """Best-effort tighten for image crops with excessive blank margins."""
+
+    try:
+        import numpy as np
+        from PIL import ImageFilter
+    except Exception:
+        return None
+
+    try:
+        x0, y0, x1, y1 = _coerce_bbox_pt(bbox_pt)
+    except Exception:
+        return None
+
+    if float(x1 - x0) <= 0.0 or float(y1 - y0) <= 0.0:
+        return None
+
+    x0p, y0p = _pdf_pt_to_pix_px(
+        x0,
+        y0,
+        page_height_pt=page_h_pt,
+        dpi=int(scanned_render_dpi),
+    )
+    x1p, y1p = _pdf_pt_to_pix_px(
+        x1,
+        y1,
+        page_height_pt=page_h_pt,
+        dpi=int(scanned_render_dpi),
+    )
+    x0p = max(0, min(int(img.width - 1), int(x0p)))
+    y0p = max(0, min(int(img.height - 1), int(y0p)))
+    x1p = max(0, min(int(img.width), int(x1p)))
+    y1p = max(0, min(int(img.height), int(y1p)))
+    if x1p <= x0p or y1p <= y0p:
+        return None
+
+    try:
+        crop = img.crop((x0p, y0p, x1p, y1p)).convert("L")
+    except Exception:
+        return None
+
+    w = int(crop.width)
+    h = int(crop.height)
+    if w < 40 or h < 40:
+        return None
+
+    arr = np.asarray(crop, dtype=np.uint8)
+    if arr.ndim != 2 or arr.size <= 0:
+        return None
+
+    ring = max(3, min(14, int(round(0.05 * float(min(w, h))))))
+    border_vals = np.concatenate(
+        [
+            arr[:ring, :].reshape(-1),
+            arr[max(0, h - ring) :, :].reshape(-1),
+            arr[:, :ring].reshape(-1),
+            arr[:, max(0, w - ring) :].reshape(-1),
+        ]
+    )
+    if border_vals.size <= 0:
+        return None
+
+    bg = float(np.median(border_vals))
+    diff = np.abs(arr.astype(np.int16) - int(round(bg)))
+
+    edges_img = crop.filter(ImageFilter.FIND_EDGES)
+    edges = np.asarray(edges_img, dtype=np.uint8)
+    if edges.shape != arr.shape:
+        return None
+
+    diff_thresh = 18.0 if bg >= 150.0 else 22.0
+    edge_thresh = 24 if shape_confirmed else 28
+    mask = (edges >= edge_thresh) | (diff >= diff_thresh)
+
+    if ocr_text_elements:
+        overlap_boxes: list[tuple[int, int, int, int]] = []
+        overlap_cov = 0.0
+        crop_area = max(1.0, float(x1 - x0) * float(y1 - y0))
+        for el in ocr_text_elements:
+            bbox_el = el.get("bbox_pt") if isinstance(el, dict) else None
+            if not isinstance(bbox_el, list) or len(bbox_el) != 4:
+                continue
+            try:
+                tx0, ty0, tx1, ty1 = _coerce_bbox_pt(bbox_el)
+            except Exception:
+                continue
+            ix0 = max(float(x0), float(tx0))
+            iy0 = max(float(y0), float(ty0))
+            ix1 = min(float(x1), float(tx1))
+            iy1 = min(float(y1), float(ty1))
+            if ix1 <= ix0 or iy1 <= iy0:
+                continue
+            overlap_cov += float((ix1 - ix0) * (iy1 - iy0)) / crop_area
+            ex0 = max(
+                0,
+                int(
+                    round(
+                        (float(tx0) * float(scanned_render_dpi) / _PTS_PER_INCH)
+                        - x0p
+                    )
+                ),
+            )
+            ey0 = max(
+                0,
+                int(
+                    round(
+                        (float(ty0) * float(scanned_render_dpi) / _PTS_PER_INCH)
+                        - y0p
+                    )
+                ),
+            )
+            ex1 = min(
+                w,
+                int(
+                    round(
+                        (float(tx1) * float(scanned_render_dpi) / _PTS_PER_INCH)
+                        - x0p
+                    )
+                ),
+            )
+            ey1 = min(
+                h,
+                int(
+                    round(
+                        (float(ty1) * float(scanned_render_dpi) / _PTS_PER_INCH)
+                        - y0p
+                    )
+                ),
+            )
+            if ex1 <= ex0 or ey1 <= ey0:
+                continue
+            overlap_boxes.append((ex0, ey0, ex1, ey1))
+
+        if overlap_boxes and len(overlap_boxes) <= 2 and overlap_cov >= 0.10:
+            text_x0 = min(box[0] for box in overlap_boxes)
+            text_y0 = min(box[1] for box in overlap_boxes)
+            text_x1 = max(box[2] for box in overlap_boxes)
+            text_y1 = max(box[3] for box in overlap_boxes)
+            text_w = max(1, text_x1 - text_x0)
+            text_h = max(1, text_y1 - text_y0)
+
+            if (
+                text_y0 >= int(round(0.48 * float(h)))
+                and text_w >= int(round(0.28 * float(w)))
+                and text_h <= int(round(0.42 * float(h)))
+                and text_y0 >= max(18, int(round(0.22 * float(h))))
+            ):
+                clip_pad = max(4, min(14, int(round(0.06 * float(h)))))
+                ny1p = max(y0p + 8, y0p + text_y0 - clip_pad)
+                if ny1p > y0p + int(round(0.22 * float(h))):
+                    scale = float(_PTS_PER_INCH) / float(max(1, int(scanned_render_dpi)))
+                    clipped = [
+                        float(x0p) * scale,
+                        float(y0p) * scale,
+                        float(x1p) * scale,
+                        float(ny1p) * scale,
+                    ]
+                    clipped = [float(v) for v in _coerce_bbox_pt(clipped)]
+                    if clipped[2] > clipped[0] and clipped[3] > clipped[1]:
+                        return clipped
+
+            for ex0, ey0, ex1, ey1 in overlap_boxes:
+                pad_x = max(4, min(18, int(round(0.12 * float(ex1 - ex0)))))
+                pad_y = max(4, min(20, int(round(0.28 * float(ey1 - ey0)))))
+                ex0 = max(0, ex0 - pad_x)
+                ey0 = max(0, ey0 - pad_y)
+                ex1 = min(w, ex1 + pad_x)
+                ey1 = min(h, ey1 + pad_y)
+                mask[ey0:ey1, ex0:ex1] = False
+
+    row_counts = mask.sum(axis=1)
+    col_counts = mask.sum(axis=0)
+    if row_counts.size > 0 and col_counts.size > 0:
+        row_peak = int(row_counts.max()) if row_counts.size else 0
+        col_peak = int(col_counts.max()) if col_counts.size else 0
+        row_thresh = max(2, int(round(0.10 * float(row_peak)))) if row_peak > 0 else 2
+        col_thresh = max(2, int(round(0.10 * float(col_peak)))) if col_peak > 0 else 2
+        ys = np.where(row_counts >= row_thresh)[0]
+        xs = np.where(col_counts >= col_thresh)[0]
+    else:
+        ys = np.empty((0,), dtype=np.int32)
+        xs = np.empty((0,), dtype=np.int32)
+
+    if xs.size < 24 or ys.size < 24:
+        ys, xs = np.where(mask)
+    if xs.size < 24 or ys.size < 24:
+        return None
+
+    cx0 = int(xs.min())
+    cy0 = int(ys.min())
+    cx1 = int(xs.max()) + 1
+    cy1 = int(ys.max()) + 1
+
+    left_margin = cx0
+    top_margin = cy0
+    right_margin = max(0, w - cx1)
+    bottom_margin = max(0, h - cy1)
+    trim_x = float(left_margin + right_margin) / max(1.0, float(w))
+    trim_y = float(top_margin + bottom_margin) / max(1.0, float(h))
+    side_trim_px = max(left_margin, top_margin, right_margin, bottom_margin)
+    if side_trim_px < max(10, int(round(0.06 * float(min(w, h))))) and (
+        trim_x < 0.10 and trim_y < 0.10
+    ):
+        return None
+
+    pad = max(4, min(18, int(round(0.03 * float(min(w, h))))))
+    nx0p = max(x0p, x0p + cx0 - pad)
+    ny0p = max(y0p, y0p + cy0 - pad)
+    nx1p = min(x1p, x0p + cx1 + pad)
+    ny1p = min(y1p, y0p + cy1 + pad)
+    if nx1p <= nx0p or ny1p <= ny0p:
+        return None
+
+    orig_area = max(1.0, float(x1p - x0p) * float(y1p - y0p))
+    new_area = max(1.0, float(nx1p - nx0p) * float(ny1p - ny0p))
+    shrink_ratio = float(new_area) / float(orig_area)
+    if shrink_ratio <= 0.18:
+        return None
+
+    scale = float(_PTS_PER_INCH) / float(max(1, int(scanned_render_dpi)))
+    tightened = [
+        float(nx0p) * scale,
+        float(ny0p) * scale,
+        float(nx1p) * scale,
+        float(ny1p) * scale,
+    ]
+    tightened = [float(v) for v in _coerce_bbox_pt(tightened)]
+    if tightened[2] <= tightened[0] or tightened[3] <= tightened[1]:
+        return None
+    return tightened
+
+
+def _tighten_scanned_image_region_infos(
+    *,
+    infos: list[_ScannedImageRegionInfo],
+    img: Any,
+    page_w_pt: float,
+    page_h_pt: float,
+    scanned_render_dpi: int,
+    ocr_text_elements: list[dict[str, Any]] | None = None,
+) -> list[_ScannedImageRegionInfo]:
+    if not infos:
+        return infos
+
+    out: list[_ScannedImageRegionInfo] = []
+    for info in infos:
+        tightened_bbox = _tighten_scanned_image_region_bbox_by_visual_bounds(
+            img=img,
+            bbox_pt=info.bbox_pt,
+            page_w_pt=page_w_pt,
+            page_h_pt=page_h_pt,
+            scanned_render_dpi=scanned_render_dpi,
+            shape_confirmed=bool(info.shape_confirmed),
+            ocr_text_elements=ocr_text_elements,
+        )
+        if tightened_bbox is None:
+            out.append(info)
+            continue
+
+        try:
+            x0, y0, x1, y1 = _coerce_bbox_pt(tightened_bbox)
+            x0p, y0p = _pdf_pt_to_pix_px(
+                x0,
+                y0,
+                page_height_pt=page_h_pt,
+                dpi=int(scanned_render_dpi),
+            )
+            x1p, y1p = _pdf_pt_to_pix_px(
+                x1,
+                y1,
+                page_height_pt=page_h_pt,
+                dpi=int(scanned_render_dpi),
+            )
+            x0p = max(0, min(int(img.width - 1), int(x0p)))
+            y0p = max(0, min(int(img.height - 1), int(y0p)))
+            x1p = max(0, min(int(img.width), int(x1p)))
+            y1p = max(0, min(int(img.height), int(y1p)))
+            if x1p <= x0p or y1p <= y0p:
+                out.append(info)
+                continue
+
+            crop = img.crop((x0p, y0p, x1p, y1p))
+            _ensure_parent_dir(info.crop_path)
+            crop.save(info.crop_path)
+        except Exception:
+            out.append(info)
+            continue
+
+        suppress_bbox = _build_scanned_image_region_suppress_bbox(
+            tightened_bbox,
+            page_w_pt=page_w_pt,
+            page_h_pt=page_h_pt,
+            shape_confirmed=bool(info.shape_confirmed),
+        )
+        out.append(
+            _ScannedImageRegionInfo(
+                bbox_pt=[float(v) for v in _coerce_bbox_pt(tightened_bbox)],
+                suppress_bbox_pt=[float(v) for v in _coerce_bbox_pt(suppress_bbox)],
+                crop_path=info.crop_path,
+                shape_confirmed=bool(info.shape_confirmed),
+                ai_hint=bool(info.ai_hint),
+                background_removed=bool(info.background_removed),
+            )
+        )
+    return out
+
+
 def _estimate_baseline_ocr_line_height_pt(
     *,
     ocr_text_elements: list[dict[str, Any]],
@@ -2062,10 +2402,10 @@ def _collect_scanned_image_region_candidates(
                 continue
             # Ignore card-like mixed content panels suggested by AI.
             area = max(0.0, float(x1 - x0) * float(y1 - y0))
-            # `page["image_regions"]` is only populated when layout-assist image
-            # region suggestion is explicitly enabled. Keep strong downstream
-            # filters, but do not unconditionally drop these suggestions when OCR
-            # text exists, otherwise the user-facing toggle has no effect.
+            # `page["image_regions"]` can come from OCR image-region detection
+            # or layout-assist suggestions. Keep strong downstream filters, but
+            # do not unconditionally drop these suggestions when OCR text exists,
+            # otherwise the upstream region source has no effect.
             page_area = max(1.0, float(page_w_pt) * float(page_h_pt))
             area_ratio = area / page_area
             if area_ratio < 0.0020 or area_ratio > 0.75:
@@ -2086,6 +2426,9 @@ def _collect_scanned_image_region_candidates(
             if height_ratio >= 0.42 and n >= 2 and cov >= 0.06:
                 continue
             regions_pt_from_ai.append([x0, y0, x1, y1])
+
+    if regions_pt_from_ai:
+        return regions_pt_from_ai
 
     if (
         has_full_page_bg_image
@@ -2621,20 +2964,12 @@ def _try_merge_fragmented_scanned_image_regions(
         ai_hint: bool,
     ) -> _ScannedImageRegionInfo:
         x0, y0, x1, y1 = _coerce_bbox_pt(bbox_pt)
-        w_pt = float(x1 - x0)
-        h_pt = float(y1 - y0)
-        if shape_confirmed:
-            pad_x = max(1.5, min(8.0, 0.05 * w_pt))
-            pad_y = max(1.0, min(6.0, 0.07 * h_pt))
-        else:
-            pad_x = max(0.8, min(3.5, 0.02 * w_pt))
-            pad_y = max(0.8, min(3.0, 0.03 * h_pt))
-        suppress_bbox = [
-            max(0.0, float(x0) - pad_x),
-            max(0.0, float(y0) - pad_y),
-            min(float(page_w_pt), float(x1) + pad_x),
-            min(float(page_h_pt), float(y1) + pad_y),
-        ]
+        suppress_bbox = _build_scanned_image_region_suppress_bbox(
+            [float(x0), float(y0), float(x1), float(y1)],
+            page_w_pt=page_w_pt,
+            page_h_pt=page_h_pt,
+            shape_confirmed=bool(shape_confirmed),
+        )
         return _ScannedImageRegionInfo(
             bbox_pt=[float(x0), float(y0), float(x1), float(y1)],
             suppress_bbox_pt=[float(v) for v in _coerce_bbox_pt(suppress_bbox)],
@@ -3140,19 +3475,12 @@ def _build_scanned_image_region_infos(
         if duplicated:
             continue
 
-        if shape_confirmed:
-            pad_x = max(1.5, min(8.0, 0.05 * w_pt))
-            pad_y = max(1.0, min(6.0, 0.07 * h_pt))
-        else:
-            pad_x = max(0.8, min(3.5, 0.02 * w_pt))
-            pad_y = max(0.8, min(3.0, 0.03 * h_pt))
-
-        suppress_bbox = [
-            max(0.0, float(x0) - pad_x),
-            max(0.0, float(y0) - pad_y),
-            min(float(page_w_pt), float(x1) + pad_x),
-            min(float(page_h_pt), float(y1) + pad_y),
-        ]
+        suppress_bbox = _build_scanned_image_region_suppress_bbox(
+            cand_bbox,
+            page_w_pt=page_w_pt,
+            page_h_pt=page_h_pt,
+            shape_confirmed=bool(shape_confirmed),
+        )
         infos.append(
             _ScannedImageRegionInfo(
                 bbox_pt=cand_bbox,
@@ -3175,6 +3503,14 @@ def _build_scanned_image_region_infos(
         baseline_ocr_h_pt=baseline_ocr_h_pt,
         ocr_text_elements=ocr_text_elements,
         text_coverage_ratio_fn=text_coverage_ratio_fn,
+    )
+    infos = _tighten_scanned_image_region_infos(
+        infos=infos,
+        img=img,
+        page_w_pt=page_w_pt,
+        page_h_pt=page_h_pt,
+        scanned_render_dpi=scanned_render_dpi,
+        ocr_text_elements=ocr_text_elements,
     )
 
     # Debug/self-check: persist final crop bboxes used for PPT composition.

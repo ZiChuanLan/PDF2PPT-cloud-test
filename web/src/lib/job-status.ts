@@ -1,6 +1,16 @@
 export type JobStatusValue = "pending" | "processing" | "completed" | "failed" | "cancelled"
 export type JobQueueState = "queued" | "running" | "waiting" | "done"
 
+export type JobDebugEvent = {
+  seq: number
+  timestamp: string
+  level: string
+  message: string
+  source?: string | null
+  stage?: string | null
+  progress?: number | null
+}
+
 export type JobListItem = {
   job_id: string
   status: JobStatusValue
@@ -29,6 +39,7 @@ export type JobStatusResponse = {
   expires_at: string
   message?: string | null
   error?: { code?: string; message?: string } | null
+  debug_events: JobDebugEvent[]
 }
 
 const JOB_STATUS_VALUES = new Set<JobStatusValue>([
@@ -126,6 +137,46 @@ function normalizeIsoOrNow(value: unknown): string {
   return new Date().toISOString()
 }
 
+function normalizeDebugLevel(value: unknown): string {
+  if (typeof value !== "string") return "info"
+  const normalized = value.trim().toLowerCase()
+  return normalized || "info"
+}
+
+function normalizeJobDebugEvent(row: unknown): JobDebugEvent | null {
+  if (!row || typeof row !== "object") return null
+
+  const seqValue = (row as { seq?: unknown }).seq
+  const seq =
+    typeof seqValue === "number" && Number.isFinite(seqValue) ? Math.max(1, Math.floor(seqValue)) : null
+  const message =
+    typeof (row as { message?: unknown }).message === "string"
+      ? (row as { message: string }).message.trim()
+      : ""
+
+  if (!seq || !message) return null
+
+  return {
+    seq,
+    timestamp: normalizeIsoOrNow((row as { timestamp?: unknown }).timestamp),
+    level: normalizeDebugLevel((row as { level?: unknown }).level),
+    message,
+    source:
+      typeof (row as { source?: unknown }).source === "string"
+        ? (row as { source: string }).source
+        : null,
+    stage:
+      typeof (row as { stage?: unknown }).stage === "string"
+        ? (row as { stage: string }).stage
+        : null,
+    progress:
+      typeof (row as { progress?: unknown }).progress === "number" &&
+      Number.isFinite((row as { progress: number }).progress)
+        ? clampProgress((row as { progress: number }).progress)
+        : null,
+  }
+}
+
 export function normalizeJobListItem(row: unknown): JobListItem | null {
   if (!row || typeof row !== "object") return null
 
@@ -179,6 +230,10 @@ export function normalizeJobStatusResponse(body: unknown): JobStatusResponse {
   if (!normalized) {
     throw new Error("任务状态响应异常")
   }
+  const debugRows =
+    body && typeof body === "object" && Array.isArray((body as { debug_events?: unknown }).debug_events)
+      ? (body as { debug_events: unknown[] }).debug_events
+      : []
   return {
     job_id: normalized.job_id,
     status: normalized.status,
@@ -188,6 +243,9 @@ export function normalizeJobStatusResponse(body: unknown): JobStatusResponse {
     expires_at: normalized.expires_at,
     message: normalized.message,
     error: normalized.error,
+    debug_events: debugRows
+      .map((row) => normalizeJobDebugEvent(row))
+      .filter((row): row is JobDebugEvent => row !== null),
   }
 }
 

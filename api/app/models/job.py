@@ -2,7 +2,7 @@
 
 """Job models for async PDF to PPT conversion."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
@@ -40,6 +40,26 @@ class LayoutMode(str, Enum):
     assist = "assist"
 
 
+class JobDebugEvent(BaseModel):
+    """Single debug event emitted while a job is running."""
+
+    seq: int = Field(..., ge=1, description="Monotonic per-job event sequence")
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Event timestamp",
+    )
+    level: str = Field("info", description="Log level or event severity")
+    message: str = Field(..., description="Event message")
+    source: Optional[str] = Field(None, description="Logger or producer name")
+    stage: Optional[str] = Field(None, description="Associated job stage code")
+    progress: Optional[int] = Field(
+        None,
+        ge=0,
+        le=100,
+        description="Progress snapshot when the event was emitted",
+    )
+
+
 class Job(BaseModel):
     """Job metadata model."""
 
@@ -54,6 +74,10 @@ class Job(BaseModel):
     layout_mode: LayoutMode = Field(
         LayoutMode.fidelity,
         description="Layout mode: fidelity (no AI) or assist (LLM-assisted)",
+    )
+    debug_events: list[JobDebugEvent] = Field(
+        default_factory=list,
+        description="Recent per-job debug events shown in the frontend",
     )
 
 
@@ -127,6 +151,15 @@ class AiOcrCheckRequest(BaseModel):
         None, description="Optional OpenAI-compatible base URL"
     )
     model: str = Field(..., description="Target AI OCR model identifier")
+    ocr_paddle_vl_docparser_max_side_px: Optional[int] = Field(
+        None,
+        ge=0,
+        le=6000,
+        description=(
+            "Optional max long-edge in pixels for PaddleOCR-VL doc_parser input images; "
+            "0 disables downscale"
+        ),
+    )
 
 
 class AiOcrCheckSampleItem(BaseModel):
@@ -170,6 +203,7 @@ class JobStatusResponse(BaseModel):
     expires_at: datetime
     message: Optional[str] = None
     error: Optional[dict[str, Any]] = None
+    debug_events: list[JobDebugEvent] = Field(default_factory=list)
 
 
 class JobListItem(BaseModel):

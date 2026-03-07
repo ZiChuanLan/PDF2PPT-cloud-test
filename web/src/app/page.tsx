@@ -8,6 +8,7 @@ import {
   ChevronRightIcon,
   DownloadIcon,
   FileTextIcon,
+  Trash2Icon,
   UploadCloudIcon,
   XCircleIcon,
 } from "lucide-react"
@@ -16,11 +17,16 @@ import { toast } from "sonner"
 
 import { cn } from "@/lib/utils"
 import { apiFetch, normalizeFetchError } from "@/lib/api"
-import { defaultSettings, loadStoredSettings, type Settings } from "@/lib/settings"
+import {
+  defaultSettings,
+  loadStoredSettings,
+  type Settings,
+} from "@/lib/settings"
 import {
   createJobFormData,
   getOcrConfigSourceLabel,
   getRunModelLabel,
+  getRunParseEngineLabel,
   resolveRunConfig,
   validateRunConfig,
 } from "@/lib/run-config"
@@ -49,6 +55,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { JobDebugPanel } from "@/components/job-debug-panel"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
 import { PdfCanvasPreview } from "@/components/pdf-canvas-preview"
@@ -64,17 +71,12 @@ type JobStatusFetchError = Error & {
   errorCode?: string
 }
 
-const parseProviderLabels: Record<"local" | "mineru", string> = {
-  local: "本地",
-  mineru: "MinerU",
-}
-
 const ocrProviderLabels: Record<Settings["ocrProvider"], string> = {
   auto: "自动",
   aiocr: "AI OCR",
   baidu: "百度 OCR",
-  tesseract: "Tesseract",
-  paddle_local: "PaddleOCR",
+  tesseract: "本地 OCR（Tesseract）",
+  paddle_local: "本地 OCR（PaddleOCR）",
 }
 
 const layoutAssistModeLabels: Record<"off" | "on" | "auto", string> = {
@@ -153,6 +155,7 @@ export default function Home() {
   const [jobs, setJobs] = React.useState<JobListItem[]>([])
   const [queueSize, setQueueSize] = React.useState(0)
   const [jobsLoading, setJobsLoading] = React.useState(false)
+  const [deletingJobId, setDeletingJobId] = React.useState<string | null>(null)
   const [isJobIdHydrated, setIsJobIdHydrated] = React.useState(false)
   const jobIdRef = React.useRef<string | null>(null)
   const lastTerminalToastRef = React.useRef<{
@@ -164,11 +167,24 @@ export default function Home() {
   })
 
   const runConfig = React.useMemo(() => resolveRunConfig(settingsSnapshot), [settingsSnapshot])
+  const runParseEngineLabel = React.useMemo(
+    () => getRunParseEngineLabel(runConfig),
+    [runConfig]
+  )
   const runModelLabel = React.useMemo(() => getRunModelLabel(runConfig), [runConfig])
   const runOcrConfigSourceLabel = React.useMemo(
     () => getOcrConfigSourceLabel(runConfig.ocrAiConfigSource),
     [runConfig.ocrAiConfigSource]
   )
+  const runOcrSummaryLabel = React.useMemo(() => {
+    if (runConfig.parseProvider === "mineru") {
+      return "MinerU 自身"
+    }
+    if (runConfig.parseProvider === "baidu_doc") {
+      return "百度解析"
+    }
+    return ocrProviderLabels[runConfig.effectiveOcrProvider]
+  }, [runConfig])
 
   const refreshSettingsSnapshot = React.useCallback(() => {
     setSettingsSnapshot(loadStoredSettings())
@@ -191,7 +207,16 @@ export default function Home() {
       if (currentJobId) {
         const matched = rows.find((row) => row.job_id === currentJobId)
         if (matched) {
-          setActiveJob(normalizeJobStatusResponse(matched))
+          setActiveJob((previous) => {
+            const normalizedStatus = normalizeJobStatusResponse(matched)
+            if (previous?.job_id === matched.job_id && previous.debug_events.length) {
+              return {
+                ...normalizedStatus,
+                debug_events: previous.debug_events,
+              }
+            }
+            return normalizedStatus
+          })
           if (TERMINAL_JOB_STATUSES.has(matched.status)) {
             setIsSubmitting(false)
           }
@@ -347,6 +372,36 @@ export default function Home() {
         void fetchJobs(true)
       } catch {
         toast.error("取消失败")
+      }
+    },
+    [fetchJobs]
+  )
+
+  const handleDeleteById = React.useCallback(
+    async (targetJobId: string) => {
+      if (!window.confirm(`确定删除任务 ${targetJobId.slice(0, 8)} 吗？这会移除任务记录和本地产物。`)) {
+        return
+      }
+      setDeletingJobId(targetJobId)
+      try {
+        const response = await apiFetch(`/jobs/${targetJobId}`, { method: "DELETE" })
+        const body = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(body?.message || `删除失败（HTTP ${response.status}）`)
+        }
+        if (jobIdRef.current === targetJobId) {
+          setJobId(null)
+          setActiveJob(null)
+          setIsSubmitting(false)
+          setActionError(null)
+        }
+        setJobs((prev) => prev.filter((row) => row.job_id !== targetJobId))
+        toast.success("任务已删除")
+        void fetchJobs(true)
+      } catch (e) {
+        toast.error(normalizeFetchError(e, "删除任务失败"))
+      } finally {
+        setDeletingJobId((current) => (current === targetJobId ? null : current))
       }
     },
     [fetchJobs]
@@ -568,13 +623,8 @@ export default function Home() {
             </div>
 
             <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted-foreground">
-              <span>解析：{parseProviderLabels[runConfig.parseProvider]}</span>
-              <span>
-                OCR：
-                {runConfig.parseProvider === "mineru"
-                  ? "MinerU 自身"
-                  : ocrProviderLabels[runConfig.effectiveOcrProvider]}
-              </span>
+              <span>解析：{runParseEngineLabel}</span>
+              <span>OCR：{runOcrSummaryLabel}</span>
               <span>队列：{queueSize}</span>
               <span>执行中：{inFlightJobs}</span>
             </div>
@@ -811,13 +861,8 @@ export default function Home() {
               </CardHeader>
               <CardContent className="min-w-0 space-y-3">
                 <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <Badge variant="outline">解析：{parseProviderLabels[runConfig.parseProvider]}</Badge>
-                  <Badge variant="outline">
-                    OCR：
-                    {runConfig.parseProvider === "mineru"
-                      ? "MinerU 自身"
-                      : ocrProviderLabels[runConfig.effectiveOcrProvider]}
-                  </Badge>
+                  <Badge variant="outline">解析：{runParseEngineLabel}</Badge>
+                  <Badge variant="outline">OCR：{runOcrSummaryLabel}</Badge>
                   <Badge variant="outline">
                     版式辅助：{layoutAssistModeLabels[runConfig.layoutAssistMode]}
                   </Badge>
@@ -934,6 +979,15 @@ export default function Home() {
                   </div>
                 ) : null}
 
+                {hasCurrentJob ? (
+                  <JobDebugPanel
+                    events={activeJob?.debug_events || []}
+                    title="任务调试日志"
+                    emptyLabel="任务启动后会在这里持续追加后端调试信息"
+                    compact
+                  />
+                ) : null}
+
                 {actionError ? (
                   <div className="border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
                     {actionError}
@@ -994,6 +1048,10 @@ export default function Home() {
                       const stageLabel = JOB_STAGE_LABELS[row.stage] || row.stage
                       const canCancel = row.status === "pending" || row.status === "processing"
                       const canDownload = row.status === "completed"
+                      const canDelete =
+                        row.status === "completed" ||
+                        row.status === "failed" ||
+                        row.status === "cancelled"
                       return (
                         <tr
                           key={row.job_id}
@@ -1038,6 +1096,17 @@ export default function Home() {
                                   onClick={() => void handleCancelById(row.job_id)}
                                 >
                                   取消
+                                </Button>
+                              ) : null}
+                              {canDelete ? (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  disabled={deletingJobId === row.job_id}
+                                  onClick={() => void handleDeleteById(row.job_id)}
+                                >
+                                  <Trash2Icon className="size-4" />
+                                  {deletingJobId === row.job_id ? "删除中..." : "删除"}
                                 </Button>
                               ) : null}
                             </div>
