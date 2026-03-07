@@ -91,7 +91,11 @@ bash scripts/dev/local_dev.sh
 cp .env.example .env
 ```
 
-2. 至少补齐这些值
+2. 这一步分两种情况
+
+如果你打算在前端设置页里逐项填写 OCR 配置，那 `.env` 不需要补这几项也能正常跑任务。
+
+如果你希望容器启动后就自带一套服务端默认 OCR 配置，或者要启用 PaddleOCR-VL 启动预热，再补下面这些：
 
 ```env
 SILICONFLOW_API_KEY=你的key
@@ -100,6 +104,13 @@ SILICONFLOW_MODEL=PaddlePaddle/PaddleOCR-VL-1.5
 OCR_PADDLE_VL_PREWARM=1
 OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX=2200
 ```
+
+更直白一点：
+
+- 前端设置页填写 `OCR API Key / Base URL / Model`：足够跑正常 OCR 任务
+- `.env` 里的 `SILICONFLOW_*`：是服务端默认值，不是前端模式下的硬性必填
+- `OCR_PADDLE_VL_PREWARM=1`：只影响容器启动时预热，不影响任务是否能跑
+- `OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX=2200`：不是必填；代码本身默认就是 `2200`，只有你想覆盖默认值时才需要配
 
 3. 启动
 
@@ -313,13 +324,24 @@ flowchart LR
 
 ## 环境变量说明
 
-### 最小必填
+### 真正部署必填
 
 | 变量 | 说明 |
 | --- | --- |
-| `SILICONFLOW_API_KEY` | 远程 OCR API key |
-| `SILICONFLOW_BASE_URL` | OCR 网关地址 |
-| `SILICONFLOW_MODEL` | 默认远程 OCR 模型 |
+| `WEB_PORT` | Web 暴露端口，默认 `3000`，可不改 |
+| `API_PORT` | API 暴露端口，默认 `8000`，可不改 |
+
+严格来说，默认 compose 连这两项都可以不手动填，直接用默认值启动。
+
+### 作为服务端默认 OCR 配置时常用
+
+| 变量 | 说明 |
+| --- | --- |
+| `SILICONFLOW_API_KEY` | 服务端默认远程 OCR API key |
+| `SILICONFLOW_BASE_URL` | 服务端默认 OCR 网关地址 |
+| `SILICONFLOW_MODEL` | 服务端默认远程 OCR 模型 |
+
+如果你打算完全在前端设置页里填写 OCR 配置，这三项都不是必填。
 
 ### 常用可选
 
@@ -334,6 +356,20 @@ flowchart LR
 | `OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX` | doc_parser 输入长边压缩阈值 |
 | `NEXT_PUBLIC_API_URL` | 浏览器直接访问的 API 地址，默认留空走同源 |
 | `INTERNAL_API_ORIGIN` | Next 容器内访问 API 的地址 |
+
+### 前端配置和环境变量的关系
+
+这是当前部署里最容易混淆的一点。
+
+- 前端设置页填写的 OCR 配置，会随每次任务提交到后端，worker 按这次任务的参数执行
+- `.env` 里的 `SILICONFLOW_*` 是服务端默认值，主要用于“你前端这次没填”或者“你想给整台服务一个默认 OCR 配置”
+- `OCR_PADDLE_VL_PREWARM` 这类启动项只能读环境变量，因为容器启动时还没有用户前端表单
+
+所以如果你是自己部署、自己使用，通常可以这样理解：
+
+- 能不能跑任务：前端填好就行
+- 想不想免配置直接可用：再配 `.env`
+- 想不想在容器启动时提前预热：必须配 `.env`
 
 ### 同源部署建议
 
