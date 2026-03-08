@@ -138,6 +138,7 @@ function TrackingPageContent() {
   const [trackingMenu, setTrackingMenu] = React.useState<"frames" | "compare">("compare")
   const [compareSplitRatio, setCompareSplitRatio] = React.useState(0.5)
   const [showInlinePdf, setShowInlinePdf] = React.useState(false)
+  const [showTrackingLog, setShowTrackingLog] = React.useState(false)
   const [jobKeyword, setJobKeyword] = React.useState("")
   const [statusFilter, setStatusFilter] = React.useState<"all" | JobStatusValue>("all")
   const router = useRouter()
@@ -187,6 +188,10 @@ function TrackingPageContent() {
       )
     })
   }, [jobKeyword, jobRecords, statusFilter])
+
+  React.useEffect(() => {
+    setShowTrackingLog(false)
+  }, [trackedJobId])
 
   const fetchJobs = React.useCallback(async (silent = true) => {
     if (!silent) setIsJobsLoading(true)
@@ -512,7 +517,7 @@ function TrackingPageContent() {
                 <Input
                   value={jobKeyword}
                   onChange={(e) => setJobKeyword(e.target.value)}
-                  placeholder="搜索任务号 / 阶段代码"
+                  placeholder="搜索任务号 / 处理阶段"
                 />
                 <Select
                   value={statusFilter}
@@ -572,9 +577,6 @@ function TrackingPageContent() {
                         </div>
                         <div className="mt-1 text-xs text-muted-foreground">
                           {stageLabel} · {record.progress}%
-                        </div>
-                        <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-                          阶段代码：{record.stage}
                         </div>
                         {record.queue_state === "queued" &&
                         typeof record.queue_position === "number" ? (
@@ -689,9 +691,6 @@ function TrackingPageContent() {
                         trackedJobDetail.message}
                     </div>
                   ) : null}
-                  <div className="font-mono text-[11px] text-muted-foreground">
-                    阶段代码：{trackedJobDetail.stage}
-                  </div>
                   {trackedJobDetail.queue_state === "queued" &&
                   typeof trackedJobDetail.queue_position === "number" ? (
                     <div className="font-mono text-[11px] text-muted-foreground">
@@ -708,12 +707,28 @@ function TrackingPageContent() {
             </CardHeader>
             <CardContent className="grid gap-4 py-5">
               {trackedJobId ? (
-                <JobDebugPanel
-                  events={trackedJobStatus?.debug_events || []}
-                  title="任务调试日志"
-                  emptyLabel="选中任务后会在这里显示后端逐行调试信息"
-                  compact
-                />
+                <div className="grid gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/10 px-3 py-2">
+                    <div className="text-sm text-muted-foreground">
+                      处理日志默认收起，仅在排查问题时查看。
+                    </div>
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      onClick={() => setShowTrackingLog((previous) => !previous)}
+                    >
+                      {showTrackingLog ? "收起处理日志" : "查看处理日志"}
+                    </Button>
+                  </div>
+                  {showTrackingLog ? (
+                    <JobDebugPanel
+                      events={trackedJobStatus?.debug_events || []}
+                      emptyLabel="任务开始后会在这里显示处理记录"
+                      compact
+                    />
+                  ) : null}
+                </div>
               ) : null}
               {trackedJobStatusError ? (
                 <div className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -809,7 +824,7 @@ function TrackingPageContent() {
                     <div className="border border-border bg-muted/20 px-3 py-3 text-sm text-muted-foreground">
                       {trackedArtifacts.artifacts_retained
                         ? "当前任务没有可展示的逐页过程图。"
-                        : "当前任务未保留过程图。需要对比渲染前后效果时，请在首页提交任务时开启“保留过程对比图（调试）”。"}
+                        : "当前任务未保留过程图。需要对比渲染前后效果时，请在首页提交任务时开启“保留过程图”。"}
                     </div>
                   ) : null}
 

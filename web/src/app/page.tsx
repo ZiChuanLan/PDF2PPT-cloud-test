@@ -26,8 +26,6 @@ import {
 } from "@/lib/settings"
 import {
   createJobFormData,
-  getOcrConfigSourceLabel,
-  getRunModelLabel,
   getRunParseEngineLabel,
   resolveRunConfig,
   validateRunConfig,
@@ -58,6 +56,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { JobDebugPanel } from "@/components/job-debug-panel"
+import { HoverHint } from "@/components/ui/hover-hint"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
 import { PdfCanvasPreview } from "@/components/pdf-canvas-preview"
@@ -80,12 +79,6 @@ const ocrProviderLabels: Record<Settings["ocrProvider"], string> = {
   baidu: "百度 OCR",
   tesseract: "本地 OCR（Tesseract）",
   paddle_local: "本地 OCR（PaddleOCR）",
-}
-
-const layoutAssistModeLabels: Record<"off" | "on" | "auto", string> = {
-  off: "关闭",
-  on: "开启",
-  auto: "自动",
 }
 
 const HOME_ACTIVE_JOB_STORAGE_KEY = "ppt-opencode:home:active-job-id"
@@ -149,6 +142,7 @@ export default function Home() {
     Boolean(pageStartInput.trim() || pageEndInput.trim())
   )
   const [retainProcessArtifacts, setRetainProcessArtifacts] = React.useState(false)
+  const [showHomeLog, setShowHomeLog] = React.useState(false)
 
   const [jobs, setJobs] = React.useState<JobListItem[]>([])
   const [queueSize, setQueueSize] = React.useState(0)
@@ -168,11 +162,6 @@ export default function Home() {
   const runParseEngineLabel = React.useMemo(
     () => getRunParseEngineLabel(runConfig),
     [runConfig]
-  )
-  const runModelLabel = React.useMemo(() => getRunModelLabel(runConfig), [runConfig])
-  const runOcrConfigSourceLabel = React.useMemo(
-    () => getOcrConfigSourceLabel(runConfig.ocrAiConfigSource),
-    [runConfig.ocrAiConfigSource]
   )
   const runOcrSummaryLabel = React.useMemo(() => {
     if (runConfig.parseProvider === "mineru") {
@@ -636,11 +625,6 @@ export default function Home() {
 
             <div className="mt-4 flex flex-wrap gap-2">
               <Badge variant="outline">当前文件：{file ? file.name : "未选择"}</Badge>
-              <Badge variant="outline">默认模型：{runModelLabel}</Badge>
-              {runConfig.effectiveOcrProvider === "aiocr" ||
-              (runConfig.layoutAssistMode !== "off" && runConfig.effectiveOcrAiKey) ? (
-                <Badge variant="outline">AI 配置：{runOcrConfigSourceLabel}</Badge>
-              ) : null}
               <Badge className="editorial-pill">{hasCurrentJob ? currentStatusLabel : "等待开始"}</Badge>
             </div>
 
@@ -862,23 +846,22 @@ export default function Home() {
                           onChange={(e) => setRetainProcessArtifacts(e.target.checked)}
                         />
                         <span className="min-w-0">
-                          <span className="block font-medium text-foreground">
-                            保留过程对比图（调试）
+                          <span className="flex items-center gap-1.5 font-medium text-foreground">
+                            <span>保留过程图</span>
+                            <HoverHint text="保留每页处理过程图，便于核对中间效果或排查问题。" />
                           </span>
                           <span className="mt-1 block text-xs leading-6 text-muted-foreground">
-                            默认关闭。关闭时只保留 PDF、PPTX 和必要元数据；开启后，跟踪页才会显示渲染前后图与过程图，适合临时排查问题。
+                            只在需要核对中间效果时开启即可。
                           </span>
                         </span>
                       </label>
                     </div>
 
                     <div className="grid gap-2 border border-border/70 bg-muted/20 px-3 py-3">
-                      <label
-                        className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground"
-                        htmlFor="home-ppt-generation-mode"
-                      >
-                        PPT 生成模式
-                      </label>
+                      <div className="flex items-center gap-1.5 font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground">
+                        <label htmlFor="home-ppt-generation-mode">PPT 生成模式</label>
+                        <HoverHint text="快速适合日常转换，精准适合效果优先。" />
+                      </div>
                       <Select
                         id="home-ppt-generation-mode"
                         value={settingsSnapshot.pptGenerationMode}
@@ -889,12 +872,9 @@ export default function Home() {
                           }))
                         }
                       >
-                        <option value="fast">{PPT_GENERATION_MODE_LABELS.fast}（默认）</option>
+                        <option value="fast">{PPT_GENERATION_MODE_LABELS.fast}</option>
                         <option value="standard">{PPT_GENERATION_MODE_LABELS.standard}</option>
                       </Select>
-                      <p className="text-xs leading-6 text-muted-foreground">
-                        快速默认开启；精准保留原生成链路，适合质量优先的精细对比。
-                      </p>
                     </div>
                   </div>
 
@@ -934,15 +914,6 @@ export default function Home() {
                   <Badge variant="outline">PPT：{PPT_GENERATION_MODE_LABELS[settingsSnapshot.pptGenerationMode]}</Badge>
                   <Badge variant="outline">
                     过程图：{retainProcessArtifacts ? "保留" : "不保留"}
-                  </Badge>
-                  <Badge variant="outline">
-                    版式辅助：{layoutAssistModeLabels[runConfig.layoutAssistMode]}
-                  </Badge>
-                  {runConfig.effectiveOcrProvider === "aiocr" ? (
-                    <Badge variant="outline">AIOCR 配置：{runOcrConfigSourceLabel}</Badge>
-                  ) : null}
-                  <Badge variant="outline" className="max-w-full whitespace-normal break-all">
-                    模型：{runModelLabel}
                   </Badge>
                 </div>
                 <Button type="button" variant="ghost" asChild>
@@ -1041,12 +1012,22 @@ export default function Home() {
                 ) : null}
 
                 {hasCurrentJob ? (
-                  <JobDebugPanel
-                    events={activeJob?.debug_events || []}
-                    title="任务调试日志"
-                    emptyLabel="任务启动后会在这里持续追加后端调试信息"
-                    compact
-                  />
+                  <div className="grid gap-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/10 px-3 py-2">
+                      <div className="text-xs leading-5 text-muted-foreground">
+                        处理日志默认收起，仅在排查问题时查看。
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setShowHomeLog((previous) => !previous)}
+                      >
+                        {showHomeLog ? "收起处理日志" : "查看处理日志"}
+                      </Button>
+                    </div>
+                    {showHomeLog ? <JobDebugPanel events={activeJob?.debug_events || []} compact /> : null}
+                  </div>
                 ) : null}
 
                 {actionError ? (

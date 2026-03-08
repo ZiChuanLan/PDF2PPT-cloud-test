@@ -35,8 +35,8 @@ function getLevelClass(level: string) {
 
 export function JobDebugPanel({
   events,
-  title = "调试日志",
-  emptyLabel = "暂无调试信息",
+  title = "处理日志",
+  emptyLabel = "暂无处理记录",
   compact = false,
   className,
 }: {
