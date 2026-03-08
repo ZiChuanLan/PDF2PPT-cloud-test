@@ -249,7 +249,7 @@ def test_local_layout_analysis_serializes_shared_model_predict(
             self._active = 0
             self._active_lock = threading.Lock()
             self.max_active = 0
-            self.barrier = threading.Barrier(2)
+            self._shared_output = {"res": {"boxes": []}}
 
         def predict(self, input=None, **kwargs):
             image_path = str(input or kwargs.get("input") or "")
@@ -257,35 +257,25 @@ def test_local_layout_analysis_serializes_shared_model_predict(
                 self._active += 1
                 self.max_active = max(self.max_active, self._active)
             try:
-                try:
-                    self.barrier.wait(timeout=0.05)
-                except threading.BrokenBarrierError:
-                    pass
                 time.sleep(0.02)
                 page_name = Path(image_path).name
                 if page_name == "page-a.png":
-                    return {
-                        "res": {
-                            "boxes": [
-                                {
-                                    "label": "text",
-                                    "order": 0,
-                                    "coordinate": [10, 10, 110, 40],
-                                }
-                            ]
+                    self._shared_output["res"]["boxes"] = [
+                        {
+                            "label": "text",
+                            "order": 0,
+                            "coordinate": [10, 10, 110, 40],
                         }
-                    }
-                return {
-                    "res": {
-                        "boxes": [
-                            {
-                                "label": "text",
-                                "order": 0,
-                                "coordinate": [200, 200, 320, 260],
-                            }
-                        ]
-                    }
-                }
+                    ]
+                else:
+                    self._shared_output["res"]["boxes"] = [
+                        {
+                            "label": "text",
+                            "order": 0,
+                            "coordinate": [200, 200, 320, 260],
+                        }
+                    ]
+                return self._shared_output
             finally:
                 with self._active_lock:
                     self._active -= 1
@@ -303,6 +293,17 @@ def test_local_layout_analysis_serializes_shared_model_predict(
     )
     monkeypatch.setattr(ai_client_module.AiOcrClient, "_local_layout_model", None)
     monkeypatch.setattr(ai_client_module.AiOcrClient, "_local_layout_model_name", None)
+    original_extract = ai_client_module.AiOcrClient._extract_local_layout_blocks
+
+    def _slow_extract(self, output):
+        time.sleep(0.05)
+        return original_extract(self, output)
+
+    monkeypatch.setattr(
+        ai_client_module.AiOcrClient,
+        "_extract_local_layout_blocks",
+        _slow_extract,
+    )
 
     client_a = ai_client_module.AiOcrClient(
         api_key="test-key",

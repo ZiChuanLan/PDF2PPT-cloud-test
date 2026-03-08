@@ -1918,23 +1918,28 @@ class AiOcrClient(OcrProvider):
             _env_float("OCR_AI_LAYOUT_MODEL_PREDICT_TIMEOUT_S", 45.0),
         )
 
-        def _predict_once() -> Any:
-            # PaddleX layout model instances are cached process-wide. Keep
-            # predict() serialized so page-level OCR concurrency does not race
-            # on the same underlying model object and leak layout blocks across
-            # pages.
+        def _predict_and_extract_once() -> tuple[list[dict[str, Any]], list[list[float]]]:
+            # PaddleX layout model instances are cached process-wide. Keep both
+            # predict() and the immediate payload extraction serialized so a
+            # later predict() cannot mutate or recycle the previous result
+            # object before we finish parsing layout blocks for the current
+            # page.
             with self.__class__._local_layout_predict_lock:
                 try:
-                    return layout_model.predict(input=image_path)
+                    output = layout_model.predict(input=image_path)
                 except TypeError:
-                    return layout_model.predict(image_path)
+                    output = layout_model.predict(image_path)
+                try:
+                    output = copy.deepcopy(output)
+                except Exception:
+                    pass
+                return self._extract_local_layout_blocks(output)
 
-        output = _run_in_daemon_thread_with_timeout(
-            _predict_once,
+        layout_blocks, image_regions = _run_in_daemon_thread_with_timeout(
+            _predict_and_extract_once,
             timeout_s=predict_timeout_s,
             label=f"{self.layout_model}:predict",
         )
-        layout_blocks, image_regions = self._extract_local_layout_blocks(output)
         self.last_layout_blocks = [dict(block) for block in layout_blocks]
         self.last_image_regions_px = [list(region) for region in image_regions]
         self._last_layout_image_path = requested_path
