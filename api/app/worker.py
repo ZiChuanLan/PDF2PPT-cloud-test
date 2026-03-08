@@ -40,6 +40,7 @@ from .models.error import AppException, ErrorCode
 from .models.job import JobStage, JobStatus
 from .perf_policies import RuntimePerformanceSettings
 from .services.redis_service import get_redis_service
+from .services.job_cleanup import cleanup_job_process_artifacts
 from .utils.text import clean_str
 from .worker_helpers import (
     build_ocr_debug_payload,
@@ -118,6 +119,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
     job_id: str,
     *,
     enable_ocr: bool = False,
+    retain_process_artifacts: bool = False,
     remove_footer_notebooklm: bool = False,
     text_erase_mode: str | None = None,
     enable_layout_assist: bool = False,
@@ -172,6 +174,7 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
 
     _ = (
         enable_ocr,
+        retain_process_artifacts,
         remove_footer_notebooklm,
         text_erase_mode,
         enable_layout_assist,
@@ -946,6 +949,17 @@ def process_pdf_job(  # type: ignore[reportGeneralTypeIssues]
         )
         return
     finally:
+        if not bool(retain_process_artifacts):
+            try:
+                removed = cleanup_job_process_artifacts(job_path)
+                if removed:
+                    logger.info("Removed process artifacts for job %s", job_id)
+            except Exception:
+                logger.warning(
+                    "Failed to remove process artifacts for job %s",
+                    job_id,
+                    exc_info=True,
+                )
         set_job_stage(None)
         set_job_id(None)
 

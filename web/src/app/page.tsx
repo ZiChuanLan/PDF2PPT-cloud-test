@@ -145,6 +145,7 @@ export default function Home() {
   const [usePageRange, setUsePageRange] = React.useState(
     Boolean(pageStartInput.trim() || pageEndInput.trim())
   )
+  const [retainProcessArtifacts, setRetainProcessArtifacts] = React.useState(false)
 
   const [jobs, setJobs] = React.useState<JobListItem[]>([])
   const [queueSize, setQueueSize] = React.useState(0)
@@ -296,7 +297,9 @@ export default function Home() {
     setActiveJob(null)
 
     try {
-      const formData = createJobFormData(file, settingsSnapshot, pageStart, pageEnd)
+      const formData = createJobFormData(file, settingsSnapshot, pageStart, pageEnd, {
+        retainProcessArtifacts,
+      })
       const response = await apiFetch("/jobs", {
         method: "POST",
         body: formData,
@@ -328,7 +331,16 @@ export default function Home() {
       setActionError(normalizeFetchError(e, "创建任务失败"))
       setIsSubmitting(false)
     }
-  }, [fetchJobStatus, fetchJobs, file, pageEndInput, pageStartInput, settingsSnapshot, usePageRange])
+  }, [
+    fetchJobStatus,
+    fetchJobs,
+    file,
+    pageEndInput,
+    pageStartInput,
+    retainProcessArtifacts,
+    settingsSnapshot,
+    usePageRange,
+  ])
 
   const handleCancelCurrentJob = React.useCallback(async () => {
     if (!jobId) return
@@ -407,6 +419,7 @@ export default function Home() {
     setActiveJob(null)
     setIsSubmitting(false)
     setActionError(null)
+    setRetainProcessArtifacts(false)
     setPreviewPageInput("1")
     setPreviewPageCount(0)
     setUsePageRange(false)
@@ -823,6 +836,25 @@ export default function Home() {
                     </p>
                   )}
 
+                  <div className="grid gap-2 border border-border/70 bg-muted/20 px-3 py-3">
+                    <label className="flex items-start gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 h-4 w-4 accent-[#111111]"
+                        checked={retainProcessArtifacts}
+                        onChange={(e) => setRetainProcessArtifacts(e.target.checked)}
+                      />
+                      <span className="min-w-0">
+                        <span className="block font-medium text-foreground">
+                          保留过程对比图（调试）
+                        </span>
+                        <span className="mt-1 block text-xs leading-6 text-muted-foreground">
+                          默认关闭。关闭时只保留 PDF、PPTX 和必要元数据；开启后，跟踪页才会显示渲染前后图与过程图，适合临时排查问题。
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+
                   <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-3">
                     <div className="flex gap-2">
                       <Button type="button" onClick={handleConvert} disabled={!canStart}>
@@ -856,6 +888,9 @@ export default function Home() {
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   <Badge variant="outline">解析：{runParseEngineLabel}</Badge>
                   <Badge variant="outline">OCR：{runOcrSummaryLabel}</Badge>
+                  <Badge variant="outline">
+                    过程图：{retainProcessArtifacts ? "保留" : "不保留"}
+                  </Badge>
                   <Badge variant="outline">
                     版式辅助：{layoutAssistModeLabels[runConfig.layoutAssistMode]}
                   </Badge>
@@ -1109,7 +1144,7 @@ export default function Home() {
           </CardContent>
           <CardFooter className="border-t border-border/80 text-xs text-muted-foreground">
             <FileTextIcon className="mr-2 size-4" />
-            首页保持轻量入口；需要更细的参数管理或结果核查时，再进入对应页面继续处理。
+            任务默认保留 24 小时自动清理；过程图默认不保留，需要排查时再临时开启。
           </CardFooter>
         </Card>
       </div>

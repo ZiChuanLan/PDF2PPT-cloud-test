@@ -288,6 +288,7 @@ class JobArtifactsResponse(BaseModel):
 
     job_id: str
     status: Optional[JobStatus] = None
+    artifacts_retained: bool = False
     source_pdf_url: Optional[str] = None
     original_images: list[JobArtifactImage] = Field(default_factory=list)
     cleaned_images: list[JobArtifactImage] = Field(default_factory=list)

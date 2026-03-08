@@ -460,6 +460,13 @@ async def list_jobs(
 async def create_job(
     file: UploadFile = File(..., description="PDF file to convert"),
     enable_ocr: bool = Form(False, description="Enable OCR for scanned PDFs"),
+    retain_process_artifacts: bool = Form(
+        False,
+        description=(
+            "Keep process/debug artifacts under the job directory for tracking "
+            "and visual comparison"
+        ),
+    ),
     remove_footer_notebooklm: bool = Form(
         False,
         description="Remove detected NotebookLM footer branding text from the output",
@@ -750,6 +757,7 @@ async def create_job(
                 kwargs={
                     "job_id": job_id,
                     "enable_ocr": enable_ocr,
+                    "retain_process_artifacts": retain_process_artifacts,
                     "remove_footer_notebooklm": remove_footer_notebooklm,
                     "enable_layout_assist": enable_layout_assist,
                     "layout_assist_apply_image_regions": layout_assist_apply_image_regions,
@@ -813,6 +821,7 @@ async def create_job(
                 # and also set the RQ job id to match for easier debugging.
                 job_id,
                 enable_ocr=enable_ocr,
+                retain_process_artifacts=retain_process_artifacts,
                 remove_footer_notebooklm=remove_footer_notebooklm,
                 enable_layout_assist=enable_layout_assist,
                 layout_assist_apply_image_regions=layout_assist_apply_image_regions,
@@ -1173,6 +1182,7 @@ async def get_job_artifacts(job_id: str):
         )
 
     prefix = f"/api/v1/jobs/{job_id}/artifacts"
+    artifacts_root = job_dir / "artifacts"
     source_pdf_rel = "input.pdf"
     source_pdf_path = job_dir / source_pdf_rel
     source_pdf_url = (
@@ -1232,6 +1242,7 @@ async def get_job_artifacts(job_id: str):
     return JobArtifactsResponse(
         job_id=job_id,
         status=job.status if job else None,
+        artifacts_retained=artifacts_root.exists(),
         source_pdf_url=source_pdf_url,
         original_images=original_images,
         cleaned_images=cleaned_images,

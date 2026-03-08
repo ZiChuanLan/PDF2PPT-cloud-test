@@ -475,6 +475,7 @@ class AiOcrClient(OcrProvider):
     """AI OCR using OpenAI-compatible vision models."""
 
     _local_layout_model_lock = threading.Lock()
+    _local_layout_predict_lock = threading.Lock()
     _local_layout_model: Any | None = None
     _local_layout_model_name: str | None = None
 
@@ -1918,10 +1919,15 @@ class AiOcrClient(OcrProvider):
         )
 
         def _predict_once() -> Any:
-            try:
-                return layout_model.predict(input=image_path)
-            except TypeError:
-                return layout_model.predict(image_path)
+            # PaddleX layout model instances are cached process-wide. Keep
+            # predict() serialized so page-level OCR concurrency does not race
+            # on the same underlying model object and leak layout blocks across
+            # pages.
+            with self.__class__._local_layout_predict_lock:
+                try:
+                    return layout_model.predict(input=image_path)
+                except TypeError:
+                    return layout_model.predict(image_path)
 
         output = _run_in_daemon_thread_with_timeout(
             _predict_once,

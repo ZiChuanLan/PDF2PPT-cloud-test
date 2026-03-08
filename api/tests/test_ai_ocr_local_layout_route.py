@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -234,3 +236,114 @@ def test_layout_block_route_upscales_tiny_qwen3_crops(
             "ocr_layout_label": "text",
         }
     ]
+
+
+def test_local_layout_analysis_serializes_shared_model_predict(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _patch_openai_and_adapter(monkeypatch)
+
+    class _FakeLayoutModel:
+        def __init__(self) -> None:
+            self._active = 0
+            self._active_lock = threading.Lock()
+            self.max_active = 0
+            self.barrier = threading.Barrier(2)
+
+        def predict(self, input=None, **kwargs):
+            image_path = str(input or kwargs.get("input") or "")
+            with self._active_lock:
+                self._active += 1
+                self.max_active = max(self.max_active, self._active)
+            try:
+                try:
+                    self.barrier.wait(timeout=0.05)
+                except threading.BrokenBarrierError:
+                    pass
+                time.sleep(0.02)
+                page_name = Path(image_path).name
+                if page_name == "page-a.png":
+                    return {
+                        "res": {
+                            "boxes": [
+                                {
+                                    "label": "text",
+                                    "order": 0,
+                                    "coordinate": [10, 10, 110, 40],
+                                }
+                            ]
+                        }
+                    }
+                return {
+                    "res": {
+                        "boxes": [
+                            {
+                                "label": "text",
+                                "order": 0,
+                                "coordinate": [200, 200, 320, 260],
+                            }
+                        ]
+                    }
+                }
+            finally:
+                with self._active_lock:
+                    self._active -= 1
+
+    fake_model = _FakeLayoutModel()
+    create_model_calls: list[str] = []
+
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex",
+        types.SimpleNamespace(
+            create_model=lambda model_name: create_model_calls.append(model_name)
+            or fake_model
+        ),
+    )
+    monkeypatch.setattr(ai_client_module.AiOcrClient, "_local_layout_model", None)
+    monkeypatch.setattr(ai_client_module.AiOcrClient, "_local_layout_model_name", None)
+
+    client_a = ai_client_module.AiOcrClient(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="Qwen/Qwen2.5-VL-72B-Instruct",
+        provider="openai",
+        layout_model="pp_doclayout_v3",
+        route_kind=ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR,
+    )
+    client_b = ai_client_module.AiOcrClient(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="Qwen/Qwen2.5-VL-72B-Instruct",
+        provider="openai",
+        layout_model="pp_doclayout_v3",
+        route_kind=ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR,
+    )
+
+    image_a = tmp_path / "page-a.png"
+    image_b = tmp_path / "page-b.png"
+    Image.new("RGB", (100, 100), "white").save(image_a)
+    Image.new("RGB", (100, 100), "white").save(image_b)
+
+    start_event = threading.Event()
+    results: dict[str, tuple[list[dict[str, object]], list[list[float]]]] = {}
+
+    def _run(client, image_path: Path, key: str) -> None:
+        start_event.wait(timeout=1.0)
+        results[key] = client._run_local_layout_analysis(str(image_path))
+
+    thread_a = threading.Thread(target=_run, args=(client_a, image_a, "a"))
+    thread_b = threading.Thread(target=_run, args=(client_b, image_b, "b"))
+    thread_a.start()
+    thread_b.start()
+    start_event.set()
+    thread_a.join(timeout=2.0)
+    thread_b.join(timeout=2.0)
+
+    assert not thread_a.is_alive()
+    assert not thread_b.is_alive()
+    assert create_model_calls == ["PP-DocLayoutV3"]
+    assert fake_model.max_active == 1
+    assert results["a"][0][0]["bbox"] == [10.0, 10.0, 110.0, 40.0]
+    assert results["b"][0][0]["bbox"] == [200.0, 200.0, 320.0, 260.0]

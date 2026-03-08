@@ -48,6 +48,7 @@ type JobArtifactImage = {
 type JobArtifactsResponse = {
   job_id: string
   status?: JobStatusValue | null
+  artifacts_retained: boolean
   source_pdf_url?: string | null
   original_images: JobArtifactImage[]
   cleaned_images: JobArtifactImage[]
@@ -228,6 +229,7 @@ function TrackingPageContent() {
       setTrackedArtifacts({
         job_id: body.job_id,
         status: body.status ?? null,
+        artifacts_retained: Boolean(body.artifacts_retained),
         source_pdf_url: body.source_pdf_url ?? null,
         original_images: Array.isArray(body.original_images) ? body.original_images : [],
         cleaned_images: Array.isArray(body.cleaned_images) ? body.cleaned_images : [],
@@ -460,6 +462,7 @@ function TrackingPageContent() {
     trackedFinalPreview || trackedClean || trackedLayoutAfter || trackedOriginal || null
   const trackedCompareBase = trackedCompareBefore || trackedCompareAfter
   const compareSplitPercent = Math.round(compareSplitRatio * 100)
+  const hasTrackedVisualArtifacts = trackedPages.length > 0
 
   return (
     <div className="min-h-dvh bg-background">
@@ -649,24 +652,26 @@ function TrackingPageContent() {
                   {trackedJobId ? trackedJobId.slice(0, 8) : "未选择任务"}
                 </Badge>
               </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  size="xs"
-                  variant={trackingMenu === "frames" ? "default" : "outline"}
-                  onClick={() => setTrackingMenu("frames")}
-                >
-                  逐页预览
-                </Button>
-                <Button
-                  type="button"
-                  size="xs"
-                  variant={trackingMenu === "compare" ? "default" : "outline"}
-                  onClick={() => setTrackingMenu("compare")}
-                >
-                  前后对比
-                </Button>
-              </div>
+              {hasTrackedVisualArtifacts ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant={trackingMenu === "frames" ? "default" : "outline"}
+                    onClick={() => setTrackingMenu("frames")}
+                  >
+                    逐页预览
+                  </Button>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant={trackingMenu === "compare" ? "default" : "outline"}
+                    onClick={() => setTrackingMenu("compare")}
+                  >
+                    前后对比
+                  </Button>
+                </div>
+              ) : null}
               {trackedJobDetail ? (
                 <div className="mt-3 grid gap-1 border border-border bg-muted/40 px-3 py-2">
                   <div className="text-xs text-muted-foreground">
@@ -731,45 +736,53 @@ function TrackingPageContent() {
 
               {trackedArtifacts?.job_id ? (
                 <>
-                  {trackedPages.length ? (
+                  {trackedPages.length || sourcePdfAbsoluteUrl ? (
                     <div className="flex flex-wrap items-center gap-2">
-                      <div className="font-mono text-xs text-muted-foreground">
-                        第 {activeTrackedPageLabel} 页 / 共 {trackedPages.length} 页
-                      </div>
-                      <Button
-                        type="button"
-                        size="xs"
-                        variant="outline"
-                        onClick={() => {
-                          if (activeTrackedPageIndex > 0) {
-                            setTrackedArtifactsPage(trackedPages[activeTrackedPageIndex - 1] ?? null)
-                          }
-                        }}
-                        disabled={activeTrackedPageIndex <= 0}
-                      >
-                        上一页
-                      </Button>
-                      <Button
-                        type="button"
-                        size="xs"
-                        variant="outline"
-                        onClick={() => {
-                          if (
-                            activeTrackedPageIndex >= 0 &&
-                            activeTrackedPageIndex < trackedPages.length - 1
-                          ) {
-                            setTrackedArtifactsPage(
-                              trackedPages[activeTrackedPageIndex + 1] ?? null
-                            )
-                          }
-                        }}
-                        disabled={
-                          activeTrackedPageIndex < 0 ||
-                          activeTrackedPageIndex >= trackedPages.length - 1
-                        }
-                      >
-                        下一页
-                      </Button>
+                      {trackedPages.length ? (
+                        <>
+                          <div className="font-mono text-xs text-muted-foreground">
+                            第 {activeTrackedPageLabel} 页 / 共 {trackedPages.length} 页
+                          </div>
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant="outline"
+                            onClick={() => {
+                              if (activeTrackedPageIndex > 0) {
+                                setTrackedArtifactsPage(trackedPages[activeTrackedPageIndex - 1] ?? null)
+                              }
+                            }}
+                            disabled={activeTrackedPageIndex <= 0}
+                          >
+                            上一页
+                          </Button>
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant="outline"
+                            onClick={() => {
+                              if (
+                                activeTrackedPageIndex >= 0 &&
+                                activeTrackedPageIndex < trackedPages.length - 1
+                              ) {
+                                setTrackedArtifactsPage(
+                                  trackedPages[activeTrackedPageIndex + 1] ?? null
+                                )
+                              }
+                            }}
+                            disabled={
+                              activeTrackedPageIndex < 0 ||
+                              activeTrackedPageIndex >= trackedPages.length - 1
+                            }
+                          >
+                            下一页
+                          </Button>
+                        </>
+                      ) : (
+                        <div className="font-mono text-xs text-muted-foreground">
+                          当前任务未保留逐页过程图
+                        </div>
+                      )}
                       {sourcePdfAbsoluteUrl ? (
                         <>
                           <Button
@@ -792,6 +805,14 @@ function TrackingPageContent() {
                     <div className="text-sm text-muted-foreground">当前任务尚未产出可视化图片。</div>
                   )}
 
+                  {!hasTrackedVisualArtifacts ? (
+                    <div className="border border-border bg-muted/20 px-3 py-3 text-sm text-muted-foreground">
+                      {trackedArtifacts.artifacts_retained
+                        ? "当前任务没有可展示的逐页过程图。"
+                        : "当前任务未保留过程图。需要对比渲染前后效果时，请在首页提交任务时开启“保留过程对比图（调试）”。"}
+                    </div>
+                  ) : null}
+
                   {showInlinePdf && sourcePdfAbsoluteUrl ? (
                     <div className="overflow-hidden border bg-muted/10">
                       <iframe
@@ -803,7 +824,7 @@ function TrackingPageContent() {
                     </div>
                   ) : null}
 
-                  {trackedPages.length && trackingMenu === "frames" ? (
+                  {hasTrackedVisualArtifacts && trackingMenu === "frames" ? (
                     <div className="grid gap-4 lg:grid-cols-2">
                       <div className="grid gap-2">
                         <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
@@ -868,7 +889,7 @@ function TrackingPageContent() {
                     </div>
                   ) : null}
 
-                  {trackedPages.length && trackingMenu === "compare" ? (
+                  {hasTrackedVisualArtifacts && trackingMenu === "compare" ? (
                     <div className="grid gap-3">
                       <div className="flex items-center justify-between gap-2">
                         <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">

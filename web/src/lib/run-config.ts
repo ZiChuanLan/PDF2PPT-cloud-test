@@ -47,6 +47,10 @@ export type ValidationResult = {
   message?: string
 }
 
+export type CreateJobOptions = {
+  retainProcessArtifacts?: boolean
+}
+
 export type OcrSettingsState = {
   isMineruProvider: boolean
   isBaiduDocParseMode: boolean
@@ -489,7 +493,8 @@ export function createJobFormData(
   file: File,
   settings: Settings,
   pageStart?: number,
-  pageEnd?: number
+  pageEnd?: number,
+  options?: CreateJobOptions
 ): FormData {
   const ui = resolveOcrSettingsState(settings)
   const run = ui.runConfig
@@ -506,6 +511,7 @@ export function createJobFormData(
   // Product-side layout assist has been retired for speed-focused runs.
   form.append("enable_layout_assist", "false")
   form.append("layout_assist_apply_image_regions", "false")
+  form.append("retain_process_artifacts", String(Boolean(options?.retainProcessArtifacts)))
   form.append("enable_ocr", String(run.parseProvider === "local" ? Boolean(settings.enableOcr) : false))
   form.append("remove_footer_notebooklm", String(Boolean(settings.removeFooterNotebooklm)))
   form.append("text_erase_mode", settings.textEraseMode)

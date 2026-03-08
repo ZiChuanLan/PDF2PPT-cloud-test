@@ -42,7 +42,7 @@ class ArtifactExportPolicy:
 class ArtifactExportSettings:
     ocr_overlay_images: bool = False
     layout_assist_debug_images: bool = False
-    final_preview_images: bool = True
+    final_preview_images: bool = False
     final_preview_max_pages: int = 5
 
     @classmethod
@@ -55,7 +55,7 @@ class ArtifactExportSettings:
                 getattr(settings, "export_layout_assist_debug_images", False)
             ),
             final_preview_images=bool(
-                getattr(settings, "export_final_preview_images", True)
+                getattr(settings, "export_final_preview_images", False)
             ),
             final_preview_max_pages=int(
                 getattr(settings, "export_final_preview_max_pages", 5) or 0

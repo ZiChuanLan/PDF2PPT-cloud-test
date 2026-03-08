@@ -15,6 +15,8 @@ from app.logging_config import (
 )
 from app.models.error import AppException, ErrorCode, ErrorResponse
 from app.routers import jobs_router, models_router
+from app.services.job_cleanup import start_job_cleanup_daemon
+from app.services.redis_service import get_redis_service
 
 logger = get_logger(__name__)
 
@@ -25,8 +27,19 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     setup_logging(settings.log_level)
     logger.info("Application starting up")
-    yield
-    logger.info("Application shutting down")
+    cleanup_stop_event = None
+    cleanup_thread = None
+    try:
+        cleanup_stop_event, cleanup_thread = start_job_cleanup_daemon(
+            redis_service=get_redis_service()
+        )
+        yield
+    finally:
+        if cleanup_stop_event is not None:
+            cleanup_stop_event.set()
+        if cleanup_thread is not None and cleanup_thread.is_alive():
+            cleanup_thread.join(timeout=5)
+        logger.info("Application shutting down")
 
 
 app = FastAPI(

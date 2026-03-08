@@ -50,7 +50,7 @@ flowchart TD
     H --> I[生成文本元素与 image_regions]
     I --> J
     J --> K[扫描页重组: 底图 擦字 图片块 可编辑文本]
-    K --> L[导出 output.pptx 与调试产物]
+    K --> L[导出 output.pptx 并按需保留过程产物]
     L --> M[前端跟踪进度并提供下载]
 ```
 
@@ -59,7 +59,7 @@ flowchart TD
 - 统一上传与任务跟踪：前端上传 PDF，后端返回 `job_id`，再通过轮询/SSE 获取阶段进度
 - 多种解析链路：本地 OCR、AIOCR、百度文档解析、MinerU 云解析
 - 扫描页重组：支持整页背景保留或图片块拆分
-- 调试产物保留：任务目录里会保留 `ir.json`、`ir.ocr.json`、`artifacts/` 等排障材料
+- 生产导向保留策略：任务默认保留 24 小时，过程图默认不保留，排障时可按任务临时开启
 - Docker 生产部署：默认编排就是部署版，不需要另外维护一套复杂脚本
 
 ## 快速启动
@@ -331,6 +331,8 @@ flowchart LR
 | `API_PORT` | API 暴露端口，默认 `8000` |
 | `JOB_ROOT_DIR` | job 目录根路径 |
 | `WORKER_CONCURRENCY` | worker 进程数 |
+| `JOB_TTL_MINUTES` | job 元数据与目录保留时长，默认 `1440` 分钟 |
+| `JOB_CLEANUP_INTERVAL_MINUTES` | 过期 job 后台清理间隔，默认 `15` 分钟 |
 | `OCR_PADDLE_LAYOUT_PREWARM` | 预热 `PP-DocLayoutV3` |
 | `OCR_PADDLE_VL_PREWARM` | 启动时预热 PaddleOCR-VL |
 | `OCR_PADDLE_VL_DOCPARSER_MAX_SIDE_PX` | doc_parser 输入长边压缩阈值 |
@@ -363,6 +365,13 @@ INTERNAL_API_ORIGIN=http://api:8000
 
 这样浏览器只访问 Web，最省心，也最不容易遇到跨域问题。
 
+## 任务保留策略
+
+- job 元数据和目录默认保留 24 小时，之后由 API 后台清理线程自动删除
+- 首页提交任务时，`保留过程对比图（调试）` 默认关闭
+- 关闭时只保留 `input.pdf`、`output.pptx` 和必要元数据，不保留 `artifacts/` 过程图
+- 开启时才会保留逐页渲染图、OCR overlay、最终对比图等过程产物，方便去跟踪页排查
+
 ## 排障入口
 
 ### 常见问题 1：任务卡在 OCR 阶段
@@ -371,7 +380,7 @@ INTERNAL_API_ORIGIN=http://api:8000
 
 - `docker compose logs -f worker`
 - 任务状态页 debug events
-- `artifacts/ocr/ocr_debug.json`
+- 如果该任务开启了 `保留过程对比图（调试）`，再看 `artifacts/ocr/ocr_debug.json`
 
 如果是 AIOCR：
 
@@ -383,9 +392,10 @@ INTERNAL_API_ORIGIN=http://api:8000
 
 先查：
 
-- `artifacts/image_regions/*.regions.json`
-- `artifacts/image_regions/*.crops.json`
-- `artifacts/image_crops/`
+- 先确认这个任务是否开启了 `保留过程对比图（调试）`
+- 若已开启，再查 `artifacts/image_regions/*.regions.json`
+- 若已开启，再查 `artifacts/image_regions/*.crops.json`
+- 若已开启，再查相关 `artifacts/` 裁图目录
 
 这通常不是 OCR 模型本身问题，而是扫描页图片块识别和后续合成策略的问题。
 

@@ -11,7 +11,11 @@ class Settings(BaseSettings):
 
     max_file_mb: int = 100
     max_pages: int = 200
-    job_ttl_minutes: int = 60
+    # Terminal job metadata and on-disk job directories are retained for 24h by
+    # default, then deleted by the cleanup daemon.
+    job_ttl_minutes: int = 1440
+    # Background cleanup sweep cadence for expired job directories.
+    job_cleanup_interval_minutes: int = 15
     # Keepalive heartbeat interval for long-running blocking stages.
     # Used to refresh job metadata TTL while no progress update is emitted.
     job_keepalive_interval_s: int = 15
