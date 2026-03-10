@@ -170,6 +170,15 @@ def _extract_page_size(entry: Any) -> tuple[float, float] | None:
     if width and height and width > 0 and height > 0:
         return (float(width), float(height))
 
+    meta = entry.get("meta")
+    if isinstance(meta, dict):
+        width = _coerce_float(meta.get("page_width") or meta.get("page_w") or meta.get("width"))
+        height = _coerce_float(
+            meta.get("page_height") or meta.get("page_h") or meta.get("height")
+        )
+        if width and height and width > 0 and height > 0:
+            return (float(width), float(height))
+
     return None
 
 
@@ -264,14 +273,51 @@ def _extract_page_idx(entry: Any, *, fallback: int | None = None) -> int | None:
                 page_idx = int(value)
             except Exception:
                 continue
-            if key in {"page_no", "page_num"} and page_idx > 0:
+            if key == "page_no" and page_idx > 0:
                 return page_idx - 1
             return page_idx
     return fallback
 
 
+def _extract_position_bbox_candidate(value: Any) -> tuple[float, float, float, float] | None:
+    if isinstance(value, dict):
+        left = _coerce_float(value.get("left") or value.get("x"))
+        top = _coerce_float(value.get("top") or value.get("y"))
+        width = _coerce_float(value.get("width") or value.get("w"))
+        height = _coerce_float(value.get("height") or value.get("h"))
+        if (
+            left is not None
+            and top is not None
+            and width is not None
+            and height is not None
+            and width > 0
+            and height > 0
+        ):
+            return (
+                float(left),
+                float(top),
+                float(left + width),
+                float(top + height),
+            )
+        return _extract_bbox_candidate(value.get("polygon") or value.get("points"))
+
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        coords = [_coerce_float(item) for item in value]
+        if all(item is not None for item in coords):
+            x, y, width, height = (float(item) for item in coords if item is not None)
+            if width > 0 and height > 0:
+                return (x, y, x + width, y + height)
+    return _extract_bbox_candidate(value)
+
+
 def _extract_bbox_candidate(value: Any) -> tuple[float, float, float, float] | None:
     if isinstance(value, dict):
+        position = value.get("position")
+        if position is not None:
+            bbox = _extract_position_bbox_candidate(position)
+            if bbox is not None:
+                return bbox
+
         for key in (
             "bbox",
             "box",
@@ -280,7 +326,6 @@ def _extract_bbox_candidate(value: Any) -> tuple[float, float, float, float] | N
             "polygon",
             "poly",
             "points",
-            "position",
             "location",
             "coordinates",
             "coordinate",
@@ -339,6 +384,18 @@ def _extract_bbox_candidate(value: Any) -> tuple[float, float, float, float] | N
             for item in value:
                 x = _coerce_float(item[0])
                 y = _coerce_float(item[1])
+                if x is None or y is None:
+                    return None
+                xs.append(float(x))
+                ys.append(float(y))
+            if xs and ys:
+                return (min(xs), min(ys), max(xs), max(ys))
+        if value and all(isinstance(item, dict) for item in value):
+            xs: list[float] = []
+            ys: list[float] = []
+            for item in value:
+                x = _coerce_float(item.get("x") or item.get("left"))
+                y = _coerce_float(item.get("y") or item.get("top"))
                 if x is None or y is None:
                     return None
                 xs.append(float(x))
@@ -513,6 +570,92 @@ def _collect_page_payload(
             _collect_page_payload(value, fallback_page_idx=page_idx, out_pages=out_pages)
 
 
+def _score_page_size_alignment(
+    payload_page_size: tuple[float, float],
+    pdf_page_size: tuple[float, float],
+) -> int:
+    try:
+        payload_w = float(payload_page_size[0])
+        payload_h = float(payload_page_size[1])
+        pdf_w = float(pdf_page_size[0])
+        pdf_h = float(pdf_page_size[1])
+    except Exception:
+        return 0
+    if payload_w <= 0 or payload_h <= 0 or pdf_w <= 0 or pdf_h <= 0:
+        return 0
+
+    score = 0
+    payload_ratio = payload_w / payload_h
+    pdf_ratio = pdf_w / pdf_h
+    if abs(payload_ratio - pdf_ratio) <= 0.03 * max(abs(payload_ratio), abs(pdf_ratio), 1.0):
+        score += 1
+
+    scale_w = payload_w / pdf_w
+    scale_h = payload_h / pdf_h
+    if abs(scale_w - scale_h) <= 0.08 * max(abs(scale_w), abs(scale_h), 1.0):
+        score += 1
+
+    if abs(payload_w - pdf_w) <= 2.0 and abs(payload_h - pdf_h) <= 2.0:
+        score += 1
+    return score
+
+
+def _resolve_pdf_page_idx(
+    page_idx: int,
+    *,
+    payload_page_sizes: dict[int, tuple[float, float]],
+    pdf_page_sizes: dict[int, tuple[float, float]],
+) -> int | None:
+    if not pdf_page_sizes:
+        return None
+
+    normalized_page_idx = int(page_idx)
+    if not payload_page_sizes:
+        if normalized_page_idx in pdf_page_sizes:
+            return normalized_page_idx
+        for candidate in (normalized_page_idx - 1, normalized_page_idx + 1):
+            if candidate in pdf_page_sizes:
+                return int(candidate)
+        return None
+
+    candidate_shifts: set[int] = {0, -1, 1}
+    for payload_key in payload_page_sizes:
+        for pdf_key in pdf_page_sizes:
+            candidate_shifts.add(int(pdf_key) - int(payload_key))
+
+    best_key: tuple[int, int, int, int, int] | None = None
+    best_pdf_page_idx: int | None = None
+    for shift in sorted(candidate_shifts):
+        resolved_page_idx = int(normalized_page_idx + shift)
+        page_hits = 0
+        alignment_score = 0
+        for payload_key, payload_page_size in payload_page_sizes.items():
+            pdf_page_size = pdf_page_sizes.get(int(payload_key) + int(shift))
+            if pdf_page_size is None:
+                continue
+            page_hits += 1
+            alignment_score += _score_page_size_alignment(payload_page_size, pdf_page_size)
+
+        target_hit = 1 if resolved_page_idx in pdf_page_sizes else 0
+        prefer_zero = 1 if shift == 0 else 0
+        key = (
+            int(page_hits),
+            int(alignment_score),
+            int(target_hit),
+            int(prefer_zero),
+            int(-abs(int(shift))),
+        )
+        if best_key is None or key > best_key:
+            best_key = key
+            best_pdf_page_idx = resolved_page_idx
+
+    if best_pdf_page_idx is not None and best_pdf_page_idx in pdf_page_sizes:
+        return int(best_pdf_page_idx)
+    if normalized_page_idx in pdf_page_sizes:
+        return normalized_page_idx
+    return None
+
+
 def _build_content_item(
     entry: dict[str, Any],
     *,
@@ -527,7 +670,14 @@ def _build_content_item(
     if bbox is None:
         return None
 
-    pdf_page_size = pdf_page_sizes.get(int(page_idx))
+    resolved_pdf_page_idx = _resolve_pdf_page_idx(
+        int(page_idx),
+        payload_page_sizes=payload_page_sizes,
+        pdf_page_sizes=pdf_page_sizes,
+    )
+    if resolved_pdf_page_idx is None:
+        return None
+    pdf_page_size = pdf_page_sizes.get(int(resolved_pdf_page_idx))
     if pdf_page_size is None:
         return None
     bbox_pt = _normalize_bbox_to_pdf_pt(
