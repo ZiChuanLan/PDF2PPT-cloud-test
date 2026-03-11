@@ -140,6 +140,105 @@ def _sanitize_debug_value(value: Any) -> Any:
     return value
 
 
+def _coerce_layout_geometry_points(raw_bbox: Any) -> list[list[float]] | None:
+    if raw_bbox is None:
+        return None
+
+    if hasattr(raw_bbox, "tolist"):
+        try:
+            raw_bbox = raw_bbox.tolist()
+        except Exception:
+            pass
+
+    if isinstance(raw_bbox, dict):
+        if all(k in raw_bbox for k in ("left", "top", "width", "height")):
+            try:
+                x0 = float(raw_bbox.get("left") or 0)
+                y0 = float(raw_bbox.get("top") or 0)
+                width = float(raw_bbox.get("width") or 0)
+                height = float(raw_bbox.get("height") or 0)
+                x1 = x0 + width
+                y1 = y0 + height
+                return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+            except Exception:
+                return None
+        for keys in (("x0", "y0", "x1", "y1"), ("xmin", "ymin", "xmax", "ymax")):
+            if not all(k in raw_bbox for k in keys):
+                continue
+            try:
+                x0 = float(raw_bbox.get(keys[0]))
+                y0 = float(raw_bbox.get(keys[1]))
+                x1 = float(raw_bbox.get(keys[2]))
+                y1 = float(raw_bbox.get(keys[3]))
+                return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+            except Exception:
+                return None
+        return None
+
+    if isinstance(raw_bbox, tuple):
+        raw_bbox = list(raw_bbox)
+    if not isinstance(raw_bbox, list):
+        return None
+
+    if raw_bbox and all(isinstance(v, dict) for v in raw_bbox):
+        points: list[list[float]] = []
+        for point in raw_bbox:
+            try:
+                x = point.get("x")
+                y = point.get("y")
+                if x is None:
+                    x = point.get("left")
+                if y is None:
+                    y = point.get("top")
+                points.append([float(x), float(y)])
+            except Exception:
+                return None
+        return points or None
+
+    if raw_bbox and all(isinstance(v, list) and len(v) >= 2 for v in raw_bbox):
+        points = []
+        for point in raw_bbox:
+            try:
+                points.append([float(point[0]), float(point[1])])
+            except Exception:
+                return None
+        return points or None
+
+    if (
+        len(raw_bbox) >= 8
+        and len(raw_bbox) % 2 == 0
+        and all(isinstance(v, (int, float)) for v in raw_bbox)
+    ):
+        points = []
+        for idx in range(0, len(raw_bbox), 2):
+            points.append([float(raw_bbox[idx]), float(raw_bbox[idx + 1])])
+        return points or None
+
+    if len(raw_bbox) == 4 and all(isinstance(v, (int, float)) for v in raw_bbox):
+        x0 = float(raw_bbox[0])
+        y0 = float(raw_bbox[1])
+        x1 = float(raw_bbox[2])
+        y1 = float(raw_bbox[3])
+        return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+
+    return None
+
+
+def _layout_geometry_kind(raw_bbox: Any, geometry_source: str | None) -> str:
+    if geometry_source == "polygon_points":
+        return "polygon"
+    if isinstance(raw_bbox, tuple):
+        raw_bbox = list(raw_bbox)
+    if isinstance(raw_bbox, list):
+        if raw_bbox and all(isinstance(v, dict) for v in raw_bbox):
+            return "polygon"
+        if raw_bbox and all(isinstance(v, list) and len(v) >= 2 for v in raw_bbox):
+            return "polygon"
+        if len(raw_bbox) >= 8 and len(raw_bbox) % 2 == 0:
+            return "polygon"
+    return "bbox"
+
+
 def _normalize_ai_layout_model_name(value: Any) -> str:
     raw = str(value or "").strip().lower()
     if raw in {
@@ -218,9 +317,8 @@ class _AiRequestRateLimiter:
 
     def acquire(self, *, estimated_tokens: int) -> _AiRequestReservation:
         estimated = max(1, int(estimated_tokens or 1))
-        if (
-            self.tokens_per_minute is not None
-            and estimated > int(self.tokens_per_minute)
+        if self.tokens_per_minute is not None and estimated > int(
+            self.tokens_per_minute
         ):
             estimated = int(self.tokens_per_minute)
 
@@ -238,12 +336,11 @@ class _AiRequestRateLimiter:
                     oldest = float(self._events[0].get("at_monotonic") or now_monotonic)
                     wait_s = max(wait_s, max(0.0, 60.0 - (now_monotonic - oldest)))
 
-                if (
-                    self.tokens_per_minute is not None
-                    and self._events
-                ):
+                if self.tokens_per_minute is not None and self._events:
                     token_budget = int(self.tokens_per_minute)
-                    used_tokens = sum(int(event.get("tokens") or 0) for event in self._events)
+                    used_tokens = sum(
+                        int(event.get("tokens") or 0) for event in self._events
+                    )
                     if used_tokens + estimated > token_budget:
                         reclaimed = 0
                         for event in self._events:
@@ -274,9 +371,8 @@ class _AiRequestRateLimiter:
         if actual_tokens is None:
             return
         finalized_tokens = max(1, int(actual_tokens))
-        if (
-            self.tokens_per_minute is not None
-            and finalized_tokens > int(self.tokens_per_minute)
+        if self.tokens_per_minute is not None and finalized_tokens > int(
+            self.tokens_per_minute
         ):
             finalized_tokens = int(self.tokens_per_minute)
         with self._lock:
@@ -453,9 +549,7 @@ def _run_chat_completion_request(
         reservation: _AiRequestReservation | None = None
         try:
             if request_limiter is not None:
-                reservation = request_limiter.acquire(
-                    estimated_tokens=estimated_tokens
-                )
+                reservation = request_limiter.acquire(estimated_tokens=estimated_tokens)
             completion = client.with_options(
                 timeout=timeout_s,
                 max_retries=0,
@@ -473,7 +567,10 @@ def _run_chat_completion_request(
         except Exception as exc:
             if reservation is not None:
                 reservation.finalize(actual_tokens=None)
-            if attempt_index >= total_attempts or not _is_retryable_chat_completion_error(exc):
+            if (
+                attempt_index >= total_attempts
+                or not _is_retryable_chat_completion_error(exc)
+            ):
                 raise
             delay_s = _retry_delay_s_for_chat_completion(
                 attempt_index=attempt_index,
@@ -542,6 +639,7 @@ class AiOcrClient(OcrProvider):
         self._paddle_doc_active_predict_trace: dict[str, Any] | None = None
         self._paddle_doc_last_predict_debug: dict[str, Any] | None = None
         self._paddle_doc_recent_predict_debug: list[dict[str, Any]] = []
+        self.last_layout_analysis_debug: dict[str, Any] | None = None
 
         self.vendor_adapter = _create_ai_ocr_vendor_adapter(
             provider=provider,
@@ -632,12 +730,11 @@ class AiOcrClient(OcrProvider):
             tokens_per_minute=self.request_tpm_limit,
         )
 
-        if self.requested_route_kind == ROUTE_KIND_REMOTE_DOC_PARSER and not _is_paddleocr_vl_model(
-            self.model
+        if (
+            self.requested_route_kind == ROUTE_KIND_REMOTE_DOC_PARSER
+            and not _is_paddleocr_vl_model(self.model)
         ):
-            raise ValueError(
-                "remote_doc_parser route requires a PaddleOCR-VL model"
-            )
+            raise ValueError("remote_doc_parser route requires a PaddleOCR-VL model")
 
         if (
             _is_paddleocr_vl_model(self.model)
@@ -707,7 +804,9 @@ class AiOcrClient(OcrProvider):
         )
 
     def _uses_remote_doc_parser(self) -> bool:
-        return _is_paddleocr_vl_model(self.model) and self._should_use_paddle_doc_parser()
+        return (
+            _is_paddleocr_vl_model(self.model) and self._should_use_paddle_doc_parser()
+        )
 
     def _uses_local_layout_block_ocr(self) -> bool:
         return self.requested_route_kind == ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR
@@ -785,7 +884,9 @@ class AiOcrClient(OcrProvider):
                     return label
         return None
 
-    def _extract_paddle_doc_pixel_bucket(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+    def _extract_paddle_doc_pixel_bucket(
+        self, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
         mm_processor_kwargs: dict[str, Any] = {}
         extra_body = kwargs.get("extra_body")
         if isinstance(extra_body, dict):
@@ -894,7 +995,8 @@ class AiOcrClient(OcrProvider):
                 round(
                     max(
                         0.0,
-                        time.monotonic() - float(entry.get("_started_monotonic") or 0.0),
+                        time.monotonic()
+                        - float(entry.get("_started_monotonic") or 0.0),
                     )
                     * 1000.0
                 )
@@ -955,7 +1057,8 @@ class AiOcrClient(OcrProvider):
                 round(
                     max(
                         0.0,
-                        time.monotonic() - float(trace.get("_started_monotonic") or 0.0),
+                        time.monotonic()
+                        - float(trace.get("_started_monotonic") or 0.0),
                     )
                     * 1000.0
                 )
@@ -1139,6 +1242,7 @@ class AiOcrClient(OcrProvider):
             if entry is None:
                 return result
             if return_future and hasattr(result, "add_done_callback"):
+
                 def _on_done(future: Any, block_entry: dict[str, Any] = entry) -> None:
                     try:
                         future.result()
@@ -1362,9 +1466,7 @@ class AiOcrClient(OcrProvider):
         return _env_flag("OCR_PADDLE_VL_DOCPARSER_RETRY_ON_TIMEOUT", default=True)
 
     def _should_use_paddle_doc_singleflight(self) -> bool:
-        raw_specific = os.getenv(
-            "OCR_PADDLE_VL_DOCPARSER_SINGLEFLIGHT_V15_SILICONFLOW"
-        )
+        raw_specific = os.getenv("OCR_PADDLE_VL_DOCPARSER_SINGLEFLIGHT_V15_SILICONFLOW")
         raw_general = os.getenv("OCR_PADDLE_VL_DOCPARSER_SINGLEFLIGHT")
         if self._is_siliconflow_paddle_doc_v15():
             if raw_specific is not None:
@@ -1458,7 +1560,9 @@ class AiOcrClient(OcrProvider):
                 ratio = float(max_side_px) / float(largest)
                 new_width = max(32, int(round(float(width) * ratio)))
                 new_height = max(32, int(round(float(height) * ratio)))
-                resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                resized = image.resize(
+                    (new_width, new_height), Image.Resampling.LANCZOS
+                )
 
                 source_stat = Path(image_path).stat()
                 digest = hashlib.sha1(
@@ -1697,9 +1801,8 @@ class AiOcrClient(OcrProvider):
                                 timeout_s=retry_timeout_s,
                             )
                         error_to_raise = retry_error
-                if (
-                    error_to_raise is not None
-                    and isinstance(error_to_raise, TimeoutError)
+                if error_to_raise is not None and isinstance(
+                    error_to_raise, TimeoutError
                 ):
                     self._paddle_doc_parser_disabled = True
                 if (
@@ -1841,6 +1944,7 @@ class AiOcrClient(OcrProvider):
     ) -> tuple[list[dict[str, Any]], list[list[float]]]:
         layout_blocks: list[dict[str, Any]] = []
         image_regions: list[list[float]] = []
+        raw_boxes_debug: list[dict[str, Any]] = []
 
         def _result_payloads(result_obj: Any) -> list[Any]:
             payloads: list[Any] = []
@@ -1880,7 +1984,11 @@ class AiOcrClient(OcrProvider):
             for payload in _result_payloads(result):
                 if not isinstance(payload, dict):
                     continue
-                root = payload.get("res") if isinstance(payload.get("res"), dict) else payload
+                root = (
+                    payload.get("res")
+                    if isinstance(payload.get("res"), dict)
+                    else payload
+                )
                 if not isinstance(root, dict):
                     continue
                 boxes = root.get("boxes")
@@ -1889,14 +1997,26 @@ class AiOcrClient(OcrProvider):
                 for raw_box in boxes:
                     if not isinstance(raw_box, dict):
                         continue
-                    bbox = _coerce_bbox_xyxy(
-                        raw_box.get("coordinate")
-                        or raw_box.get("bbox")
-                        or raw_box.get("box")
-                        or raw_box.get("polygon_points")
-                    )
+                    geometry_source: str | None = None
+                    raw_geometry: Any = None
+                    for candidate_source in (
+                        "polygon_points",
+                        "coordinate",
+                        "bbox",
+                        "box",
+                    ):
+                        candidate_value = raw_box.get(candidate_source)
+                        if candidate_value is None:
+                            continue
+                        geometry_source = candidate_source
+                        raw_geometry = candidate_value
+                        break
+
+                    bbox = _coerce_bbox_xyxy(raw_geometry)
                     if bbox is None:
                         continue
+                    geometry_points = _coerce_layout_geometry_points(raw_geometry)
+                    geometry_kind = _layout_geometry_kind(raw_geometry, geometry_source)
                     x0, y0, x1, y1 = (
                         float(bbox[0]),
                         float(bbox[1]),
@@ -1906,9 +2026,15 @@ class AiOcrClient(OcrProvider):
                     if x1 - x0 < 3.0 or y1 - y0 < 3.0:
                         continue
 
-                    label = _normalize_layout_label(raw_box.get("label") or raw_box.get("type"))
+                    label = _normalize_layout_label(
+                        raw_box.get("label") or raw_box.get("type")
+                    )
                     try:
-                        score = float(raw_box.get("score")) if raw_box.get("score") is not None else None
+                        score = (
+                            float(raw_box.get("score"))
+                            if raw_box.get("score") is not None
+                            else None
+                        )
                     except Exception:
                         score = None
                     try:
@@ -1925,9 +2051,23 @@ class AiOcrClient(OcrProvider):
                         "bbox": [x0, y0, x1, y1],
                         "score": score,
                         "order": order,
+                        "geometry_source": geometry_source,
+                        "geometry_kind": geometry_kind,
+                        "geometry_points": geometry_points,
                         "text": "",
                     }
                     layout_blocks.append(block)
+                    raw_boxes_debug.append(
+                        {
+                            "label": label,
+                            "bbox": [x0, y0, x1, y1],
+                            "score": score,
+                            "order": order,
+                            "geometry_source": geometry_source,
+                            "geometry_kind": geometry_kind,
+                            "geometry_points": geometry_points,
+                        }
+                    )
                     if _is_image_like_layout_label(label):
                         image_regions.append([x0, y0, x1, y1])
                 break
@@ -1940,6 +2080,12 @@ class AiOcrClient(OcrProvider):
                 float(((block.get("bbox") or [0, 0, 0, 0])[0])),
             )
         )
+        self.last_layout_analysis_debug = {
+            "layout_model": self.layout_model,
+            "raw_boxes": _sanitize_debug_value(raw_boxes_debug),
+            "extracted_blocks": _sanitize_debug_value(layout_blocks),
+            "image_regions": _sanitize_debug_value(image_regions),
+        }
         return layout_blocks, image_regions
 
     def _run_local_layout_analysis(
@@ -1963,7 +2109,9 @@ class AiOcrClient(OcrProvider):
             _env_float("OCR_AI_LAYOUT_MODEL_PREDICT_TIMEOUT_S", 45.0),
         )
 
-        def _predict_and_extract_once() -> tuple[list[dict[str, Any]], list[list[float]]]:
+        def _predict_and_extract_once() -> tuple[
+            list[dict[str, Any]], list[list[float]]
+        ]:
             # PaddleX layout model instances are cached process-wide. Keep both
             # predict() and the immediate payload extraction serialized so a
             # later predict() cannot mutate or recycle the previous result
@@ -1990,6 +2138,12 @@ class AiOcrClient(OcrProvider):
         self._last_layout_image_path = requested_path
         self._image_region_cache_path = requested_path
         self._image_region_cache_ready = True
+        if isinstance(self.last_layout_analysis_debug, dict):
+            self.last_layout_analysis_debug = {
+                **self.last_layout_analysis_debug,
+                "image_path": requested_path,
+                "layout_model": self.layout_model,
+            }
         logger.info(
             "Local layout analysis produced %s blocks and %s image-like regions (layout_model=%s)",
             len(layout_blocks),
@@ -2021,7 +2175,9 @@ class AiOcrClient(OcrProvider):
         except Exception:
             parsed = None
         if isinstance(parsed, dict):
-            candidate = parsed.get("text") or parsed.get("content") or parsed.get("value")
+            candidate = (
+                parsed.get("text") or parsed.get("content") or parsed.get("value")
+            )
             if isinstance(candidate, str):
                 stripped = candidate.strip()
         elif isinstance(parsed, list):
@@ -2030,7 +2186,9 @@ class AiOcrClient(OcrProvider):
                 if isinstance(item, str) and item.strip():
                     lines.append(item.strip())
                 elif isinstance(item, dict):
-                    candidate = item.get("text") or item.get("content") or item.get("value")
+                    candidate = (
+                        item.get("text") or item.get("content") or item.get("value")
+                    )
                     if isinstance(candidate, str) and candidate.strip():
                         lines.append(candidate.strip())
             if lines:
@@ -2096,6 +2254,7 @@ class AiOcrClient(OcrProvider):
         *,
         image: Image.Image,
         bbox: list[float],
+        geometry_points: list[list[float]] | None = None,
     ) -> Image.Image | None:
         width, height = image.size
         if width <= 0 or height <= 0:
@@ -2114,7 +2273,42 @@ class AiOcrClient(OcrProvider):
         yi1 = max(0, min(height, int(math.ceil(y1)) + pad_y))
         if xi1 - xi0 < 6 or yi1 - yi0 < 6:
             return None
-        return image.crop((xi0, yi0, xi1, yi1)).convert("RGB")
+        cropped = image.crop((xi0, yi0, xi1, yi1)).convert("RGB")
+
+        polygon_points: list[tuple[float, float]] = []
+        for point in geometry_points or []:
+            if not isinstance(point, list) or len(point) < 2:
+                continue
+            try:
+                px = float(point[0]) - float(xi0)
+                py = float(point[1]) - float(yi0)
+            except Exception:
+                continue
+            if math.isfinite(px) and math.isfinite(py):
+                polygon_points.append((px, py))
+
+        ordered_points: list[tuple[float, float]] = []
+        seen_points: set[tuple[float, float]] = set()
+        for px, py in polygon_points:
+            key = (round(px, 3), round(py, 3))
+            if key in seen_points:
+                continue
+            seen_points.add(key)
+            ordered_points.append((px, py))
+        if len(ordered_points) < 3:
+            return cropped
+
+        try:
+            from PIL import ImageDraw
+
+            mask = Image.new("L", cropped.size, 0)
+            draw = ImageDraw.Draw(mask)
+            draw.polygon(ordered_points, fill=255)
+            composited = Image.new("RGB", cropped.size, "white")
+            composited.paste(cropped, mask=mask)
+            return composited
+        except Exception:
+            return cropped
 
     def _min_side_px_for_layout_block_model(self, effective_model: str) -> int:
         min_side_px = max(0, _env_int("OCR_AI_LAYOUT_BLOCK_MIN_SIDE_PX", 0))
@@ -2158,6 +2352,76 @@ class AiOcrClient(OcrProvider):
             _env_float("OCR_AI_LAYOUT_BLOCK_PROGRESS_LOG_INTERVAL_S", 10.0),
         )
 
+    def _resolve_layout_block_request_timeout_s(self, *, effective_model: str) -> float:
+        base_timeout = self._resolve_model_request_timeout_s(model_name=effective_model)
+        default_timeout = max(
+            float(base_timeout),
+            _env_float("OCR_AI_LAYOUT_BLOCK_REQUEST_TIMEOUT_S", 40.0),
+        )
+        lowered = str(effective_model or "").strip().lower()
+        if "qwen" in lowered and ("vl" in lowered or "omni" in lowered):
+            return max(
+                float(base_timeout),
+                _env_float(
+                    "OCR_AI_LAYOUT_BLOCK_REQUEST_TIMEOUT_S_QWEN",
+                    default_timeout,
+                ),
+            )
+        if "deepseek-ocr" in lowered or "deepseekocr" in lowered:
+            return max(
+                float(base_timeout),
+                _env_float(
+                    "OCR_AI_LAYOUT_BLOCK_REQUEST_TIMEOUT_S_DEEPSEEK_OCR",
+                    default_timeout,
+                ),
+            )
+        return default_timeout
+
+    def _resolve_layout_block_retry_timeout_s(
+        self,
+        *,
+        effective_model: str,
+        request_timeout_s: float,
+    ) -> float:
+        default_retry_timeout = max(
+            float(request_timeout_s) + 12.0,
+            float(request_timeout_s) * 1.5,
+            55.0,
+        )
+        lowered = str(effective_model or "").strip().lower()
+        if "qwen" in lowered and ("vl" in lowered or "omni" in lowered):
+            return max(
+                float(request_timeout_s) + 8.0,
+                _env_float(
+                    "OCR_AI_LAYOUT_BLOCK_RETRY_TIMEOUT_S_QWEN",
+                    default_retry_timeout,
+                ),
+            )
+        return max(
+            float(request_timeout_s) + 8.0,
+            _env_float(
+                "OCR_AI_LAYOUT_BLOCK_RETRY_TIMEOUT_S",
+                default_retry_timeout,
+            ),
+        )
+
+    def _should_retry_layout_block_timeout(self, *, effective_model: str) -> bool:
+        lowered = str(effective_model or "").strip().lower()
+        if "qwen" in lowered and ("vl" in lowered or "omni" in lowered):
+            raw_specific = os.getenv("OCR_AI_LAYOUT_BLOCK_RETRY_ON_TIMEOUT_QWEN")
+            if raw_specific is not None:
+                return _env_flag(
+                    "OCR_AI_LAYOUT_BLOCK_RETRY_ON_TIMEOUT_QWEN",
+                    default=True,
+                )
+        return _env_flag("OCR_AI_LAYOUT_BLOCK_RETRY_ON_TIMEOUT", default=True)
+
+    def _is_timeout_like_error(self, exc: Exception) -> bool:
+        if isinstance(exc, TimeoutError):
+            return True
+        lowered = str(exc or "").strip().lower()
+        return ("timed out" in lowered) or ("timeout" in lowered)
+
     def _prepare_layout_block_crop_for_model(
         self,
         *,
@@ -2190,7 +2454,13 @@ class AiOcrClient(OcrProvider):
         effective_model: str,
     ) -> str:
         is_deepseek_model = _is_deepseek_ocr_model(effective_model)
-        request_timeout_s = self._resolve_model_request_timeout_s(model_name=effective_model)
+        request_timeout_s = self._resolve_layout_block_request_timeout_s(
+            effective_model=effective_model
+        )
+        retry_timeout_s = self._resolve_layout_block_retry_timeout_s(
+            effective_model=effective_model,
+            request_timeout_s=request_timeout_s,
+        )
         resolved_prompt_preset = resolve_ai_ocr_prompt_preset(
             preset=self.prompt_preset,
             model_name=effective_model,
@@ -2224,14 +2494,36 @@ class AiOcrClient(OcrProvider):
         if is_deepseek_model:
             messages = [{"role": "user", "content": user_content}]
 
-        completion = self._chat_completion(
-            model=effective_model,
-            timeout_s=request_timeout_s,
-            request_label="layout_block_crop",
-            temperature=0,
-            max_tokens=self.vendor_adapter.clamp_max_tokens(768, kind="ocr"),
-            messages=messages,
-        )
+        request_kwargs = {
+            "model": effective_model,
+            "temperature": 0,
+            "max_tokens": self.vendor_adapter.clamp_max_tokens(768, kind="ocr"),
+            "messages": messages,
+        }
+        try:
+            completion = self._chat_completion(
+                **request_kwargs,
+                timeout_s=request_timeout_s,
+                request_label="layout_block_crop",
+            )
+        except Exception as exc:
+            if not (
+                self._should_retry_layout_block_timeout(effective_model=effective_model)
+                and self._is_timeout_like_error(exc)
+            ):
+                raise
+            logger.warning(
+                "Retrying local layout_block OCR after timeout (label=%s, model=%s, timeout_s=%.1f, retry_timeout_s=%.1f)",
+                label,
+                effective_model,
+                float(request_timeout_s),
+                float(retry_timeout_s),
+            )
+            completion = self._chat_completion(
+                **request_kwargs,
+                timeout_s=retry_timeout_s,
+                request_label="layout_block_crop_retry",
+            )
         content_obj = (
             completion.choices[0].message.content
             if getattr(completion, "choices", None)
@@ -2263,7 +2555,11 @@ class AiOcrClient(OcrProvider):
             bbox = block.get("bbox")
             if not isinstance(bbox, list) or len(bbox) != 4:
                 continue
-            crop = self._crop_layout_block(image=image, bbox=bbox)
+            crop = self._crop_layout_block(
+                image=image,
+                bbox=bbox,
+                geometry_points=block.get("geometry_points"),
+            )
             if crop is None:
                 continue
             crop = self._prepare_layout_block_crop_for_model(
@@ -2277,6 +2573,8 @@ class AiOcrClient(OcrProvider):
                     "label": label,
                     "score": block.get("score"),
                     "order": block.get("order"),
+                    "geometry_source": block.get("geometry_source"),
+                    "geometry_kind": block.get("geometry_kind"),
                     "crop_width": int(crop.size[0]),
                     "crop_height": int(crop.size[1]),
                     "data_uri": self._image_to_data_uri(crop),
@@ -2318,9 +2616,13 @@ class AiOcrClient(OcrProvider):
             max_workers,
         )
 
-        def _summarize_task(task: dict[str, Any], *, now_monotonic: float) -> dict[str, Any]:
+        def _summarize_task(
+            task: dict[str, Any], *, now_monotonic: float
+        ) -> dict[str, Any]:
             started_monotonic = float(
-                task.get("_started_monotonic") or task.get("_submitted_monotonic") or 0.0
+                task.get("_started_monotonic")
+                or task.get("_submitted_monotonic")
+                or 0.0
             )
             age_ms = int(round(max(0.0, now_monotonic - started_monotonic) * 1000.0))
             return {
@@ -2356,7 +2658,9 @@ class AiOcrClient(OcrProvider):
                 "max_workers": max_workers,
                 "block_counts": {
                     "total": len(snapshots),
-                    "success": sum(1 for item in snapshots if item["status"] == "success"),
+                    "success": sum(
+                        1 for item in snapshots if item["status"] == "success"
+                    ),
                     "error": sum(1 for item in snapshots if item["status"] == "error"),
                     "pending": sum(
                         1
@@ -2401,7 +2705,9 @@ class AiOcrClient(OcrProvider):
             now_monotonic = time.monotonic()
             with task_lock:
                 started_monotonic = float(
-                    task.get("_started_monotonic") or task.get("_submitted_monotonic") or 0.0
+                    task.get("_started_monotonic")
+                    or task.get("_submitted_monotonic")
+                    or 0.0
                 )
                 elapsed_ms = int(
                     round(max(0.0, now_monotonic - started_monotonic) * 1000.0)
@@ -2456,10 +2762,7 @@ class AiOcrClient(OcrProvider):
             return result
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {
-                executor.submit(_run_task, task): task
-                for task in text_tasks
-            }
+            future_map = {executor.submit(_run_task, task): task for task in text_tasks}
             pending_futures = set(future_map)
             while pending_futures:
                 done_futures, pending_futures = wait(
@@ -2493,6 +2796,10 @@ class AiOcrClient(OcrProvider):
                             "provider": self.provider_id,
                             "model": effective_model,
                             "ocr_layout_label": result.get("label") or None,
+                            "ocr_layout_geometry_source": result.get("geometry_source")
+                            or None,
+                            "ocr_layout_geometry_kind": result.get("geometry_kind")
+                            or None,
                         }
                     )
                     self.last_layout_blocks[int(result["index"])]["text"] = text
@@ -3246,7 +3553,9 @@ class AiOcrClient(OcrProvider):
                         raise RuntimeError("AI OCR returned structural gibberish")
 
                     items = _extract_json_list(content)
-                    if not items and (is_deepseek_model or "<|det|>" in (content or "")):
+                    if not items and (
+                        is_deepseek_model or "<|det|>" in (content or "")
+                    ):
                         items = _extract_deepseek_tagged_items(content)
                     if items:
                         logger.info(

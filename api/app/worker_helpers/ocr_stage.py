@@ -179,8 +179,7 @@ def _detect_page_image_regions(
             detected_image_regions_pt.append(list(bbox_pt))
     except TimeoutError:
         image_region_error = (
-            "image_region_detection_timeout:"
-            f"{int(max(1, ocr_image_region_timeout))}s"
+            f"image_region_detection_timeout:{int(max(1, ocr_image_region_timeout))}s"
         )
     except Exception as e:
         image_region_error = str(e)
@@ -406,12 +405,12 @@ def _process_parallel_ai_ocr_page(
 
     used_provider = getattr(ocr_manager, "last_provider_name", None)
     fallback_reason = getattr(ocr_manager, "last_fallback_reason", None)
+    layout_blocks = getattr(ocr_manager, "last_layout_blocks", [])
+    layout_analysis_debug = getattr(ocr_manager, "last_layout_analysis_debug", None)
     quality_notes_raw = getattr(ocr_manager, "last_quality_notes", [])
     quality_notes = [
         str(note).strip()
-        for note in (
-            quality_notes_raw if isinstance(quality_notes_raw, list) else []
-        )
+        for note in (quality_notes_raw if isinstance(quality_notes_raw, list) else [])
         if str(note).strip()
     ]
     page_warnings = list(quality_notes)
@@ -456,6 +455,8 @@ def _process_parallel_ai_ocr_page(
             "used_provider": used_provider,
             "fallback_reason": fallback_reason,
             "quality_notes": quality_notes,
+            "layout_block_count": len(layout_blocks or []),
+            "layout_analysis": layout_analysis_debug,
             "overlay_image": str(overlay_path) if overlay_path else None,
             "bbox_stats": bbox_stats,
         },
@@ -721,7 +722,9 @@ def run_ocr_stage(
                         latest_pdf_page_index = int(result.get("page_index") or 0)
                         for note in result.get("page_warnings") or []:
                             if str(note).strip():
-                                page.setdefault("warnings", []).append(str(note).strip())
+                                page.setdefault("warnings", []).append(
+                                    str(note).strip()
+                                )
                         for note in result.get("ir_warnings") or []:
                             if str(note).strip():
                                 ir.setdefault("warnings", []).append(str(note).strip())
@@ -750,7 +753,9 @@ def run_ocr_stage(
                                 "ocr_parallel_total_timeout:"
                                 f" total_timeout_s={ocr_total_timeout}"
                             )
-                        next_page = None if stop_submitting_new_pages else next(page_iter, None)
+                        next_page = (
+                            None if stop_submitting_new_pages else next(page_iter, None)
+                        )
                         if next_page is not None:
                             next_future = executor.submit(
                                 _process_parallel_ai_ocr_page,
@@ -762,7 +767,9 @@ def run_ocr_stage(
                                 ocr_render_dpi=int(ocr_render_dpi),
                                 ocr_page_timeout=int(ocr_page_timeout),
                                 ocr_image_region_timeout=int(ocr_image_region_timeout),
-                                skip_image_region_detection=bool(skip_image_region_detection),
+                                skip_image_region_detection=bool(
+                                    skip_image_region_detection
+                                ),
                                 export_overlay_images=bool(export_overlay_images),
                                 abort_if_cancelled=abort_if_cancelled,
                             )
@@ -1045,6 +1052,10 @@ def run_ocr_stage(
                 "last_fallback_reason",
                 fallback_reason,
             )
+            layout_blocks = getattr(ocr_manager, "last_layout_blocks", [])
+            layout_analysis_debug = getattr(
+                ocr_manager, "last_layout_analysis_debug", None
+            )
             quality_notes_raw = getattr(ocr_manager, "last_quality_notes", [])
             quality_notes = [
                 str(note).strip()
@@ -1055,9 +1066,7 @@ def run_ocr_stage(
             ]
             for note in quality_notes:
                 page.setdefault("warnings", []).append(note)
-                ir.setdefault("warnings", []).append(
-                    f"{note}:page={page_index + 1}"
-                )
+                ir.setdefault("warnings", []).append(f"{note}:page={page_index + 1}")
 
             detected_image_regions_pt, image_region_error, image_region_skip_reason = (
                 _detect_page_image_regions(
@@ -1108,6 +1117,8 @@ def run_ocr_stage(
                     "used_provider": used_provider,
                     "fallback_reason": fallback_reason,
                     "quality_notes": quality_notes,
+                    "layout_block_count": len(layout_blocks or []),
+                    "layout_analysis": layout_analysis_debug,
                     "overlay_image": str(overlay_path) if overlay_path else None,
                     "bbox_stats": bbox_stats,
                 }
@@ -1121,7 +1132,9 @@ def run_ocr_stage(
     finally:
         doc.close()
         page_runtime_summary = _summarize_ocr_page_runtime(
-            page_entries=ocr_debug.get("pages") if isinstance(ocr_debug.get("pages"), list) else [],
+            page_entries=ocr_debug.get("pages")
+            if isinstance(ocr_debug.get("pages"), list)
+            else [],
             ocr_manager=ocr_manager,
         )
         ocr_debug["page_runtime_summary"] = page_runtime_summary

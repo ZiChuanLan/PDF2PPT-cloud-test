@@ -130,9 +130,7 @@ def _should_probe_visual_wrap_for_ocr_text(
         return False
 
     # Clear multi-line / paragraph boxes are already handled well by geometry.
-    if wrap_hint and (
-        h_ratio >= 1.55 or (compact_len >= 48 and h_ratio >= 1.35)
-    ):
+    if wrap_hint and (h_ratio >= 1.55 or (compact_len >= 48 and h_ratio >= 1.35)):
         return False
 
     return True
@@ -239,7 +237,10 @@ def _merge_text_erase_bboxes(
         indexed = [
             (idx, bb)
             for idx, bb in enumerate(
-                sorted(merged, key=lambda b: (float(b[0]), float(b[1]), float(b[2]), float(b[3])))
+                sorted(
+                    merged,
+                    key=lambda b: (float(b[0]), float(b[1]), float(b[2]), float(b[3])),
+                )
             )
         ]
         parent = list(range(len(indexed)))
@@ -507,7 +508,13 @@ def generate_pptx_from_ir(
     ppt_generation_mode_id = str(ppt_generation_mode or "standard").strip().lower()
     if ppt_generation_mode_id in {"default", "normal", "balanced", "quality"}:
         ppt_generation_mode_id = "standard"
-    if ppt_generation_mode_id in {"speed", "speed_first", "speed-first", "fast_experimental", "experimental_fast"}:
+    if ppt_generation_mode_id in {
+        "speed",
+        "speed_first",
+        "speed-first",
+        "fast_experimental",
+        "experimental_fast",
+    }:
         ppt_generation_mode_id = "fast"
     if ppt_generation_mode_id in {"ultra", "extreme", "turbo_fast", "turbo-fast"}:
         ppt_generation_mode_id = "turbo"
@@ -662,7 +669,9 @@ def generate_pptx_from_ir(
             el for el in (page.get("elements") or []) if isinstance(el, dict)
         ]
         page_text_elements_all = [
-            el for el in _iter_page_elements(page, type_name="text") if isinstance(el, dict)
+            el
+            for el in _iter_page_elements(page, type_name="text")
+            if isinstance(el, dict)
         ]
         page_text_elements_render = [
             el
@@ -699,7 +708,9 @@ def generate_pptx_from_ir(
             if page_ocr_text_elements
             else 12.0
         )
-        has_mineru_elements = any(_is_layout_parse_source(el.get("source")) for el in page_elements)
+        has_mineru_elements = any(
+            _is_layout_parse_source(el.get("source")) for el in page_elements
+        )
 
         if not has_text_layer:
             should_split_scanned_image_regions = scanned_page_mode_id != "fullpage"
@@ -1119,7 +1130,9 @@ def generate_pptx_from_ir(
                     baseline_ocr_h_pt=float(baseline_ocr_h_pt),
                 )
                 visual_wrap_override: bool | None = None
-                if (not is_speed_ppt_generation) and _should_probe_visual_wrap_for_ocr_text(
+                if (
+                    not is_speed_ppt_generation
+                ) and _should_probe_visual_wrap_for_ocr_text(
                     text=text,
                     bbox_w_pt=bbox_w_pt,
                     bbox_h_pt=bbox_h_pt,
@@ -1428,7 +1441,11 @@ def generate_pptx_from_ir(
             except Exception:
                 mineru_background_placed = False
 
-        if (not is_speed_ppt_generation) and ocr_sampling_pix is None and source_pdf.exists():
+        if (
+            (not is_speed_ppt_generation)
+            and ocr_sampling_pix is None
+            and source_pdf.exists()
+        ):
             if _page_needs_ocr_sampling_render(
                 page_elements=page_text_elements_render,
                 page_h_pt=float(page_h_pt),
@@ -1604,55 +1621,12 @@ def generate_pptx_from_ir(
                     and bbox_h_pt >= 1.45 * float(baseline_ocr_h_pt)
                     and compact_len <= 56
                 )
-                wrap_override: bool | None = (
-                    False if (ocr_linebreak_assisted and "\n" not in text) else None
-                )
-                if (
-                    wrap_override is None
-                    and ocr_sampling_pix is not None
-                    and _should_probe_visual_wrap_for_ocr_text(
-                        text=text,
-                        bbox_w_pt=bbox_w_pt,
-                        bbox_h_pt=bbox_h_pt,
-                        baseline_ocr_h_pt=float(baseline_ocr_h_pt),
-                        is_heading=bool(is_heading),
-                        wrap_hint=_prefer_wrap_for_ocr_text(
-                            text=text,
-                            bbox_w_pt=bbox_w_pt,
-                            bbox_h_pt=bbox_h_pt,
-                            baseline_ocr_h_pt=float(baseline_ocr_h_pt),
-                        ),
-                        ocr_linebreak_assisted=ocr_linebreak_assisted,
-                    )
-                ):
-                    try:
-                        visual_line_count = _estimate_bbox_ink_line_count(
-                            ocr_sampling_pix,
-                            bbox_pt=bbox_pt,
-                            page_height_pt=page_h_pt,
-                            dpi=int(scanned_render_dpi),
-                            max_lines=3,
-                        )
-                        if (
-                            isinstance(visual_line_count, int)
-                            and visual_line_count >= 1
-                        ):
-                            wrap_override = _resolve_visual_wrap_override_for_ocr_text(
-                                visual_line_count=visual_line_count,
-                                compact_len=compact_len,
-                                bbox_h_pt=bbox_h_pt,
-                                baseline_ocr_h_pt=float(baseline_ocr_h_pt),
-                                is_heading=bool(is_heading),
-                            )
-                    except Exception:
-                        wrap_override = None
                 text_to_render, font_size_pt, wrap = _fit_ocr_text_style(
                     text=text,
                     bbox_w_pt=bbox_w_pt,
                     bbox_h_pt=bbox_h_pt,
                     baseline_ocr_h_pt=float(baseline_ocr_h_pt),
                     is_heading=is_heading,
-                    wrap_override=wrap_override,
                 )
 
                 if (
@@ -1798,7 +1772,9 @@ def generate_pptx_from_ir(
                         sampled_bg_rgb = None
                         sampled_text_rgb = None
             elif (
-                is_ocr_text and sampled_bg_rgb is None and ocr_sampling_pix is not None
+                is_ocr_text
+                and sampled_bg_rgb is None
+                and ocr_sampling_pix is not None
                 and _should_sample_local_text_colors(
                     source_id=source_id,
                     element_color=el.get("color"),

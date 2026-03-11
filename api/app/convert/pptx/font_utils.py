@@ -593,7 +593,9 @@ def _fit_mineru_text_style(
     }
     is_semantic_heading = bool(
         block_type in semantic_heading_tokens
-        or any(token in block_type for token in ("title", "heading", "header", "subtitle"))
+        or any(
+            token in block_type for token in ("title", "heading", "header", "subtitle")
+        )
     )
 
     is_heading = bool(is_semantic_heading) or (
@@ -880,8 +882,9 @@ def _fit_ocr_text_style(
 ) -> tuple[str, float, bool]:
     """Return (text_to_render, font_size_pt, wrap) for OCR text boxes.
 
-    This mirrors the robust mineru fitting path and avoids fixed single-page
-    constants.
+    Compare single-line and wrapped layouts using actual measurement, then pick
+    the more readable fit. Keep only a small amount of policy around headings
+    and explicit line structure.
     """
 
     normalized = _normalize_ocr_text_for_render(text)
@@ -890,6 +893,32 @@ def _fit_ocr_text_style(
 
     compact_len = _compact_text_length(normalized)
     line_height = 1.18 if _contains_cjk(normalized) else 1.15
+
+    bbox_w_pt = max(1.0, float(bbox_w_pt))
+    bbox_h_pt = max(1.0, float(bbox_h_pt))
+    baseline_ocr_h_pt = max(4.0, float(baseline_ocr_h_pt))
+
+    min_pt = max(5.0, min(8.0, 0.52 * float(baseline_ocr_h_pt)))
+    max_pt = min(
+        84.0 if is_heading else 54.0,
+        max(7.0, float(bbox_h_pt) * (0.98 if is_heading else 0.94)),
+    )
+
+    def _fit_single_candidate() -> tuple[str, float, int, float]:
+        font_size_pt = _fit_font_size_pt(
+            normalized,
+            bbox_w_pt=float(bbox_w_pt),
+            bbox_h_pt=float(bbox_h_pt),
+            wrap=False,
+            min_pt=float(min_pt),
+            max_pt=float(max_pt),
+            width_fit_ratio=1.00,
+            height_fit_ratio=0.995,
+        )
+        fill_ratio = (float(font_size_pt) * float(line_height)) / max(
+            1.0, float(bbox_h_pt)
+        )
+        return (normalized, float(font_size_pt), 1, float(fill_ratio))
 
     def _fit_wrapped_text(
         *,
@@ -934,92 +963,59 @@ def _fit_ocr_text_style(
             float(fill_ratio),
         )
 
-    # Headings are usually single-line unless explicit line breaks exist.
-    if is_heading and ("\n" not in normalized):
-        wrap = False
-    elif "\n" in normalized:
-        wrap = True
-    elif wrap_override is not None:
-        wrap = bool(wrap_override)
-    else:
-        wrap = _prefer_wrap_for_ocr_text(
-            text=normalized,
-            bbox_w_pt=bbox_w_pt,
-            bbox_h_pt=bbox_h_pt,
-            baseline_ocr_h_pt=baseline_ocr_h_pt,
-        )
+    explicit_multiline = "\n" in normalized
+    single_text, single_font_pt, _single_lines, single_fill = _fit_single_candidate()
 
-    min_pt = max(5.0, min(8.0, 0.52 * float(baseline_ocr_h_pt)))
-    max_pt = min(
-        84.0 if is_heading else 54.0,
-        max(7.0, float(bbox_h_pt) * (0.98 if is_heading else 0.94)),
-    )
+    if is_heading and not explicit_multiline:
+        return (single_text, float(single_font_pt), False)
 
-    font_size_pt = _fit_font_size_pt(
+    wrapped_seed = _fit_font_size_pt(
         normalized,
-        bbox_w_pt=max(1.0, 1.01 * float(bbox_w_pt)) if wrap else float(bbox_w_pt),
+        bbox_w_pt=max(1.0, 1.01 * float(bbox_w_pt)),
         bbox_h_pt=float(bbox_h_pt),
-        wrap=bool(wrap),
+        wrap=True,
         min_pt=float(min_pt),
         max_pt=float(max_pt),
-        width_fit_ratio=1.02 if wrap else 1.00,
-        height_fit_ratio=0.95 if wrap else 0.995,
+        width_fit_ratio=1.02,
+        height_fit_ratio=0.95,
+    )
+    wrapped_text, wrapped_font_pt, wrapped_lines, wrapped_fill = _fit_wrapped_text(
+        seed_font_pt=float(wrapped_seed),
+        min_pt=float(min_pt),
+        bbox_w_pt=float(bbox_w_pt),
+        bbox_h_pt=float(bbox_h_pt),
     )
 
-    text_to_render = normalized
-    allow_wrap_recovery = wrap_override is None or (
-        wrap_override is False and (not is_heading) and compact_len >= 72
-    )
-    if wrap:
-        text_to_render, font_size_pt, _line_count, _fill = _fit_wrapped_text(
-            seed_font_pt=float(font_size_pt),
-            min_pt=float(min_pt),
-            bbox_w_pt=float(bbox_w_pt),
-            bbox_h_pt=float(bbox_h_pt),
-        )
-    elif (
-        allow_wrap_recovery
-        and (not is_heading)
-        and ("\n" not in normalized)
-        and compact_len >= 16
-    ):
-        # Adaptive fallback: if single-line rendering leaves too much vertical
-        # whitespace, try wrapped fitting and accept it only when it materially
-        # improves box fill. Treat explicit `wrap_override=False` as a weak
-        # veto for very long OCR paragraphs so coarse doc-parser boxes can
-        # still recover from tiny illegible single-line output.
-        single_fill = (float(font_size_pt) * float(line_height)) / max(
-            1.0, float(bbox_h_pt)
-        )
-        if single_fill < 0.54:
-            wrapped_seed = _fit_font_size_pt(
-                normalized,
-                bbox_w_pt=max(1.0, 1.01 * float(bbox_w_pt)),
-                bbox_h_pt=float(bbox_h_pt),
-                wrap=True,
-                min_pt=float(min_pt),
-                max_pt=float(max_pt),
-                width_fit_ratio=1.02,
-                height_fit_ratio=0.95,
-            )
-            wrapped_text, wrapped_font_pt, wrapped_lines, wrapped_fill = (
-                _fit_wrapped_text(
-                    seed_font_pt=float(wrapped_seed),
-                    min_pt=float(min_pt),
-                    bbox_w_pt=float(bbox_w_pt),
-                    bbox_h_pt=float(bbox_h_pt),
-                )
-            )
-            if (
-                wrapped_lines >= 2
-                and wrapped_fill <= 0.995
-                and (
-                    wrapped_fill >= (single_fill + 0.16)
-                    or wrapped_font_pt >= (float(font_size_pt) * 1.06)
-                )
-            ):
-                wrap = True
-                text_to_render = wrapped_text
-                font_size_pt = float(wrapped_font_pt)
+    if explicit_multiline and wrapped_lines >= 2:
+        return (wrapped_text, float(wrapped_font_pt), True)
 
-    return (text_to_render, float(font_size_pt), bool(wrap))
+    min_readable_pt = max(7.0, min(11.0, 0.62 * float(baseline_ocr_h_pt)))
+    choose_wrap = False
+
+    if wrap_override is True:
+        choose_wrap = wrapped_lines >= 2
+    elif wrap_override is False:
+        choose_wrap = (
+            (not is_heading)
+            and wrapped_lines >= 2
+            and (
+                compact_len >= 72
+                or float(single_font_pt) < float(min_readable_pt)
+                or float(wrapped_font_pt) >= (float(single_font_pt) * 1.12)
+            )
+        )
+    elif wrapped_lines >= 2:
+        single_is_tiny = float(single_font_pt) < float(min_readable_pt)
+        wrapped_is_clearly_better = float(wrapped_font_pt) >= (
+            float(single_font_pt) * 1.10
+        )
+        wrapped_fills_box_better = float(wrapped_fill) >= (
+            float(single_fill) + 0.16
+        ) and float(wrapped_font_pt) >= (float(single_font_pt) * 1.02)
+        choose_wrap = bool(
+            single_is_tiny or wrapped_is_clearly_better or wrapped_fills_box_better
+        )
+
+    if choose_wrap and wrapped_lines >= 2:
+        return (wrapped_text, float(wrapped_font_pt), True)
+    return (single_text, float(single_font_pt), False)

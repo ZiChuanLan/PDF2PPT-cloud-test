@@ -76,6 +76,26 @@ def test_long_ocr_paragraph_can_recover_wrapping_when_single_line_signal_is_weak
     assert "\n" in recovered[0]
 
 
+def test_measurement_driven_fit_wraps_long_body_text_without_visual_override():
+    text = (
+        "Yellowstone is more than a geologic marvel. It is a living laboratory "
+        "and a cultural touchstone, preserved for the benefit and enjoyment of "
+        "the people."
+    )
+
+    recovered = font_utils._fit_ocr_text_style(
+        text=text,
+        bbox_w_pt=360.0,
+        bbox_h_pt=28.0,
+        baseline_ocr_h_pt=16.0,
+        is_heading=False,
+    )
+
+    assert recovered[2] is True
+    assert recovered[1] >= 8.0
+    assert "\n" in recovered[0]
+
+
 def test_forced_single_line_veto_is_relaxed_for_very_long_ocr_paragraphs():
     text = (
         "It increases the rate that nutrients become available to plants by "

@@ -1128,6 +1128,8 @@ class OcrManager:
         self.last_fallback_reason: str | None = None
         self.last_quality_notes: list[str] = []
         self.last_image_regions: list[list[float]] = []
+        self.last_layout_blocks: list[dict[str, Any]] = []
+        self.last_layout_analysis_debug: dict[str, Any] | None = None
         self.provider_id: str = "auto"
         self.route_kind: str = ROUTE_KIND_HYBRID_AUTO
         self.strict_no_fallback: bool = bool(strict_no_fallback)
@@ -1463,6 +1465,8 @@ class OcrManager:
         H = int(image_height)
         self.last_quality_notes = []
         self.last_image_regions = []
+        self.last_layout_blocks = []
+        self.last_layout_analysis_debug = None
         if W <= 0 or H <= 0:
             return []
 
@@ -1623,6 +1627,17 @@ class OcrManager:
                     for region in getattr(self.ai_provider, "last_image_regions_px", [])
                     if isinstance(region, list) and len(region) == 4
                 ]
+                self.last_layout_blocks = [
+                    dict(block)
+                    for block in getattr(self.ai_provider, "last_layout_blocks", [])
+                    if isinstance(block, dict)
+                ]
+                layout_debug = getattr(
+                    self.ai_provider, "last_layout_analysis_debug", None
+                )
+                self.last_layout_analysis_debug = (
+                    dict(layout_debug) if isinstance(layout_debug, dict) else None
+                )
                 ai_lines = _normalize_ocr_items_as_lines(
                     raw_ai, image_width=W, image_height=H
                 )
@@ -1756,6 +1771,17 @@ class OcrManager:
                     for region in getattr(self.ai_provider, "last_image_regions_px", [])
                     if isinstance(region, list) and len(region) == 4
                 ]
+                self.last_layout_blocks = [
+                    dict(block)
+                    for block in getattr(self.ai_provider, "last_layout_blocks", [])
+                    if isinstance(block, dict)
+                ]
+                layout_debug = getattr(
+                    self.ai_provider, "last_layout_analysis_debug", None
+                )
+                self.last_layout_analysis_debug = (
+                    dict(layout_debug) if isinstance(layout_debug, dict) else None
+                )
                 self.last_provider_name = "AiOcrClient"
                 return _normalize_ocr_items_as_lines(
                     raw_ai, image_width=W, image_height=H
@@ -1795,6 +1821,8 @@ class OcrManager:
         self.last_fallback_reason = None
         self.last_quality_notes = []
         self.last_image_regions = []
+        self.last_layout_blocks = []
+        self.last_layout_analysis_debug = None
         for provider in self.providers:
             if self.ai_provider_disabled and isinstance(provider, AiOcrClient):
                 continue
@@ -1806,6 +1834,15 @@ class OcrManager:
                     for region in getattr(provider, "last_image_regions_px", [])
                     if isinstance(region, list) and len(region) == 4
                 ]
+                self.last_layout_blocks = [
+                    dict(block)
+                    for block in getattr(provider, "last_layout_blocks", [])
+                    if isinstance(block, dict)
+                ]
+                layout_debug = getattr(provider, "last_layout_analysis_debug", None)
+                self.last_layout_analysis_debug = (
+                    dict(layout_debug) if isinstance(layout_debug, dict) else None
+                )
                 if isinstance(provider, AiOcrClient):
                     self.last_fallback_reason = None
                 elif self.ai_provider_disabled:
@@ -1997,12 +2034,41 @@ def _sample_text_color(image: Image.Image, bbox: List[float]) -> str:
     y0 = _clamp_int(y0, 0, height - 1)
     x1 = _clamp_int(x1, 0, width - 1)
     y1 = _clamp_int(y1, 0, height - 1)
+    if x1 <= x0 or y1 <= y0:
+        return "#000000"
+
+    def _pixel_rgb(px: int, py: int) -> tuple[int, int, int]:
+        raw = image.getpixel((px, py))  # type: ignore[misc]
+        if isinstance(raw, int):
+            v = int(raw)
+            return (v, v, v)
+        if isinstance(raw, tuple):
+            if len(raw) >= 3:
+                return (int(raw[0]), int(raw[1]), int(raw[2]))
+            if len(raw) == 1:
+                v = int(raw[0])
+                return (v, v, v)
+        return (0, 0, 0)
+
+    def _median_rgb(values: list[tuple[int, int, int]]) -> tuple[int, int, int]:
+        if not values:
+            return (0, 0, 0)
+        rs = sorted(v[0] for v in values)
+        gs = sorted(v[1] for v in values)
+        bs = sorted(v[2] for v in values)
+        mid = len(values) // 2
+        return (int(rs[mid]), int(gs[mid]), int(bs[mid]))
+
+    def _luma(rgb: tuple[int, int, int]) -> float:
+        return 0.2126 * float(rgb[0]) + 0.7152 * float(rgb[1]) + 0.0722 * float(rgb[2])
 
     cx = (x0 + x1) // 2
     cy = (y0 + y1) // 2
+    box_w = max(1, int(x1 - x0))
+    box_h = max(1, int(y1 - y0))
 
     # Estimate local background from samples just *outside* the bbox.
-    pad = 3
+    pad = max(3, min(12, int(round(max(box_w, box_h) * 0.03))))
     bg_points = [
         (x0 - pad, y0 - pad),
         (x1 + pad, y0 - pad),
@@ -2017,65 +2083,75 @@ def _sample_text_color(image: Image.Image, bbox: List[float]) -> str:
     for px, py in bg_points:
         px = _clamp_int(px, 0, width - 1)
         py = _clamp_int(py, 0, height - 1)
-        r, g, b = image.getpixel((px, py))  # type: ignore[misc]
-        bg_samples.append((int(r), int(g), int(b)))
+        bg_samples.append(_pixel_rgb(px, py))
 
     if not bg_samples:
-        br, bg, bb = 255.0, 255.0, 255.0
+        bg_rgb = (255, 255, 255)
     else:
-        # Median is more robust than mean when the outside samples hit a glyph
-        # or a nearby icon/highlight.
-        rs = sorted(c[0] for c in bg_samples)
-        gs = sorted(c[1] for c in bg_samples)
-        bs = sorted(c[2] for c in bg_samples)
-        mid = len(rs) // 2
-        br, bg, bb = float(rs[mid]), float(gs[mid]), float(bs[mid])
+        bg_rgb = _median_rgb(bg_samples)
 
-    bg_luma = 0.2126 * br + 0.7152 * bg + 0.0722 * bb
+    br, bg, bb = float(bg_rgb[0]), float(bg_rgb[1]), float(bg_rgb[2])
+    bg_luma = _luma(bg_rgb)
 
-    # Candidate "foreground" samples inside bbox. Prefer the most contrasting,
-    # but make the result less noisy by averaging a few extreme samples.
-    fg_points: list[tuple[int, int]] = []
-    grid_x = 6
-    grid_y = 4
-    for gx in range(1, grid_x):
-        for gy in range(1, grid_y):
-            px = x0 + (x1 - x0) * gx // grid_x
-            py = y0 + (y1 - y0) * gy // grid_y
-            fg_points.append((int(px), int(py)))
+    # Densely scan the bbox and keep only pixels that behave like foreground ink
+    # against the local background. This is much more robust than a sparse inner
+    # grid for large paragraph boxes with thin multi-line glyph strokes.
+    area = float(max(1, box_w * box_h))
+    step = max(1, min(6, int(round(math.sqrt(area / 2400.0)))))
 
     candidates: list[
-        tuple[float, float, tuple[int, int, int]]
-    ] = []  # (dist, luma, rgb)
-    for px, py in fg_points:
-        px = _clamp_int(px, 0, width - 1)
-        py = _clamp_int(py, 0, height - 1)
-        r, g, b = image.getpixel((px, py))  # type: ignore[misc]
-        dist = (float(r) - br) ** 2 + (float(g) - bg) ** 2 + (float(b) - bb) ** 2
-        luma = 0.2126 * float(r) + 0.7152 * float(g) + 0.0722 * float(b)
-        candidates.append((dist, luma, (int(r), int(g), int(b))))
+        tuple[float, float, float, tuple[int, int, int], bool]
+    ] = []  # (contrast, dist, luma, rgb, preferred_direction)
+    for py in range(y0, y1 + 1, step):
+        for px in range(x0, x1 + 1, step):
+            rgb = _pixel_rgb(px, py)
+            luma = _luma(rgb)
+            contrast = abs(luma - bg_luma)
+            dist = (
+                (float(rgb[0]) - br) ** 2
+                + (float(rgb[1]) - bg) ** 2
+                + (float(rgb[2]) - bb) ** 2
+            )
+            preferred_direction = (
+                (luma <= (bg_luma - 8.0))
+                if bg_luma >= 128.0
+                else (luma >= (bg_luma + 8.0))
+            )
+            candidates.append((contrast, dist, luma, rgb, preferred_direction))
 
     if not candidates:
         return "#000000"
 
-    # Keep only pixels that are meaningfully different from background.
-    candidates.sort(key=lambda t: t[0], reverse=True)
-    top = [c for c in candidates[:10] if c[0] >= 400.0]  # (>=20 rgb distance)
-    if not top:
-        top = candidates[:5]
+    preferred = [c for c in candidates if c[4] and c[0] >= 14.0]
+    if len(preferred) < 8:
+        preferred = [c for c in candidates if c[0] >= 18.0]
+    if len(preferred) < 4:
+        preferred = [c for c in candidates if c[4] and c[1] >= 900.0]
+    if len(preferred) < 3:
+        preferred = sorted(candidates, key=lambda t: (t[0], t[1]), reverse=True)[:12]
 
-    # If the background is light, text tends to be dark (lower luma), and vice
-    # versa. Pick a few candidates consistent with that and average.
+    preferred.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    keep_n = len(preferred)
+    if keep_n >= 12:
+        keep_n = max(6, min(96, keep_n // 4))
+    top = preferred[:keep_n]
+
     if bg_luma >= 128.0:
-        top.sort(key=lambda t: t[1])  # darker first
+        darker = [c for c in top if c[2] <= (bg_luma - 6.0)]
+        if darker:
+            top = darker
+        top.sort(key=lambda t: t[2])
     else:
-        top.sort(key=lambda t: t[1], reverse=True)  # lighter first
+        lighter = [c for c in top if c[2] >= (bg_luma + 6.0)]
+        if lighter:
+            top = lighter
+        top.sort(key=lambda t: t[2], reverse=True)
 
-    chosen = top[:3] if len(top) >= 3 else top[:1]
-    r = int(round(sum(c[2][0] for c in chosen) / len(chosen)))
-    g = int(round(sum(c[2][1] for c in chosen) / len(chosen)))
-    b = int(round(sum(c[2][2] for c in chosen) / len(chosen)))
-    return _rgb_to_hex((max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))))
+    chosen_rgbs = [c[3] for c in top[:24]] or [candidates[0][3]]
+    rgb = _median_rgb(chosen_rgbs)
+    if abs(_luma(rgb) - bg_luma) < 18.0:
+        rgb = (17, 17, 17) if bg_luma >= 128.0 else (245, 245, 245)
+    return _rgb_to_hex(rgb)
 
 
 def _contains_cjk(text: str) -> bool:
@@ -2615,25 +2691,16 @@ def _build_primary_ocr_quality_notes(
         h = max(1.0, float(y1 - y0))
         cx = (float(x0) + float(x1)) / 2.0
 
-        if (
-            h >= max(1.7 * median_h, 0.075 * float(H))
-            or (w >= 0.22 * float(W) and len(compact) >= 20)
+        if h >= max(1.7 * median_h, 0.075 * float(H)) or (
+            w >= 0.22 * float(W) and len(compact) >= 20
         ):
             large_boxes += 1
-        if (
-            w <= 0.18 * float(W)
-            and h <= 0.08 * float(H)
-            and len(compact) <= 24
-        ):
+        if w <= 0.18 * float(W) and h <= 0.08 * float(H) and len(compact) <= 24:
             small_boxes += 1
         if cx >= 0.58 * float(W):
             right_boxes += 1
 
-    if (
-        large_boxes >= max(4, count - 2)
-        and small_boxes <= 1
-        and right_boxes <= 1
-    ):
+    if large_boxes >= max(4, count - 2) and small_boxes <= 1 and right_boxes <= 1:
         return [
             "paddle_vl_sparse_slide_layout:"
             f" items={count}"
@@ -3587,7 +3654,9 @@ def ocr_image_to_elements(
     provider_id = str(getattr(ocr_manager, "provider_id", "") or "").lower()
     ai_primary_fallback_mode = provider_id in {"aiocr", "paddle"}
     ai_provider_used_for_page = last_provider_name == "AiOcrClient"
-    skip_ai_refiners_for_page = ai_primary_fallback_mode and not ai_provider_used_for_page
+    skip_ai_refiners_for_page = (
+        ai_primary_fallback_mode and not ai_provider_used_for_page
+    )
     effective_linebreak_refiner = (
         None if skip_ai_refiners_for_page else linebreak_refiner
     )
@@ -3602,11 +3671,7 @@ def ocr_image_to_elements(
             merged_items = effective_linebreak_refiner.assist_line_breaks(
                 image_path,
                 items=merged_items,
-                # Heuristic line splitting is a local layout post-process, not
-                # an OCR provider fallback. Keep it available even in strict
-                # mode so coarse boxes from doc-oriented OCR models do not slip
-                # through unchanged when the visual refiner returns no splits.
-                allow_heuristic_fallback=True,
+                allow_heuristic_fallback=False,
             )
         except Exception as e:
             logger.warning("AI OCR line-break assist failed: %s", e)
@@ -3688,6 +3753,8 @@ def ocr_image_to_elements(
                 "ocr_model": item.get("model"),
                 "ocr_linebreak_assisted": bool(item.get("linebreak_assisted")),
                 "ocr_linebreak_assist_source": item.get("linebreak_assist_source"),
+                "ocr_layout_geometry_source": item.get("ocr_layout_geometry_source"),
+                "ocr_layout_geometry_kind": item.get("ocr_layout_geometry_kind"),
             }
         )
 

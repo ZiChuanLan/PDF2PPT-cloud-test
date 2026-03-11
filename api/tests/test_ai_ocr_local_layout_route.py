@@ -5,8 +5,9 @@ import threading
 import time
 import types
 from pathlib import Path
+from typing import cast
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ if str(API_ROOT) not in sys.path:
     sys.path.insert(0, str(API_ROOT))
 
 from app.convert.ocr import ai_client as ai_client_module
+from app.convert.ocr import local_providers
 from app.convert.ocr.routing import ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR
 
 
@@ -107,6 +109,151 @@ def test_extract_local_layout_blocks_marks_image_regions(monkeypatch) -> None:
     assert image_regions == [[140.0, 20.0, 240.0, 120.0]]
 
 
+def test_extract_local_layout_blocks_preserves_polygon_geometry(monkeypatch) -> None:
+    _patch_openai_and_adapter(monkeypatch)
+
+    client = ai_client_module.AiOcrClient(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="Qwen/Qwen2.5-VL-72B-Instruct",
+        provider="openai",
+        layout_model="pp_doclayout_v3",
+        route_kind=ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR,
+    )
+
+    layout_blocks, image_regions = client._extract_local_layout_blocks(
+        {
+            "res": {
+                "boxes": [
+                    {
+                        "label": "figure",
+                        "score": 0.91,
+                        "order": 2,
+                        "polygon_points": [[20, 20], [100, 24], [92, 84], [26, 78]],
+                    }
+                ]
+            }
+        }
+    )
+
+    assert image_regions == [[20.0, 20.0, 100.0, 84.0]]
+    assert layout_blocks[0]["geometry_source"] == "polygon_points"
+    assert layout_blocks[0]["geometry_kind"] == "polygon"
+    assert layout_blocks[0]["geometry_points"] == [
+        [20.0, 20.0],
+        [100.0, 24.0],
+        [92.0, 84.0],
+        [26.0, 78.0],
+    ]
+    layout_debug = client.last_layout_analysis_debug
+    assert layout_debug is not None
+    assert layout_debug["raw_boxes"][0]["geometry_kind"] == "polygon"
+
+
+def test_crop_layout_block_masks_polygon_geometry(monkeypatch) -> None:
+    _patch_openai_and_adapter(monkeypatch)
+
+    client = ai_client_module.AiOcrClient(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="Qwen/Qwen2.5-VL-72B-Instruct",
+        provider="openai",
+        layout_model="pp_doclayout_v3",
+        route_kind=ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR,
+    )
+
+    image = Image.new("RGB", (120, 120), "white")
+    draw = ImageDraw.Draw(image)
+    bbox = [20.0, 20.0, 100.0, 100.0]
+    draw.rectangle(bbox, fill=(255, 0, 0))
+    polygon = [[60.0, 20.0], [100.0, 60.0], [60.0, 100.0], [20.0, 60.0]]
+    draw.polygon([(x, y) for x, y in polygon], fill=(0, 0, 0))
+
+    crop = client._crop_layout_block(image=image, bbox=bbox, geometry_points=polygon)
+
+    assert crop is not None
+    pad_x = min(24, max(2, int(round((bbox[2] - bbox[0]) * 0.03))))
+    pad_y = min(24, max(2, int(round((bbox[3] - bbox[1]) * 0.18))))
+    assert crop.getpixel((pad_x + 4, pad_y + 4)) == (255, 255, 255)
+    assert crop.getpixel((pad_x + 40, pad_y + 40)) == (0, 0, 0)
+
+
+def test_ocr_image_to_elements_keeps_layout_geometry_metadata(monkeypatch) -> None:
+    manager = cast(
+        local_providers.OcrManager,
+        types.SimpleNamespace(
+            ocr_image_lines=lambda _image_path, **_kwargs: [
+                {
+                    "bbox": [10.0, 8.0, 70.0, 28.0],
+                    "text": "Yellowstone",
+                    "confidence": 0.93,
+                    "provider": "aiocr",
+                    "model": "Qwen/Qwen2.5-VL-72B-Instruct",
+                    "linebreak_assisted": True,
+                    "linebreak_assist_source": "ai",
+                    "ocr_layout_geometry_source": "polygon_points",
+                    "ocr_layout_geometry_kind": "polygon",
+                }
+            ],
+            convert_bbox_to_pdf_coords=lambda **kwargs: kwargs["bbox"],
+            last_provider_name="AiOcrClient",
+            provider_id="aiocr",
+        ),
+    )
+
+    monkeypatch.setattr(
+        local_providers, "_dedupe_overlapping_ocr_items", lambda items: items
+    )
+    monkeypatch.setattr(
+        local_providers, "_filter_contextual_noise_items", lambda items, **kwargs: items
+    )
+
+    image_path = Path("/tmp/local-layout-geometry.png")
+    Image.new("RGB", (100, 60), "white").save(image_path)
+
+    elements = local_providers.ocr_image_to_elements(
+        image_path=str(image_path),
+        ocr_manager=manager,
+        page_width_pt=100.0,
+        page_height_pt=60.0,
+    )
+
+    assert len(elements) == 1
+    assert elements[0]["ocr_layout_geometry_source"] == "polygon_points"
+    assert elements[0]["ocr_layout_geometry_kind"] == "polygon"
+
+
+def test_sample_text_color_prefers_dark_ink_for_large_paragraph_bbox() -> None:
+    bg_rgb = (244, 241, 234)
+    ink_rgb = (12, 12, 10)
+
+    image = Image.new("RGB", (420, 220), bg_rgb)
+    draw = ImageDraw.Draw(image)
+    bbox = [20.0, 20.0, 380.0, 180.0]
+
+    # Simulate several thin paragraph lines placed away from the old sparse
+    # 5x3 inner-grid sample rows so the regression exercises dense ink sampling.
+    line_specs = [
+        (40, 48, 36, 364),
+        (84, 92, 28, 370),
+        (128, 136, 42, 352),
+    ]
+    for y0, y1, x0, x1 in line_specs:
+        draw.rectangle([x0, y0, x1, y1], fill=ink_rgb)
+        # Break the strips into text-like segments instead of solid bars.
+        draw.rectangle([x0 + 48, y0, x0 + 62, y1], fill=bg_rgb)
+        draw.rectangle([x0 + 120, y0, x0 + 138, y1], fill=bg_rgb)
+        draw.rectangle([x0 + 210, y0, x0 + 224, y1], fill=bg_rgb)
+
+    sampled_hex = local_providers._sample_text_color(image, bbox)
+    r = int(sampled_hex[1:3], 16)
+    g = int(sampled_hex[3:5], 16)
+    b = int(sampled_hex[5:7], 16)
+    sampled_luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    assert sampled_luma < 96.0
+
+
 def test_layout_block_route_ocr_image_uses_local_layout_blocks(
     monkeypatch,
     tmp_path,
@@ -169,9 +316,7 @@ def test_layout_block_route_ocr_image_uses_local_layout_blocks(
     ]
     assert client.last_image_regions_px == [[140.0, 20.0, 240.0, 120.0]]
     assert client.last_layout_blocks[0]["text"] == "Recognized Title"
-    assert client.detect_image_regions(str(image_path)) == [
-        [140.0, 20.0, 240.0, 120.0]
-    ]
+    assert client.detect_image_regions(str(image_path)) == [[140.0, 20.0, 240.0, 120.0]]
 
 
 def test_layout_block_route_upscales_tiny_qwen3_crops(
@@ -416,8 +561,9 @@ def test_local_layout_analysis_serializes_shared_model_predict(
         sys.modules,
         "paddlex",
         types.SimpleNamespace(
-            create_model=lambda model_name: create_model_calls.append(model_name)
-            or fake_model
+            create_model=lambda model_name: (
+                create_model_calls.append(model_name) or fake_model
+            )
         ),
     )
     monkeypatch.setattr(ai_client_module.AiOcrClient, "_local_layout_model", None)
@@ -477,3 +623,54 @@ def test_local_layout_analysis_serializes_shared_model_predict(
     assert fake_model.max_active == 1
     assert results["a"][0][0]["bbox"] == [10.0, 10.0, 110.0, 40.0]
     assert results["b"][0][0]["bbox"] == [200.0, 200.0, 320.0, 260.0]
+
+
+def test_layout_block_crop_retries_timeout_once_for_qwen(monkeypatch) -> None:
+    _patch_openai_and_adapter(monkeypatch)
+
+    client = ai_client_module.AiOcrClient(
+        api_key="test-key",
+        base_url="https://api.siliconflow.cn/v1",
+        model="Qwen/Qwen2.5-VL-72B-Instruct",
+        provider="siliconflow",
+        layout_model="pp_doclayout_v3",
+        route_kind=ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR,
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_chat_completion(**kwargs):
+        calls.append(
+            {
+                "timeout_s": kwargs.get("timeout_s"),
+                "request_label": kwargs.get("request_label"),
+            }
+        )
+        if len(calls) == 1:
+            raise TimeoutError("Request timed out.")
+        return types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content="Recovered layout block text")
+                )
+            ]
+        )
+
+    monkeypatch.setattr(client, "_chat_completion", _fake_chat_completion)
+
+    text = client._ocr_local_layout_block_crop(
+        data_uri="data:image/png;base64,AAAA",
+        label="text",
+        crop_width=1247,
+        crop_height=221,
+        effective_model="Qwen/Qwen2.5-VL-72B-Instruct",
+    )
+
+    assert text == "Recovered layout block text"
+    assert len(calls) == 2
+    assert calls[0]["request_label"] == "layout_block_crop"
+    assert calls[1]["request_label"] == "layout_block_crop_retry"
+    first_timeout = cast(float, calls[0]["timeout_s"])
+    second_timeout = cast(float, calls[1]["timeout_s"])
+    assert first_timeout >= 40.0
+    assert second_timeout > first_timeout
