@@ -190,8 +190,11 @@ def build_ai_ocr_layout_block_prompt(
 
     if preset == "deepseek_ocr":
         return (
-            "<image>\n<|grounding|>OCR this cropped document block. "
-            "Return only the recognized text."
+            "Read the cropped document text block and return plain text only. "
+            f"Block label: {values['block_label']}. "
+            f"Crop size: {values['crop_width']}x{values['crop_height']} px. "
+            "Preserve obvious line breaks. Do not output grounding tags, JSON, markdown, or explanations. "
+            "Return empty string if unreadable."
         )
     if preset == "qwen_vl":
         return (

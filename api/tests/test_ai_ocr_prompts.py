@@ -77,3 +77,18 @@ def test_prompt_builders_use_custom_overrides() -> None:
     assert direct == "OCR 1024x768 <= 32"
     assert layout == "Block title 300x80"
     assert image_region == "Detect 1280x720"
+
+
+def test_deepseek_layout_block_prompt_uses_plain_text_instead_of_grounding() -> None:
+    prompt = build_ai_ocr_layout_block_prompt(
+        preset="deepseek_ocr",
+        label="paragraph_title",
+        crop_width=640,
+        crop_height=120,
+    )
+
+    assert "<|grounding|>" not in prompt
+    assert "<|ref|>" not in prompt
+    assert "<|det|>" not in prompt
+    assert "plain text only" in prompt.lower()
+    assert "paragraph_title" in prompt

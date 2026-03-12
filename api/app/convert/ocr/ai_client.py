@@ -2504,6 +2504,16 @@ class AiOcrClient(OcrProvider):
             return crop
         return crop.resize((target_width, target_height), Image.Resampling.LANCZOS)
 
+    def _should_skip_layout_block_for_ocr(self, *, label: str) -> bool:
+        normalized = _normalize_layout_label(label)
+        if not normalized:
+            return False
+        if normalized in {"footer", "page_number"}:
+            return True
+        if normalized.endswith("_footer") or normalized.startswith("page_number"):
+            return True
+        return False
+
     def _ocr_local_layout_block_crop(
         self,
         *,
@@ -2613,6 +2623,13 @@ class AiOcrClient(OcrProvider):
         for index, block in enumerate(layout_blocks):
             label = str(block.get("label") or "")
             if _is_image_like_layout_label(label):
+                continue
+            if self._should_skip_layout_block_for_ocr(label=label):
+                if index < len(self.last_layout_blocks):
+                    self.last_layout_blocks[index]["ocr_skipped"] = True
+                    self.last_layout_blocks[index]["ocr_skip_reason"] = (
+                        "low_value_layout_label"
+                    )
                 continue
             bbox = block.get("bbox")
             if not isinstance(bbox, list) or len(bbox) != 4:
@@ -3431,12 +3448,36 @@ class AiOcrClient(OcrProvider):
             return []
 
         if self._uses_local_layout_block_ocr():
-            result = self._ocr_image_with_local_layout_blocks(
-                image_path,
-                image=image,
-            )
-            self._refresh_route_kind()
-            return result
+            try:
+                result = self._ocr_image_with_local_layout_blocks(
+                    image_path,
+                    image=image,
+                )
+            except Exception as exc:
+                if not _is_deepseek_ocr_model(self.model):
+                    raise
+                logger.warning(
+                    "Local layout_block OCR failed; falling back to direct page OCR"
+                    " (provider=%s, model=%s, image=%s, error=%s)",
+                    self.provider_id,
+                    self.model,
+                    Path(image_path).name,
+                    exc,
+                )
+            else:
+                if result:
+                    self._refresh_route_kind()
+                    return result
+                if not _is_deepseek_ocr_model(self.model):
+                    self._refresh_route_kind()
+                    return result
+                logger.warning(
+                    "Local layout_block OCR returned no usable text; falling back to direct page OCR"
+                    " (provider=%s, model=%s, image=%s)",
+                    self.provider_id,
+                    self.model,
+                    Path(image_path).name,
+                )
 
         is_paddle_model = _is_paddleocr_vl_model(self.model)
         should_use_doc_parser = self._uses_remote_doc_parser()
