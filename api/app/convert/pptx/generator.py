@@ -208,6 +208,34 @@ def _page_needs_ocr_sampling_render(
     return False
 
 
+def _should_center_scanned_heading(
+    *,
+    x0_pt: float,
+    x1_pt: float,
+    page_w_pt: float,
+) -> bool:
+    """Return whether a scanned-page heading bbox looks visually centered."""
+
+    page_w = max(1.0, float(page_w_pt))
+    x0 = max(0.0, min(float(x0_pt), page_w))
+    x1 = max(0.0, min(float(x1_pt), page_w))
+    if x1 <= x0:
+        return False
+
+    page_center_x = 0.5 * page_w
+    bbox_center_x = 0.5 * (x0 + x1)
+    left_margin = x0
+    right_margin = page_w - x1
+
+    center_tolerance_pt = max(20.0, min(54.0, 0.055 * page_w))
+    margin_tolerance_pt = max(24.0, min(72.0, 0.07 * page_w))
+
+    return bool(
+        abs(bbox_center_x - page_center_x) <= center_tolerance_pt
+        and abs(left_margin - right_margin) <= margin_tolerance_pt
+    )
+
+
 def _merge_text_erase_bboxes(
     boxes: list[list[float]],
     *,
@@ -1131,6 +1159,14 @@ def generate_pptx_from_ir(
                     and bbox_h_pt >= 1.6 * float(baseline_ocr_h_pt)
                     and len(text) <= 40
                 )
+                center_heading = bool(
+                    is_heading
+                    and _should_center_scanned_heading(
+                        x0_pt=float(x0),
+                        x1_pt=float(x1),
+                        page_w_pt=float(page_w_pt),
+                    )
+                )
 
                 # We'll nudge OCR text boxes slightly upward and extend their
                 # height by a tiny amount (see below). Feed that slack into the
@@ -1295,7 +1331,7 @@ def generate_pptx_from_ir(
 
                 for p in tf.paragraphs:
                     try:
-                        if is_heading:
+                        if center_heading:
                             p.alignment = PP_ALIGN.CENTER
                     except Exception:
                         pass
@@ -1317,11 +1353,7 @@ def generate_pptx_from_ir(
                             font.name = "Microsoft YaHei"
                         else:
                             font.name = _map_font_name(el.get("font_name")) or "Arial"
-                        font.bold = (
-                            True
-                            if is_heading
-                            else (bool(el.get("bold")) if "bold" in el else None)
-                        )
+                        font.bold = bool(el.get("bold")) if "bold" in el else None
                         font.italic = bool(el.get("italic")) if "italic" in el else None
 
                         rgb = _hex_to_rgb(el.get("color"))

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from PIL import Image
+from pptx import Presentation
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +91,26 @@ def test_page_sampling_render_keeps_render_for_ambiguous_long_box() -> None:
     )
 
     assert needs_render is True
+
+
+def test_scanned_heading_centering_rejects_left_aligned_title() -> None:
+    should_center = generator._should_center_scanned_heading(
+        x0_pt=36.0,
+        x1_pt=220.0,
+        page_w_pt=720.0,
+    )
+
+    assert should_center is False
+
+
+def test_scanned_heading_centering_accepts_centered_title() -> None:
+    should_center = generator._should_center_scanned_heading(
+        x0_pt=168.0,
+        x1_pt=548.0,
+        page_w_pt=720.0,
+    )
+
+    assert should_center is True
 
 
 def test_generate_pptx_skips_final_preview_export_when_disabled(
@@ -239,6 +260,74 @@ def test_generate_pptx_reports_progress_for_scanned_pages(
 
     assert out_path.exists()
     assert progress_events == [(1, 1)]
+
+
+def test_generate_pptx_scanned_heading_keeps_left_title_uncentered_and_unforced_bold(
+    monkeypatch, tmp_path: Path
+) -> None:
+    def _fake_render_pdf_page_png(
+        _source_pdf: Path,
+        *,
+        page_index: int,
+        dpi: int,
+        out_path: Path,
+    ):
+        del page_index, dpi
+        img = Image.new("RGB", (800, 450), color=(255, 255, 255))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(out_path)
+        return img
+
+    monkeypatch.setattr(generator, "_render_pdf_page_png", _fake_render_pdf_page_png)
+    monkeypatch.setattr(
+        generator,
+        "_build_scanned_image_region_infos",
+        lambda **_kwargs: [],
+    )
+
+    source_pdf = tmp_path / "input-left-title.pdf"
+    source_pdf.write_bytes(b"%PDF-1.4\n%stub\n")
+
+    out_path = generator.generate_pptx_from_ir(
+        {
+            "source_pdf": str(source_pdf),
+            "pages": [
+                {
+                    "page_index": 0,
+                    "page_width_pt": 720.0,
+                    "page_height_pt": 405.0,
+                    "has_text_layer": False,
+                    "elements": [
+                        {
+                            "type": "text",
+                            "source": "ocr",
+                            "text": "Local-first MCP",
+                            "bbox_pt": [36.0, 44.0, 240.0, 82.0],
+                            "color": "#111111",
+                        }
+                    ],
+                }
+            ],
+        },
+        tmp_path / "scanned-left-title.pptx",
+        artifacts_dir=tmp_path / "scanned-left-title-artifacts",
+        export_final_preview_images=False,
+    )
+
+    prs = Presentation(str(out_path))
+    slide = prs.slides[0]
+    text_shapes = [
+        shape
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+        and shape.text_frame is not None
+        and shape.text.strip()
+    ]
+
+    assert len(text_shapes) == 1
+    paragraph = text_shapes[0].text_frame.paragraphs[0]
+    assert paragraph.alignment is None
+    assert paragraph.runs[0].font.bold is None
 
 
 def test_generate_pptx_fast_mode_skips_image_region_analysis_and_preview_export(
