@@ -434,6 +434,47 @@ def _is_notebooklm_footer_text_element(
     )
 
 
+def _build_notebooklm_footer_fill_overlays(
+    *,
+    footer_elements: list[dict[str, Any]],
+    render_pix: Any | None,
+    page_h_pt: float,
+    scanned_render_dpi: int,
+    text_erase_mode: str,
+) -> list[tuple[list[float], tuple[int, int, int]]]:
+    """Return local fill overlays for NotebookLM footer cleanup on text pages."""
+
+    if render_pix is None or not footer_elements:
+        return []
+
+    overlays: list[tuple[list[float], tuple[int, int, int]]] = []
+    for el in footer_elements:
+        try:
+            x0, y0, x1, y1 = _coerce_bbox_pt(el.get("bbox_pt"))
+        except Exception:
+            continue
+        if x1 <= x0 or y1 <= y0:
+            continue
+        bbox_h_pt = max(1.0, y1 - y0)
+        pad_x_pt, pad_y_pt = _compute_text_erase_padding_pt(
+            bbox_h_pt=bbox_h_pt,
+            text_erase_mode=text_erase_mode,
+        )
+        fill_rgb = _sample_bbox_background_rgb(
+            render_pix,
+            bbox_pt=[x0, y0, x1, y1],
+            page_height_pt=float(page_h_pt),
+            dpi=int(scanned_render_dpi),
+        )
+        overlays.append(
+            (
+                [x0 - pad_x_pt, y0 - pad_y_pt, x1 + pad_x_pt, y1 + pad_y_pt],
+                fill_rgb,
+            )
+        )
+    return overlays
+
+
 def generate_pptx_from_ir(
     ir: dict[str, Any],
     output_pptx_path: str | Path,
@@ -497,6 +538,8 @@ def generate_pptx_from_ir(
         MSO_AUTO_SIZE = getattr(text_enums, "MSO_AUTO_SIZE")
         MSO_ANCHOR = getattr(text_enums, "MSO_ANCHOR")
         PP_ALIGN = getattr(text_enums, "PP_ALIGN")
+        shape_enums = importlib.import_module("pptx.enum.shapes")
+        MSO_AUTO_SHAPE_TYPE = getattr(shape_enums, "MSO_AUTO_SHAPE_TYPE")
         util = importlib.import_module("pptx.util")
         Emu = getattr(util, "Emu")
         Pt = getattr(util, "Pt")
@@ -1517,6 +1560,29 @@ def generate_pptx_from_ir(
                     ocr_sampling_pix = None
                 mineru_render_pix = None
 
+        footer_fill_overlays: list[tuple[list[float], tuple[int, int, int]]] = []
+        if page_text_elements_footer_removed and not mineru_background_placed:
+            if ocr_sampling_pix is None and source_pdf.exists():
+                try:
+                    footer_render_path = (
+                        artifacts / "page_renders" / f"page-{page_index:04d}.footer.png"
+                    )
+                    ocr_sampling_pix = _render_pdf_page_png(
+                        source_pdf,
+                        page_index=page_index,
+                        dpi=int(scanned_render_dpi),
+                        out_path=footer_render_path,
+                    )
+                except Exception:
+                    ocr_sampling_pix = None
+            footer_fill_overlays = _build_notebooklm_footer_fill_overlays(
+                footer_elements=page_text_elements_footer_removed,
+                render_pix=ocr_sampling_pix,
+                page_h_pt=float(page_h_pt),
+                scanned_render_dpi=int(scanned_render_dpi),
+                text_erase_mode=text_erase_mode_id,
+            )
+
         for el in _iter_page_elements(page, type_name="image"):
             bbox_pt = el.get("bbox_pt")
             image_path = el.get("image_path")
@@ -1615,6 +1681,29 @@ def generate_pptx_from_ir(
                     table.cell(r, c).text = text
             else:
                 # No structured cells; leave empty for now.
+                pass
+
+        for bbox_pt, fill_rgb in footer_fill_overlays:
+            try:
+                left, top, width, height = _bbox_pt_to_slide_emu(
+                    bbox_pt, transform=transform
+                )
+            except Exception:
+                continue
+            if width <= 0 or height <= 0:
+                continue
+            cover_shape = slide.shapes.add_shape(
+                MSO_AUTO_SHAPE_TYPE.RECTANGLE,
+                Emu(left),
+                Emu(top),
+                Emu(width),
+                Emu(height),
+            )
+            cover_shape.fill.solid()
+            cover_shape.fill.fore_color.rgb = RGBColor(*fill_rgb)
+            try:
+                cover_shape.line.fill.background()
+            except Exception:
                 pass
 
         for el in page_text_elements_render:

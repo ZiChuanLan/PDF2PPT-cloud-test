@@ -904,16 +904,25 @@ def _fit_ocr_text_style(
         max(7.0, float(bbox_h_pt) * (0.98 if is_heading else 0.94)),
     )
 
-    def _fit_single_candidate() -> tuple[str, float, int, float]:
+    def _fit_single_candidate(
+        *,
+        max_pt_override: float | None = None,
+        height_fit_ratio: float = 0.995,
+    ) -> tuple[str, float, int, float]:
+        resolved_max_pt = (
+            float(max_pt)
+            if max_pt_override is None
+            else max(float(min_pt), float(max_pt_override))
+        )
         font_size_pt = _fit_font_size_pt(
             normalized,
             bbox_w_pt=float(bbox_w_pt),
             bbox_h_pt=float(bbox_h_pt),
             wrap=False,
             min_pt=float(min_pt),
-            max_pt=float(max_pt),
+            max_pt=float(resolved_max_pt),
             width_fit_ratio=1.00,
-            height_fit_ratio=0.995,
+            height_fit_ratio=float(height_fit_ratio),
         )
         fill_ratio = (float(font_size_pt) * float(line_height)) / max(
             1.0, float(bbox_h_pt)
@@ -1018,4 +1027,32 @@ def _fit_ocr_text_style(
 
     if choose_wrap and wrapped_lines >= 2:
         return (wrapped_text, float(wrapped_font_pt), True)
+
+    # If we are staying single-line, do one more pass that tries to fill the OCR
+    # box geometrically instead of stopping at the generic body-text cap. This
+    # helps large OCR title boxes that were not classified as headings.
+    if not explicit_multiline:
+        allow_single_line_fill_expand = bool(
+            is_heading
+            or wrap_override is False
+            or compact_len <= 56
+            or bbox_h_pt >= (1.12 * float(baseline_ocr_h_pt))
+        )
+        if allow_single_line_fill_expand:
+            expanded_max_pt = min(96.0, max(float(max_pt), 0.995 * float(bbox_h_pt)))
+            if expanded_max_pt > (float(single_font_pt) + 0.8):
+                _, expanded_font_pt, _expanded_lines, expanded_fill = (
+                    _fit_single_candidate(
+                        max_pt_override=float(expanded_max_pt),
+                        height_fit_ratio=0.999,
+                    )
+                )
+                if (
+                    expanded_font_pt >= max(
+                        float(single_font_pt) + 0.8,
+                        float(single_font_pt) * 1.08,
+                    )
+                    and expanded_fill >= min(0.995, float(single_fill) + 0.10)
+                ):
+                    return (single_text, float(expanded_font_pt), False)
     return (single_text, float(single_font_pt), False)

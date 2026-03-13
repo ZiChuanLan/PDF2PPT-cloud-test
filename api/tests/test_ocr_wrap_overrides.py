@@ -130,3 +130,17 @@ def test_forced_single_line_veto_still_holds_for_short_label_text():
 
     assert recovered[2] is False
     assert "\n" not in recovered[0]
+
+
+def test_single_line_ocr_text_expands_to_fill_tall_wide_bbox():
+    recovered = font_utils._fit_ocr_text_style(
+        text="释放未来·构建你的第一个AI智能体",
+        bbox_w_pt=1168.46,
+        bbox_h_pt=80.4,
+        baseline_ocr_h_pt=63.0,
+        is_heading=False,
+    )
+
+    assert recovered[2] is False
+    assert "\n" not in recovered[0]
+    assert recovered[1] > 60.0

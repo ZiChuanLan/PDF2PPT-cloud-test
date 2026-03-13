@@ -402,3 +402,74 @@ def test_generate_pptx_fast_mode_skips_image_region_analysis_and_preview_export(
     assert captured_dpis == [120]
     assert image_region_calls["count"] == 0
     assert preview_calls["count"] == 0
+
+
+def test_generate_pptx_text_page_adds_footer_fill_overlay_when_notebooklm_removed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    render_calls: list[str] = []
+
+    def _fake_render_pdf_page_png(
+        _source_pdf: Path,
+        *,
+        page_index: int,
+        dpi: int,
+        out_path: Path,
+    ):
+        del page_index, dpi
+        render_calls.append(out_path.name)
+        img = Image.new("RGB", (800, 450), color=(200, 210, 220))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(out_path)
+        return img
+
+    monkeypatch.setattr(generator, "_render_pdf_page_png", _fake_render_pdf_page_png)
+
+    source_pdf = tmp_path / "input-footer.pdf"
+    source_pdf.write_bytes(b"%PDF-1.4\n%stub\n")
+
+    out_path = generator.generate_pptx_from_ir(
+        {
+            "source_pdf": str(source_pdf),
+            "pages": [
+                {
+                    "page_index": 0,
+                    "page_width_pt": 720.0,
+                    "page_height_pt": 405.0,
+                    "has_text_layer": True,
+                    "elements": [
+                        {
+                            "type": "text",
+                            "source": "pdf",
+                            "text": "Body copy",
+                            "bbox_pt": [48.0, 72.0, 240.0, 92.0],
+                            "color": "#111111",
+                        },
+                        {
+                            "type": "text",
+                            "source": "pdf",
+                            "text": "NotebookLM",
+                            "bbox_pt": [612.0, 372.0, 694.0, 390.0],
+                            "color": "#555555",
+                        },
+                    ],
+                }
+            ],
+        },
+        tmp_path / "footer-overlay.pptx",
+        artifacts_dir=tmp_path / "footer-overlay-artifacts",
+        export_final_preview_images=False,
+        remove_footer_notebooklm=True,
+    )
+
+    prs = Presentation(str(out_path))
+    slide = prs.slides[0]
+
+    assert render_calls == ["page-0000.footer.png"]
+    assert len(slide.shapes) == 2
+    text_values = [
+        shape.text.strip()
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False) and shape.text.strip()
+    ]
+    assert text_values == ["Body copy"]
