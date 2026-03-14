@@ -113,6 +113,34 @@ def test_scanned_heading_centering_accepts_centered_title() -> None:
     assert should_center is True
 
 
+def test_notebooklm_footer_detector_accepts_small_ai_prefix_variants() -> None:
+    page_w_pt = 720.0
+    page_h_pt = 405.0
+
+    assert (
+        generator._is_notebooklm_footer_text_element(
+            {
+                "text": "Ai NotebookLM",
+                "bbox_pt": [610.0, 360.0, 700.0, 382.0],
+            },
+            page_w_pt=page_w_pt,
+            page_h_pt=page_h_pt,
+        )
+        is True
+    )
+    assert (
+        generator._is_notebooklm_footer_text_element(
+            {
+                "text": "Al NotebookLM",
+                "bbox_pt": [610.0, 360.0, 700.0, 382.0],
+            },
+            page_w_pt=page_w_pt,
+            page_h_pt=page_h_pt,
+        )
+        is True
+    )
+
+
 def test_generate_pptx_skips_final_preview_export_when_disabled(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -473,3 +501,102 @@ def test_generate_pptx_text_page_adds_footer_fill_overlay_when_notebooklm_remove
         if getattr(shape, "has_text_frame", False) and shape.text.strip()
     ]
     assert text_values == ["Body copy"]
+
+
+def test_generate_pptx_scanned_page_uses_footer_ocr_fallback_when_ir_has_no_footer(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured_erase_boxes: list[list[list[float]]] = []
+
+    def _fake_render_pdf_page_png(
+        _source_pdf: Path,
+        *,
+        page_index: int,
+        dpi: int,
+        out_path: Path,
+    ):
+        del page_index, dpi
+        img = Image.new("RGB", (800, 450), color=(255, 255, 255))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(out_path)
+        return img
+
+    def _fake_erase_regions_in_render_image(
+        render_path: Path,
+        *,
+        out_path: Path,
+        erase_bboxes_pt: list[list[float]],
+        erase_polygons_pt=None,
+        protect_bboxes_pt=None,
+        page_height_pt: float,
+        dpi: int,
+        text_erase_mode: str = "fill",
+    ) -> Path:
+        del (
+            render_path,
+            erase_polygons_pt,
+            protect_bboxes_pt,
+            page_height_pt,
+            dpi,
+            text_erase_mode,
+        )
+        captured_erase_boxes.append([list(bb) for bb in erase_bboxes_pt])
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (800, 450), color=(255, 255, 255)).save(out_path)
+        return out_path
+
+    monkeypatch.setattr(generator, "_render_pdf_page_png", _fake_render_pdf_page_png)
+    monkeypatch.setattr(
+        generator,
+        "_build_scanned_image_region_infos",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        generator,
+        "_detect_notebooklm_footer_bbox_from_render",
+        lambda **_kwargs: [640.0, 372.0, 700.0, 388.0],
+    )
+    monkeypatch.setattr(
+        generator,
+        "_erase_regions_in_render_image",
+        _fake_erase_regions_in_render_image,
+    )
+
+    source_pdf = tmp_path / "input-scanned-footer.pdf"
+    source_pdf.write_bytes(b"%PDF-1.4\n%stub\n")
+
+    out_path = generator.generate_pptx_from_ir(
+        {
+            "source_pdf": str(source_pdf),
+            "pages": [
+                {
+                    "page_index": 0,
+                    "page_width_pt": 720.0,
+                    "page_height_pt": 405.0,
+                    "has_text_layer": False,
+                    "elements": [
+                        {
+                            "type": "text",
+                            "source": "ocr",
+                            "text": "Body copy",
+                            "bbox_pt": [36.0, 44.0, 240.0, 82.0],
+                            "color": "#111111",
+                        }
+                    ],
+                }
+            ],
+        },
+        tmp_path / "scanned-footer-fallback.pptx",
+        artifacts_dir=tmp_path / "scanned-footer-fallback-artifacts",
+        export_final_preview_images=False,
+        remove_footer_notebooklm=True,
+    )
+
+    assert out_path.exists()
+    assert captured_erase_boxes
+    footer_boxes = [
+        bb
+        for bb in captured_erase_boxes[0]
+        if bb[0] > 630.0 and bb[1] > 365.0 and bb[2] > 700.0 and bb[3] > 388.0
+    ]
+    assert footer_boxes
