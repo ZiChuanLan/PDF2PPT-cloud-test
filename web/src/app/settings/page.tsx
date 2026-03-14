@@ -1431,11 +1431,11 @@ export default function SettingsPage() {
                   htmlFor="scanned-page-mode"
                   hint={
                     settings.pptGenerationMode === "standard"
-                      ? "决定图片是拆成可编辑元素，还是保留在整页背景中。"
+                      ? "决定图片是在最终 PPT 中拆成可编辑元素，还是保留在整页背景中。"
                       : "快速/极速模式下也可以单独控制；若选择拆图，速度会比整页背景略慢。"
                   }
                 >
-                  扫描页图片处理方式
+                  页面图片处理方式
                 </FieldLabel>
                 <Select
                   id="scanned-page-mode"
@@ -1447,8 +1447,8 @@ export default function SettingsPage() {
                     }))
                   }
                 >
-                  <option value="fullpage">图片留在整页背景里（更像原图）</option>
                   <option value="segmented">图片拆出来（可单独编辑）</option>
+                  <option value="fullpage">图片留在整页背景里（更像原图）</option>
                 </Select>
               </div>
 

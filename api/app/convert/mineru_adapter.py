@@ -710,6 +710,18 @@ def _extract_item_kind(item: dict[str, Any]) -> str:
     return ""
 
 
+def _normalize_footer_brand_text(text: str) -> str:
+    return "".join(ch.lower() for ch in str(text or "") if ch.isalnum())
+
+
+def _is_notebooklm_footer_brand_text(text: str) -> bool:
+    normalized = _normalize_footer_brand_text(text)
+    if not normalized or "notebooklm" not in normalized:
+        return False
+    extra = normalized.replace("notebooklm", "")
+    return len(extra) <= 24
+
+
 def _is_image_like_kind(kind: str) -> bool:
     if not kind:
         return False
@@ -1230,6 +1242,172 @@ def _should_prefer_layout_candidate(
     )
 
 
+def _is_notebooklm_footer_ir_element(
+    el: dict[str, Any],
+    *,
+    page_w_pt: float,
+    page_h_pt: float,
+) -> bool:
+    text = _extract_text(el).strip()
+    if not _is_notebooklm_footer_brand_text(text):
+        return False
+
+    bbox = el.get("bbox_pt")
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return False
+
+    try:
+        x0 = float(bbox[0])
+        y0 = float(bbox[1])
+        x1 = float(bbox[2])
+        y1 = float(bbox[3])
+    except Exception:
+        return False
+
+    if x1 <= x0 or y1 <= y0 or page_w_pt <= 0.0 or page_h_pt <= 0.0:
+        return False
+
+    cx = (x0 + x1) / 2.0
+    cy = (y0 + y1) / 2.0
+    width_ratio = float(x1 - x0) / float(page_w_pt)
+    height_ratio = float(y1 - y0) / float(page_h_pt)
+    return (
+        cy >= (0.84 * float(page_h_pt))
+        and cx >= (0.72 * float(page_w_pt))
+        and width_ratio <= 0.22
+        and height_ratio <= 0.08
+    )
+
+
+def _footer_elements_match(
+    existing: dict[str, Any],
+    candidate: dict[str, Any],
+) -> bool:
+    existing_bbox = existing.get("bbox_pt")
+    candidate_bbox = candidate.get("bbox_pt")
+    if (
+        not isinstance(existing_bbox, list)
+        or len(existing_bbox) != 4
+        or not isinstance(candidate_bbox, list)
+        or len(candidate_bbox) != 4
+    ):
+        return False
+
+    existing_text = _normalize_footer_brand_text(_extract_text(existing))
+    candidate_text = _normalize_footer_brand_text(_extract_text(candidate))
+    if existing_text and candidate_text and existing_text != candidate_text:
+        return False
+
+    try:
+        ex0, ey0, ex1, ey1 = [float(v) for v in existing_bbox]
+        cx0, cy0, cx1, cy1 = [float(v) for v in candidate_bbox]
+    except Exception:
+        return False
+
+    inter_left = max(ex0, cx0)
+    inter_top = max(ey0, cy0)
+    inter_right = min(ex1, cx1)
+    inter_bottom = min(ey1, cy1)
+    inter_w = max(0.0, inter_right - inter_left)
+    inter_h = max(0.0, inter_bottom - inter_top)
+    inter_area = inter_w * inter_h
+    if inter_area <= 0.0:
+        return False
+
+    existing_area = max(1.0, (ex1 - ex0) * (ey1 - ey0))
+    candidate_area = max(1.0, (cx1 - cx0) * (cy1 - cy0))
+    overlap_existing = inter_area / existing_area
+    overlap_candidate = inter_area / candidate_area
+    return overlap_existing >= 0.55 or overlap_candidate >= 0.55
+
+
+def _recover_missing_notebooklm_footer_elements(
+    *,
+    ir: dict[str, Any],
+    content_items: list[dict[str, Any]],
+    source_pdf: Path,
+    page_sizes: dict[int, tuple[float, float]],
+    page_start: int | None = None,
+    page_end: int | None = None,
+) -> int:
+    footer_candidates = [
+        item
+        for item in content_items
+        if _is_notebooklm_footer_brand_text(_extract_text(item))
+        and _extract_bbox(item) is not None
+    ]
+    if not footer_candidates:
+        return 0
+
+    footer_ir = _build_ir_from_mineru_outputs(
+        source_pdf=source_pdf,
+        content_items=footer_candidates,
+        page_sizes=page_sizes,
+        page_start=page_start,
+        page_end=page_end,
+        image_output_dir=None,
+        image_path_prefix=None,
+        mineru_result_dir=None,
+        mineru_result_path_prefix=None,
+    )
+
+    pages = [page for page in (ir.get("pages") or []) if isinstance(page, dict)]
+    pages_by_index = {int(page.get("page_index") or 0): page for page in pages}
+    recovered = 0
+
+    for footer_page in footer_ir.get("pages") or []:
+        if not isinstance(footer_page, dict):
+            continue
+        page_index = int(footer_page.get("page_index") or 0)
+        target_page = pages_by_index.get(page_index)
+        if target_page is None:
+            continue
+        page_w_pt = float(target_page.get("page_width_pt") or 0.0)
+        page_h_pt = float(target_page.get("page_height_pt") or 0.0)
+        target_elements = [
+            el for el in (target_page.get("elements") or []) if isinstance(el, dict)
+        ]
+
+        for candidate in footer_page.get("elements") or []:
+            if not isinstance(candidate, dict):
+                continue
+            if str(candidate.get("type") or "").strip().lower() != "text":
+                continue
+            if not _is_notebooklm_footer_ir_element(
+                candidate,
+                page_w_pt=page_w_pt,
+                page_h_pt=page_h_pt,
+            ):
+                continue
+            if any(
+                _is_notebooklm_footer_ir_element(
+                    existing,
+                    page_w_pt=page_w_pt,
+                    page_h_pt=page_h_pt,
+                )
+                and _footer_elements_match(existing, candidate)
+                for existing in target_elements
+            ):
+                continue
+            target_elements.append(dict(candidate))
+            recovered += 1
+
+        target_elements.sort(
+            key=lambda item: (
+                float(((item.get("bbox_pt") or [0.0, 0.0, 0.0, 0.0])[1])),
+                float(((item.get("bbox_pt") or [0.0, 0.0, 0.0, 0.0])[0])),
+            )
+        )
+        target_page["elements"] = target_elements
+        target_page["has_text_layer"] = any(
+            str(el.get("type") or "").strip().lower() in {"text", "table"}
+            for el in target_elements
+        )
+        target_page["ocr_used"] = any(el.get("type") == "text" for el in target_elements)
+
+    return recovered
+
+
 class MineruClient:
     """Minimal MinerU client for file-upload batch parsing."""
 
@@ -1673,19 +1851,22 @@ def parse_pdf_to_ir_with_mineru(
 
     content_json: Path | None = None
     content_items: list[dict[str, Any]] = []
-    best_score: tuple[int, int] = (-1, -1)
+    content_score: tuple[int, int] = (-1, -1)
     for candidate in content_candidates:
         _step_check()
         items = _extract_content_items(_load_json(candidate))
         candidate_score = _estimate_content_items_quality(items)
-        if candidate_score > best_score:
-            best_score = candidate_score
+        if candidate_score > content_score:
+            content_score = candidate_score
             content_json = candidate
             content_items = items
 
     if content_json is None:
         content_json = content_candidates[0]
         content_items = _extract_content_items(_load_json(content_json))
+        content_score = _estimate_content_items_quality(content_items)
+    selected_items = content_items
+    selected_score = content_score
     selected_source = (
         f"content:{content_json.name}"
         if content_json is not None
@@ -1699,20 +1880,22 @@ def parse_pdf_to_ir_with_mineru(
         contain_name="layout",
     )
     layout_score: tuple[int, int] = (-1, -1)
+    used_layout_items = False
     if layout_json is not None:
         layout_items = _extract_content_items_from_layout(_load_json(layout_json))
         layout_score = _estimate_content_items_quality(layout_items)
         if _should_prefer_layout_candidate(
             content_items=content_items,
-            content_score=best_score,
+            content_score=content_score,
             layout_items=layout_items,
             layout_score=layout_score,
         ):
-            content_items = layout_items
-            best_score = layout_score
+            selected_items = layout_items
+            selected_score = layout_score
             selected_source = f"layout:{layout_json.name}"
+            used_layout_items = True
 
-    if not content_items:
+    if not selected_items:
         raise AppException(
             code=ErrorCode.CONVERSION_FAILED,
             message="MinerU result JSON has no parseable items",
@@ -1723,13 +1906,13 @@ def parse_pdf_to_ir_with_mineru(
             status_code=500,
         )
 
+    page_sizes: dict[int, tuple[float, float]] = {}
     middle_json = _find_json_file(
         extracted_dir,
         exact_name="middle.json",
         suffix_name="_middle.json",
         contain_name="middle",
     )
-    page_sizes: dict[int, tuple[float, float]] = {}
     if middle_json is not None:
         _step_check()
         middle_payload = _load_json(middle_json)
@@ -1743,7 +1926,7 @@ def parse_pdf_to_ir_with_mineru(
     _step_check()
     ir = _build_ir_from_mineru_outputs(
         source_pdf=path,
-        content_items=content_items,
+        content_items=selected_items,
         page_sizes=page_sizes,
         page_start=page_start,
         page_end=page_end,
@@ -1754,6 +1937,19 @@ def parse_pdf_to_ir_with_mineru(
     )
     _step_check()
     ir["warnings"] = list(ir.get("warnings") or [])
+    if used_layout_items:
+        recovered_footer_count = _recover_missing_notebooklm_footer_elements(
+            ir=ir,
+            content_items=content_items,
+            source_pdf=path,
+            page_sizes=page_sizes,
+            page_start=page_start,
+            page_end=page_end,
+        )
+        if recovered_footer_count > 0:
+            ir["warnings"].append(
+                f"mineru_recovered_footer_items={recovered_footer_count}"
+            )
     ir["warnings"].append(f"mineru_batch_id={batch_id}")
     ir["warnings"].append(f"mineru_content_json={content_json.name}")
     if layout_json is not None:
@@ -1762,6 +1958,10 @@ def parse_pdf_to_ir_with_mineru(
         )
     ir["warnings"].append(f"mineru_selected_source={selected_source}")
     ir["warnings"].append(
-        f"mineru_content_quality=usable:{best_score[0]},score:{best_score[1]}"
+        f"mineru_content_quality=usable:{content_score[0]},score:{content_score[1]}"
     )
+    if used_layout_items:
+        ir["warnings"].append(
+            f"mineru_selected_quality=usable:{selected_score[0]},score:{selected_score[1]}"
+        )
     return ir

@@ -151,8 +151,8 @@ export const defaultSettings: Settings = {
   removeFooterNotebooklm: false,
   // smart: current adaptive erase; fill: fast rectangle background fill.
   textEraseMode: "fill",
-  // fullpage: keep a single page background; segmented: keep some images as editable blocks.
-  scannedPageMode: "fullpage",
+  // segmented: keep images as editable blocks; fullpage: leave them in the page background.
+  scannedPageMode: "segmented",
   // standard: current fidelity-first generator. fast: experiment for speed-first runs.
   pptGenerationMode: "fast",
   // Tunables for image-underlay cleanup and scanned image-region filtering.

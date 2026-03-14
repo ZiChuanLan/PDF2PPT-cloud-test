@@ -188,12 +188,12 @@ def normalize_text_erase_mode(value: str | None) -> str:
 
 
 def normalize_scanned_page_mode(value: str | None) -> str:
-    mode = (clean_str(_unwrap_form_default(value)) or "fullpage").lower()
+    mode = (clean_str(_unwrap_form_default(value)) or "segmented").lower()
     if mode in {"chunk", "chunked", "split", "blocks"}:
         return "segmented"
     if mode in {"page", "full", "full_page"}:
         return "fullpage"
-    return mode if mode in VALID_SCANNED_PAGE_MODES else "fullpage"
+    return mode if mode in VALID_SCANNED_PAGE_MODES else "segmented"
 
 
 def normalize_ppt_generation_mode(value: str | None) -> str:

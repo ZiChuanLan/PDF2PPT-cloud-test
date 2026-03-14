@@ -404,12 +404,10 @@ def _is_notebooklm_footer_brand_normalized(normalized: str) -> bool:
     value = str(normalized or "").strip().lower()
     if not value:
         return False
-    if value == "notebooklm":
-        return True
-    if value.endswith("notebooklm"):
-        prefix = value[: -len("notebooklm")]
-        return prefix in {"a", "ai", "al"}
-    return False
+    if "notebooklm" not in value:
+        return False
+    extra = value.replace("notebooklm", "")
+    return len(extra) <= 24
 
 
 def _is_notebooklm_footer_text_element(
@@ -645,7 +643,7 @@ def generate_pptx_from_ir(
     force_16x9: bool = False,
     scanned_render_dpi: int = 200,
     remove_footer_notebooklm: bool = False,
-    scanned_page_mode: str = "fullpage",
+    scanned_page_mode: str = "segmented",
     text_erase_mode: str = "fill",
     ppt_generation_mode: str = "standard",
     image_bg_clear_expand_min_pt: float = 0.35,
@@ -730,13 +728,13 @@ def generate_pptx_from_ir(
     if text_erase_mode_id not in {"smart", "fill"}:
         text_erase_mode_id = "fill"
 
-    scanned_page_mode_id = str(scanned_page_mode or "fullpage").strip().lower()
+    scanned_page_mode_id = str(scanned_page_mode or "segmented").strip().lower()
     if scanned_page_mode_id in {"chunk", "chunked", "split", "blocks"}:
         scanned_page_mode_id = "segmented"
     if scanned_page_mode_id in {"page", "full", "full_page"}:
         scanned_page_mode_id = "fullpage"
     if scanned_page_mode_id not in {"segmented", "fullpage"}:
-        scanned_page_mode_id = "fullpage"
+        scanned_page_mode_id = "segmented"
 
     ppt_generation_mode_id = str(ppt_generation_mode or "standard").strip().lower()
     if ppt_generation_mode_id in {"default", "normal", "balanced", "quality"}:
@@ -1630,6 +1628,7 @@ def generate_pptx_from_ir(
         mineru_background_placed = False
         mineru_render_pix: Any | None = None
         ocr_sampling_pix: Any | None = None
+        should_overlay_layout_images = scanned_page_mode_id != "fullpage"
         if has_mineru_elements and source_pdf.exists():
             try:
                 # Layout-parse text-page output (MinerU / Baidu parser) targets
@@ -1668,18 +1667,19 @@ def generate_pptx_from_ir(
                         [x0 - pad_x_pt, y0 - pad_y_pt, x1 + pad_x_pt, y1 + pad_y_pt]
                     )
 
-                for el in _iter_page_elements(page, type_name="image"):
-                    if not _is_layout_parse_source(el.get("source")):
-                        continue
-                    if not str(el.get("image_path") or "").strip():
-                        continue
-                    try:
-                        ix0, iy0, ix1, iy1 = _coerce_bbox_pt(el.get("bbox_pt"))
-                    except Exception:
-                        continue
-                    if ix1 <= ix0 or iy1 <= iy0:
-                        continue
-                    mineru_image_regions_pt.append([ix0, iy0, ix1, iy1])
+                if should_overlay_layout_images:
+                    for el in _iter_page_elements(page, type_name="image"):
+                        if not _is_layout_parse_source(el.get("source")):
+                            continue
+                        if not str(el.get("image_path") or "").strip():
+                            continue
+                        try:
+                            ix0, iy0, ix1, iy1 = _coerce_bbox_pt(el.get("bbox_pt"))
+                        except Exception:
+                            continue
+                        if ix1 <= ix0 or iy1 <= iy0:
+                            continue
+                        mineru_image_regions_pt.append([ix0, iy0, ix1, iy1])
 
                 cleaned_render_path = _erase_regions_in_render_image(
                     render_path,
@@ -1770,6 +1770,12 @@ def generate_pptx_from_ir(
             )
 
         for el in _iter_page_elements(page, type_name="image"):
+            if (
+                has_mineru_elements
+                and not should_overlay_layout_images
+                and _is_layout_parse_source(el.get("source"))
+            ):
+                continue
             bbox_pt = el.get("bbox_pt")
             image_path = el.get("image_path")
             if not image_path:

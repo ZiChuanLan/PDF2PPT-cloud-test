@@ -723,8 +723,12 @@ async def create_job(
         ),
     ),
     scanned_page_mode: str | None = Form(
-        "fullpage",
-        description="Scanned page rendering mode (segmented, fullpage). Controls whether scanned pages are split into editable image blocks.",
+        "segmented",
+        description=(
+            "Image placement mode in PPT generation (segmented, fullpage). "
+            "Controls whether scanned pages and MinerU text pages keep images as "
+            "editable blocks or leave them in the full-page background."
+        ),
     ),
     ppt_generation_mode: str | None = Form(
         "standard",

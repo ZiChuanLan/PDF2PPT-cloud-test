@@ -105,9 +105,9 @@ def test_ppt_generation_mode_normalizes_speed_alias() -> None:
     assert normalized.ppt_generation_mode == "fast"
 
 
-def test_scanned_page_mode_defaults_to_fullpage() -> None:
-    assert normalize_scanned_page_mode(None) == "fullpage"
-    assert normalize_scanned_page_mode("") == "fullpage"
+def test_scanned_page_mode_defaults_to_segmented() -> None:
+    assert normalize_scanned_page_mode(None) == "segmented"
+    assert normalize_scanned_page_mode("") == "segmented"
 
 
 def test_direct_chain_rejects_paddleocr_vl_model() -> None:
