@@ -173,6 +173,204 @@ def test_build_scanned_image_region_infos_preserves_polygon_masked_crop(
     assert crop.getpixel((40, 40))[3] == 255
 
 
+def test_build_scanned_image_region_infos_trusts_explicit_image_regions(
+    tmp_path,
+) -> None:
+    render_path = tmp_path / "render.trust-ai.png"
+    image = Image.new("RGB", (120, 120), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([10, 10, 110, 110], fill=(180, 180, 180))
+    draw.rectangle([24, 28, 96, 88], fill=(40, 40, 40))
+    image.save(render_path)
+
+    infos = scanned_page._build_scanned_image_region_infos(
+        page={
+            "image_regions": [
+                {
+                    "bbox_pt": [10.0, 10.0, 110.0, 110.0],
+                }
+            ]
+        },
+        render_path=render_path,
+        artifacts_dir=tmp_path / "artifacts",
+        page_index=0,
+        page_w_pt=120.0,
+        page_h_pt=120.0,
+        scanned_render_dpi=72,
+        baseline_ocr_h_pt=12.0,
+        ocr_text_elements=[],
+        has_full_page_bg_image=False,
+        text_coverage_ratio_fn=lambda _bbox: (0.80, 10),
+        text_inside_counts_fn=lambda _bbox: (10, 10),
+    )
+
+    assert len(infos) == 1
+    assert infos[0].bbox_pt == [10.0, 10.0, 110.0, 110.0]
+    assert infos[0].ai_hint is True
+    assert infos[0].crop_path.exists()
+
+
+def test_build_scanned_image_region_infos_skips_without_explicit_image_regions(
+    tmp_path, monkeypatch
+) -> None:
+    render_path = tmp_path / "render.no-fallback.png"
+    image = Image.new("RGB", (120, 120), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([10, 10, 110, 110], fill=(180, 180, 180))
+    draw.rectangle([24, 28, 96, 88], fill=(40, 40, 40))
+    image.save(render_path)
+
+    monkeypatch.setattr(
+        scanned_page,
+        "_detect_image_regions_from_render",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("render-based fallback should not run")
+        ),
+    )
+
+    infos = scanned_page._build_scanned_image_region_infos(
+        page={},
+        render_path=render_path,
+        artifacts_dir=tmp_path / "artifacts",
+        page_index=0,
+        page_w_pt=120.0,
+        page_h_pt=120.0,
+        scanned_render_dpi=72,
+        baseline_ocr_h_pt=12.0,
+        ocr_text_elements=[],
+        has_full_page_bg_image=False,
+        text_coverage_ratio_fn=lambda _bbox: (0.0, 0),
+        text_inside_counts_fn=lambda _bbox: (0, 0),
+    )
+
+    assert infos == []
+
+
+def test_merge_fragmented_scanned_regions_merges_same_ai_hint_polygon_fragments(
+    tmp_path, monkeypatch
+) -> None:
+    img = Image.new("RGB", (200, 120), "white")
+    crops_dir = tmp_path / "crops"
+    crops_dir.mkdir(parents=True, exist_ok=True)
+
+    polygon = [[10.0, 20.0], [170.0, 20.0], [170.0, 96.0], [10.0, 96.0]]
+    infos = [
+        scanned_page._ScannedImageRegionInfo(
+            bbox_pt=[50.0, 20.0, 150.0, 60.0],
+            suppress_bbox_pt=[48.0, 18.0, 152.0, 62.0],
+            crop_path=crops_dir / "a.png",
+            shape_confirmed=True,
+            ai_hint=True,
+            geometry_kind="polygon",
+            geometry_points_pt=polygon,
+        ),
+        scanned_page._ScannedImageRegionInfo(
+            bbox_pt=[50.0, 55.0, 110.0, 95.0],
+            suppress_bbox_pt=[48.0, 53.0, 112.0, 97.0],
+            crop_path=crops_dir / "b.png",
+            shape_confirmed=True,
+            ai_hint=True,
+            geometry_kind="polygon",
+            geometry_points_pt=polygon,
+        ),
+    ]
+
+    monkeypatch.setattr(
+        scanned_page,
+        "_analyze_shape_crop",
+        lambda _path: {"confirmed": True},
+    )
+
+    merged = scanned_page._try_merge_fragmented_scanned_image_regions(
+        infos=infos,
+        img=img,
+        crops_dir=crops_dir,
+        page_index=0,
+        page_w_pt=200.0,
+        page_h_pt=120.0,
+        scanned_render_dpi=72,
+        baseline_ocr_h_pt=12.0,
+        ocr_text_elements=[],
+        text_coverage_ratio_fn=lambda _bbox: (0.0, 0),
+    )
+
+    assert len(merged) == 1
+    assert merged[0].bbox_pt == [50.0, 20.0, 150.0, 95.0]
+    assert merged[0].ai_hint is True
+    assert merged[0].geometry_kind is None
+    assert merged[0].geometry_points_pt is None
+
+
+def test_filter_scanned_ocr_text_elements_keeps_partial_overlap_for_ai_hint() -> None:
+    info = scanned_page._ScannedImageRegionInfo(
+        bbox_pt=[10.0, 10.0, 70.0, 70.0],
+        suppress_bbox_pt=[0.0, 0.0, 80.0, 80.0],
+        crop_path=Path("/tmp/ai-hint.png"),
+        shape_confirmed=True,
+        ai_hint=True,
+    )
+
+    kept = scanned_page._filter_scanned_ocr_text_elements(
+        ocr_text_elements=[
+            {
+                "text": "Planning",
+                "bbox_pt": [20.0, 20.0, 90.0, 60.0],
+            }
+        ],
+        image_region_infos=[info],
+        baseline_ocr_h_pt=12.0,
+    )
+
+    assert len(kept) == 1
+    assert kept[0]["text"] == "Planning"
+
+
+def test_filter_scanned_ocr_text_elements_suppresses_mostly_inside_ai_hint() -> None:
+    info = scanned_page._ScannedImageRegionInfo(
+        bbox_pt=[10.0, 10.0, 70.0, 70.0],
+        suppress_bbox_pt=[0.0, 0.0, 80.0, 80.0],
+        crop_path=Path("/tmp/ai-hint.png"),
+        shape_confirmed=True,
+        ai_hint=True,
+    )
+
+    kept = scanned_page._filter_scanned_ocr_text_elements(
+        ocr_text_elements=[
+            {
+                "text": "Planning",
+                "bbox_pt": [18.0, 18.0, 62.0, 58.0],
+            }
+        ],
+        image_region_infos=[info],
+        baseline_ocr_h_pt=12.0,
+    )
+
+    assert kept == []
+
+
+def test_filter_scanned_ocr_text_elements_keeps_non_ai_shape_confirmed_suppression() -> None:
+    info = scanned_page._ScannedImageRegionInfo(
+        bbox_pt=[10.0, 10.0, 70.0, 70.0],
+        suppress_bbox_pt=[0.0, 0.0, 80.0, 80.0],
+        crop_path=Path("/tmp/non-ai.png"),
+        shape_confirmed=True,
+        ai_hint=False,
+    )
+
+    kept = scanned_page._filter_scanned_ocr_text_elements(
+        ocr_text_elements=[
+            {
+                "text": "Planning",
+                "bbox_pt": [20.0, 20.0, 90.0, 60.0],
+            }
+        ],
+        image_region_infos=[info],
+        baseline_ocr_h_pt=12.0,
+    )
+
+    assert kept == []
+
+
 def test_small_text_fragment_region_rejects_small_same_line_crop() -> None:
     assert scanned_page._is_small_text_fragment_region(
         [66.24, 296.64, 190.08, 397.44],

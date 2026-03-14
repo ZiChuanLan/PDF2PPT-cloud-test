@@ -385,8 +385,11 @@ def setup_ocr_runtime(
             # line-break recovery. Remote doc-parser / generic AI OCR routes
             # default to assist-on; machine OCR routes stay conservative.
             if linebreak_requested is None and route_plan.auto_enable_linebreak:
-                linebreak_enabled = True
-                auto_linebreak_enabled = True
+                if strict_ocr_mode:
+                    setup_notes.append("ocr_ai_linebreak_auto_disabled_in_strict_mode")
+                else:
+                    linebreak_enabled = True
+                    auto_linebreak_enabled = True
 
             # The only public OCR post-process toggle we expose today is the
             # line-break assist switch. Use the same explicit opt-in to gate the

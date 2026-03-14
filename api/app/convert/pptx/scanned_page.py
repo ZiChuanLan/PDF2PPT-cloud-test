@@ -1738,6 +1738,27 @@ class _ScannedImageRegionInfo:
     geometry_points_pt: list[list[float]] | None = None
 
 
+def _geometry_points_signature(
+    points: list[list[float]] | None,
+) -> tuple[tuple[int, int], ...]:
+    if not isinstance(points, list):
+        return ()
+    signature: list[tuple[int, int]] = []
+    for point in points:
+        if not isinstance(point, list) or len(point) < 2:
+            return ()
+        try:
+            signature.append(
+                (
+                    int(round(float(point[0]) * 10.0)),
+                    int(round(float(point[1]) * 10.0)),
+                )
+            )
+        except Exception:
+            return ()
+    return tuple(signature)
+
+
 def _save_scanned_image_region_crop(
     *,
     img: Any,
@@ -2715,23 +2736,13 @@ def _merge_neighbor_boxes_pt(
 def _collect_scanned_image_region_candidates(
     *,
     page: dict[str, Any],
-    render_path: Path,
-    page_w_pt: float,
-    page_h_pt: float,
-    scanned_render_dpi: int,
-    ocr_text_elements: list[dict[str, Any]],
-    has_full_page_bg_image: bool,
-    text_coverage_ratio_fn: Callable[[list[float]], tuple[float, int]],
 ) -> list[list[float]]:
-    baseline_ocr_h_pt = (
-        _estimate_baseline_ocr_line_height_pt(
-            ocr_text_elements=ocr_text_elements,
-            page_w_pt=float(page_w_pt),
-        )
-        if ocr_text_elements
-        else 12.0
-    )
+    """Return only explicit image-region hints from OCR/layout analysis.
 
+    The scanned-page PPT path no longer falls back to local render-based
+    heuristics when `image_regions` is missing. If upstream analysis does not
+    provide image regions, scanned pages are kept as background + text only.
+    """
     regions_pt_from_ai: list[list[float]] = []
     regions = page.get("image_regions")
     if isinstance(regions, list) and regions:
@@ -2743,309 +2754,10 @@ def _collect_scanned_image_region_candidates(
                 x0, y0, x1, y1 = _coerce_bbox_pt(region_info.get("bbox_pt"))
             except Exception:
                 continue
-            # Ignore card-like mixed content panels suggested by AI.
-            area = max(0.0, float(x1 - x0) * float(y1 - y0))
-            # `page["image_regions"]` can come from OCR image-region detection
-            # or layout-assist suggestions. Keep strong downstream filters, but
-            # do not unconditionally drop these suggestions when OCR text exists,
-            # otherwise the upstream region source has no effect.
-            page_area = max(1.0, float(page_w_pt) * float(page_h_pt))
-            area_ratio = area / page_area
-            if area_ratio < 0.0020 or area_ratio > 0.75:
+            if x1 <= x0 or y1 <= y0:
                 continue
-            cov, n = text_coverage_ratio_fn([x0, y0, x1, y1])
-            width_ratio = float(x1 - x0) / max(1.0, float(page_w_pt))
-            height_ratio = float(y1 - y0) / max(1.0, float(page_h_pt))
-            # AI layout suggestions may occasionally return whole card/text panels
-            # as image regions. Keep only candidates that are not text-heavy.
-            if (n >= 8 and cov >= 0.14) or (n >= 3 and cov >= 0.30):
-                continue
-            if area_ratio >= 0.12 and n >= 4 and cov >= 0.08:
-                continue
-            if (width_ratio >= 0.26 and n >= 2 and cov >= 0.05) or (
-                area_ratio >= 0.06 and n >= 2 and cov >= 0.07
-            ):
-                continue
-            if height_ratio >= 0.42 and n >= 2 and cov >= 0.06:
-                continue
-            regions_pt_from_ai.append([x0, y0, x1, y1])
-
-    if regions_pt_from_ai:
-        return regions_pt_from_ai
-
-    if (
-        has_full_page_bg_image
-        and len(ocr_text_elements) <= 4
-        and not regions_pt_from_ai
-    ):
-        return []
-
-    regions_pt_masked = _detect_image_regions_from_render(
-        render_path,
-        page_width_pt=page_w_pt,
-        page_height_pt=page_h_pt,
-        dpi=int(scanned_render_dpi),
-        ocr_text_elements=ocr_text_elements,
-        max_regions=24,
-    )
-    regions_pt_unmasked: list[list[float]] = []
-    try:
-        regions_pt_unmasked = _detect_image_regions_from_render(
-            render_path,
-            page_width_pt=page_w_pt,
-            page_height_pt=page_h_pt,
-            dpi=int(scanned_render_dpi),
-            ocr_text_elements=None,
-            max_regions=6,
-            merge_gap_scale=0.06,
-        )
-    except Exception:
-        regions_pt_unmasked = []
-
-    page_area = max(1.0, float(page_w_pt) * float(page_h_pt))
-
-    filtered_masked: list[list[float]] = []
-    for bb in regions_pt_masked:
-        try:
-            mx0, my0, mx1, my1 = _coerce_bbox_pt(bb)
-        except Exception:
-            continue
-        area = max(0.0, float(mx1 - mx0) * float(my1 - my0))
-        area_ratio = float(area) / float(page_area)
-        if area_ratio < 0.0022:
-            continue
-
-        cov, n = text_coverage_ratio_fn([mx0, my0, mx1, my1])
-        width_ratio = float(mx1 - mx0) / max(1.0, float(page_w_pt))
-        height_ratio = float(my1 - my0) / max(1.0, float(page_h_pt))
-        if (n >= 4 and cov >= 0.08) or (area_ratio >= 0.12 and n >= 4):
-            continue
-        if n >= 2 and cov >= 0.52:
-            continue
-        if (width_ratio >= 0.28 and n >= 2 and cov >= 0.05) or (
-            area_ratio >= 0.05 and n >= 2 and cov >= 0.07
-        ):
-            continue
-        if height_ratio >= 0.42 and n >= 2 and cov >= 0.06:
-            continue
-
-        filtered_masked.append([mx0, my0, mx1, my1])
-
-    filtered_unmasked: list[list[float]] = []
-    for bb in regions_pt_unmasked:
-        try:
-            ux0, uy0, ux1, uy1 = _coerce_bbox_pt(bb)
-        except Exception:
-            continue
-        area = max(0.0, float(ux1 - ux0) * float(uy1 - uy0))
-        area_ratio = float(area) / float(page_area)
-        if area_ratio < 0.025:
-            continue
-
-        cov, n = text_coverage_ratio_fn([ux0, uy0, ux1, uy1])
-        width_ratio = float(ux1 - ux0) / max(1.0, float(page_w_pt))
-        height_ratio = float(uy1 - uy0) / max(1.0, float(page_h_pt))
-        # Unmasked detection is high-recall but noisy.
-        #
-        # Historically we required `n == 0` (no OCR items inside), but this
-        # breaks screenshots: better OCR models detect lots of small UI text
-        # inside screenshots/diagrams, causing us to discard the *union* box that
-        # is needed to merge fragmented masked detections.
-        #
-        # Instead, allow some text overlap as long as it looks "small" relative
-        # to the page baseline and coverage stays low.
-        if cov >= 0.14:
-            continue
-        if area_ratio >= 0.62:
-            continue
-        if width_ratio >= 0.78 or height_ratio >= 0.78:
-            continue
-
-        large_line_inside = 0
-        large_cjk_inside = 0
-        wide_large_line_inside = 0
-        large_line_h_threshold = max(4.0, 0.62 * float(baseline_ocr_h_pt))
-        for tel in ocr_text_elements:
-            bbox_pt = tel.get("bbox_pt")
-            if not isinstance(bbox_pt, list) or len(bbox_pt) != 4:
-                continue
-            try:
-                tx0, ty0, tx1, ty1 = _coerce_bbox_pt(bbox_pt)
-            except Exception:
-                continue
-            tcx = (tx0 + tx1) / 2.0
-            tcy = (ty0 + ty1) / 2.0
-            if tcx < ux0 or tcx > ux1 or tcy < uy0 or tcy > uy1:
-                continue
-
-            tw = max(1.0, float(tx1 - tx0))
-            th = max(1.0, float(ty1 - ty0))
-            if th < large_line_h_threshold:
-                continue
-
-            text_value = str(tel.get("text") or "")
-            if _is_inline_short_token(text_value):
-                continue
-            if _compact_text_length(text_value) < 4:
-                continue
-
-            large_line_inside += 1
-            if _contains_cjk(text_value):
-                large_cjk_inside += 1
-            if tw >= 0.22 * float(ux1 - ux0):
-                wide_large_line_inside += 1
-
-        # Reject text-panel/card false positives.
-        if large_line_inside >= 2 and cov >= 0.10:
-            continue
-        if large_cjk_inside >= 1 and cov >= 0.08:
-            continue
-        if wide_large_line_inside >= 2 and cov >= 0.06:
-            continue
-
-        filtered_unmasked.append([ux0, uy0, ux1, uy1])
-
-    def _bbox_area_pt(bb: list[float]) -> float:
-        try:
-            x0, y0, x1, y1 = _coerce_bbox_pt(bb)
-        except Exception:
-            return 0.0
-        return max(0.0, float(x1 - x0) * float(y1 - y0))
-
-    # Prefer masked candidates (OCR-aware), but keep unmasked candidates that
-    # can *merge* fragmented masked detections (common for screenshots where OCR
-    # masking removes key edges and splits a single image into multiple strips).
-    promoted_unmasked: list[list[float]] = []
-    for ub in filtered_unmasked:
-        u_area = _bbox_area_pt(ub)
-        if u_area <= 0.0:
-            continue
-        overlap_hits = 0
-        best_containment = 0.0
-        best_m_area = 0.0
-        for mb in filtered_masked:
-            m_area = _bbox_area_pt(mb)
-            if m_area <= 0.0:
-                continue
-            inter = _bbox_intersection_area_pt(ub, mb)
-            if inter <= 0.0:
-                continue
-            containment = float(inter) / float(m_area)
-            best_containment = max(best_containment, containment)
-            best_m_area = max(best_m_area, m_area)
-            # Count as a "piece" when ub largely contains mb (or overlaps
-            # meaningfully), indicating ub is a plausible union box.
-            if containment >= 0.55 or _bbox_iou_pt(ub, mb) >= 0.12:
-                overlap_hits += 1
-
-        if overlap_hits >= 2:
-            promoted_unmasked.append(ub)
-            continue
-        # If masking yields just one small fragment, allow a larger unmasked box
-        # to replace it when it contains the fragment well.
-        if overlap_hits == 1 and best_containment >= 0.65 and best_m_area > 0.0:
-            if u_area >= (1.8 * float(best_m_area)):
-                promoted_unmasked.append(ub)
-
-    if promoted_unmasked:
-        try:
-            promoted_unmasked.sort(key=_bbox_area_pt, reverse=True)
-        except Exception:
-            pass
-        promoted_unmasked = promoted_unmasked[:2]
-
-    # Keep a small unmasked supplement. When there are many masked candidates,
-    # only keep promoted unmasked boxes (merge hints) to avoid reintroducing
-    # text-panel false positives when OCR misses some body text.
-    if len(filtered_masked) >= 4:
-        filtered_unmasked = list(promoted_unmasked)
-    else:
-        budget = max(0, 6 - len(filtered_masked))
-        budget = max(budget, len(promoted_unmasked))
-        dedupe_keep: list[list[float]] = []
-        for ub in promoted_unmasked:
-            dedupe_keep.append(ub)
-        for ub in filtered_unmasked:
-            if len(dedupe_keep) >= budget:
-                break
-            duplicated = False
-            for kb in dedupe_keep:
-                try:
-                    if _bbox_iou_pt(ub, kb) >= 0.85:
-                        duplicated = True
-                        break
-                except Exception:
-                    continue
-            if not duplicated:
-                dedupe_keep.append(ub)
-        filtered_unmasked = dedupe_keep[:budget]
-
-    combined = []
-    for bb in list(regions_pt_from_ai or []) + filtered_masked + filtered_unmasked:
-        if not isinstance(bb, (list, tuple)) or len(bb) != 4:
-            continue
-        try:
-            x0, y0, x1, y1 = _coerce_bbox_pt(bb)
-        except Exception:
-            continue
-        if x1 <= x0 or y1 <= y0:
-            continue
-        combined.append([x0, y0, x1, y1])
-
-    if not combined:
-        return []
-
-    combined = _merge_neighbor_boxes_pt(
-        combined,
-        page_w_pt=page_w_pt,
-        page_h_pt=page_h_pt,
-        text_coverage_ratio_fn=text_coverage_ratio_fn,
-    )
-
-    combined.sort(
-        key=lambda b: float((b[2] - b[0]) * (b[3] - b[1])),
-        reverse=True,
-    )
-
-    uniq: list[list[float]] = []
-    for bb in combined:
-        cand_area = max(1.0, float((bb[2] - bb[0]) * (bb[3] - bb[1])))
-        should_keep = True
-        for ub in uniq:
-            if (
-                abs(bb[0] - ub[0]) <= 2.0
-                and abs(bb[1] - ub[1]) <= 2.0
-                and abs(bb[2] - ub[2]) <= 2.0
-                and abs(bb[3] - ub[3]) <= 2.0
-            ):
-                should_keep = False
-                break
-
-            inter = _bbox_intersection_area_pt(bb, ub)
-            if inter <= 0.0:
-                continue
-            if _bbox_iou_pt(bb, ub) >= 0.68:
-                should_keep = False
-                break
-            if (inter / cand_area) >= 0.90:
-                should_keep = False
-                break
-
-        if should_keep:
-            uniq.append(bb)
-        if len(uniq) >= 24:
-            break
-
-    try:
-        uniq.sort(
-            key=lambda b: (
-                -float((b[2] - b[0]) * (b[3] - b[1])),
-                float(text_coverage_ratio_fn(b)[0]),
-            )
-        )
-    except Exception:
-        pass
-    return uniq
+            regions_pt_from_ai.append([float(x0), float(y0), float(x1), float(y1)])
+    return regions_pt_from_ai
 
 
 def _is_card_like_region(
@@ -3399,12 +3111,28 @@ def _try_merge_fragmented_scanned_image_regions(
                 b_area = _bbox_area(b.bbox_pt)
                 if b_area <= 0.0:
                     continue
+                same_ai_hint_polygon = False
+                if (
+                    bool(getattr(a, "ai_hint", False))
+                    and bool(getattr(b, "ai_hint", False))
+                    and str(getattr(a, "geometry_kind", "") or "").strip().lower()
+                    == "polygon"
+                    and str(getattr(b, "geometry_kind", "") or "").strip().lower()
+                    == "polygon"
+                ):
+                    same_ai_hint_polygon = _geometry_points_signature(
+                        getattr(a, "geometry_points_pt", None)
+                    ) == _geometry_points_signature(
+                        getattr(b, "geometry_points_pt", None)
+                    ) and bool(getattr(a, "geometry_points_pt", None))
                 # Don't merge transparent/icon crops; those should remain editable.
                 if (
                     a.background_removed
                     or b.background_removed
-                    or a.geometry_points_pt
-                    or b.geometry_points_pt
+                ):
+                    continue
+                if (a.geometry_points_pt or b.geometry_points_pt) and (
+                    not same_ai_hint_polygon
                 ):
                     continue
 
@@ -3434,7 +3162,9 @@ def _try_merge_fragmented_scanned_image_regions(
                 height_sim = abs(ah - bh) <= (0.25 * max(ah, bh))
 
                 aligned = False
-                if vertical_adjacent:
+                if same_ai_hint_polygon:
+                    aligned = bool(horizontal_adjacent or vertical_adjacent)
+                elif vertical_adjacent:
                     aligned = (abs(ax0 - bx0) <= tol_x and abs(ax1 - bx1) <= tol_x) or (
                         width_sim and x_ov >= 0.85
                     )
@@ -3554,13 +3284,6 @@ def _build_scanned_image_region_infos(
 
     regions_pt = _collect_scanned_image_region_candidates(
         page=page,
-        render_path=render_path,
-        page_w_pt=page_w_pt,
-        page_h_pt=page_h_pt,
-        scanned_render_dpi=scanned_render_dpi,
-        ocr_text_elements=ocr_text_elements,
-        has_full_page_bg_image=has_full_page_bg_image,
-        text_coverage_ratio_fn=text_coverage_ratio_fn,
     )
     _save_scanned_regions_debug_overlay(
         render_path=render_path,
@@ -3597,9 +3320,7 @@ def _build_scanned_image_region_infos(
                 hx0, hy0, hx1, hy1 = _coerce_bbox_pt(region_info.get("bbox_pt"))
             except Exception:
                 continue
-            h_area = max(0.0, float(hx1 - hx0) * float(hy1 - hy0))
-            h_area_ratio = float(h_area) / float(page_area)
-            if h_area_ratio < 0.0012 or h_area_ratio > 0.90:
+            if hx1 <= hx0 or hy1 <= hy0:
                 continue
             ai_hint_regions_pt.append(
                 {
@@ -3669,27 +3390,21 @@ def _build_scanned_image_region_infos(
         is_ai_hint = matched_ai_hint is not None
         area_pt = max(0.0, w_pt * h_pt)
         area_ratio = area_pt / page_area
-        if is_ai_hint:
-            ai_min_area_ratio = max(0.0012, 0.45 * float(min_area_ratio_id))
-            ai_max_area_ratio = min(0.85, float(max_area_ratio_id) + 0.12)
-            if area_ratio < ai_min_area_ratio or area_ratio > ai_max_area_ratio:
-                continue
-        else:
+        if not is_ai_hint:
             if area_ratio < min_area_ratio_id or area_ratio > max_area_ratio_id:
                 continue
-        if min(w_pt, h_pt) < 12.0:
+        min_dim_threshold_pt = 1.0 if is_ai_hint else 12.0
+        if min(w_pt, h_pt) < min_dim_threshold_pt:
             continue
 
         aspect = max(w_pt / max(1.0, h_pt), h_pt / max(1.0, w_pt))
-        if aspect >= max_aspect_ratio_id and area_ratio < (
-            0.05 if is_ai_hint else 0.08
-        ):
+        if (not is_ai_hint) and aspect >= max_aspect_ratio_id and area_ratio < 0.08:
             continue
 
         min_dim_pt = max(18.0, 1.8 * float(baseline_ocr_h_pt))
         min_dim_pt = min(72.0, float(min_dim_pt))
         min_area_pt = 0.65 * float(min_dim_pt) * float(min_dim_pt)
-        if area_pt < min_area_pt:
+        if (not is_ai_hint) and area_pt < min_area_pt:
             continue
 
         cov, n = text_coverage_ratio_fn([x0, y0, x1, y1])
@@ -3750,27 +3465,7 @@ def _build_scanned_image_region_infos(
 
         large_line_cov = min(1.0, large_line_overlap / max(1.0, area_pt))
 
-        if is_ai_hint:
-            # Explicit AI image-region mode is opt-in and high-risk. Keep guardrails
-            # for obvious text-panels, but tolerate moderate embedded text in real
-            # screenshots/diagrams.
-            if (n >= 10 and cov >= 0.18) or (n >= 6 and cov >= 0.30):
-                continue
-            if area_ratio >= 0.18 and n >= 8 and cov >= 0.10:
-                continue
-            if n_inside >= 1 and cov >= 0.55 and area_ratio >= 0.014:
-                continue
-            if n_cjk_inside >= 2 and cov >= 0.36 and area_ratio >= 0.030:
-                continue
-            if area_ratio >= 0.10 and large_line_inside >= 5 and large_line_cov >= 0.14:
-                continue
-            if (
-                wide_large_line_inside >= 3
-                and large_line_cov >= 0.12
-                and area_ratio >= 0.060
-            ):
-                continue
-        else:
+        if not is_ai_hint:
             # Strong text-block candidates should not become image crops.
             if (
                 (n >= 4 and cov >= 0.10)
@@ -3858,33 +3553,30 @@ def _build_scanned_image_region_infos(
             n_cjk_inside >= 2 and n_inside >= 3 and cov >= 0.08 and area_ratio >= 0.03
         )
         if shape_confirmed:
-            if area_ratio >= 0.40 and (cov >= 0.20 or n_inside >= 10):
+            if (not is_ai_hint) and area_ratio >= 0.40 and (
+                cov >= 0.20 or n_inside >= 10
+            ):
                 continue
-            if cjk_text_heavy and area_ratio >= 0.07:
+            if (not is_ai_hint) and cjk_text_heavy and area_ratio >= 0.07:
                 continue
-            if (
+            if (not is_ai_hint) and (
                 area_ratio >= 0.030
                 and large_line_inside >= 3
                 and large_line_cov >= 0.10
             ):
                 continue
-            if large_line_inside >= 5 and (cov >= 0.08 or large_line_cov >= 0.10):
+            if (not is_ai_hint) and large_line_inside >= 5 and (
+                cov >= 0.08 or large_line_cov >= 0.10
+            ):
                 continue
-            if (
+            if (not is_ai_hint) and (
                 wide_large_line_inside >= 2
                 and large_line_cov >= 0.08
                 and area_ratio >= 0.030
             ):
                 continue
         else:
-            if is_ai_hint:
-                if cov >= 0.24 or n_inside >= 8 or large_line_inside >= 5:
-                    continue
-                if area_ratio >= 0.45:
-                    continue
-                if cjk_text_heavy and area_ratio >= 0.10:
-                    continue
-            else:
+            if not is_ai_hint:
                 if cov >= 0.16 or n_inside >= 5 or large_line_inside >= 3:
                     continue
                 if area_ratio >= 0.24:
@@ -4023,8 +3715,10 @@ def _filter_scanned_ocr_text_elements(
         tcy = (ty0 + ty1) / 2.0
         inside_image = False
         for info in image_region_infos:
+            ai_hint = bool(getattr(info, "ai_hint", False))
+            region_bbox = info.bbox_pt if ai_hint else info.suppress_bbox_pt
             try:
-                ix0, iy0, ix1, iy1 = _coerce_bbox_pt(info.suppress_bbox_pt)
+                ix0, iy0, ix1, iy1 = _coerce_bbox_pt(region_bbox)
             except Exception:
                 continue
 
@@ -4035,21 +3729,16 @@ def _filter_scanned_ocr_text_elements(
                 continue
             overlap_ratio = float(inter) / t_area
             center_inside = tcx >= ix0 and tcx <= ix1 and tcy >= iy0 and tcy <= iy1
-            ai_hint = bool(getattr(info, "ai_hint", False))
 
             if ai_hint:
-                # In explicit AI image-region mode, we prefer to avoid text overlays
-                # on top of screenshots/diagrams suggested by the model.
+                # Explicit AI regions already define the crop geometry. Be
+                # conservative about removing editable text: only suppress OCR
+                # boxes that are almost entirely covered by the model-provided
+                # image region, and skip the looser local overlap heuristics.
                 if overlap_ratio >= 0.86:
                     inside_image = True
                     break
-                if (
-                    (not keep_as_text_preferred)
-                    and center_inside
-                    and overlap_ratio >= 0.52
-                ):
-                    inside_image = True
-                    break
+                continue
 
             if keep_as_text_preferred and not info.shape_confirmed:
                 # Prefer keeping CJK/body text editable when the "image region"

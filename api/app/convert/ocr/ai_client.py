@@ -3670,6 +3670,7 @@ class AiOcrClient(OcrProvider):
     def _resolve_model_request_timeout_s(self, *, model_name: str | None) -> float:
         default_timeout = max(8.0, _env_float("OCR_AI_REQUEST_TIMEOUT_S", 25.0))
         lowered = str(model_name or "").strip().lower()
+        provider_id = str(self.provider_id or "").strip().lower()
         if not lowered:
             return default_timeout
 
@@ -3680,6 +3681,18 @@ class AiOcrClient(OcrProvider):
             )
 
         if "deepseek-ocr" in lowered or "deepseekocr" in lowered:
+            if provider_id == "siliconflow":
+                siliconflow_default_timeout = max(default_timeout, 90.0)
+                return max(
+                    8.0,
+                    _env_float(
+                        "OCR_AI_REQUEST_TIMEOUT_S_DEEPSEEK_OCR_SILICONFLOW",
+                        _env_float(
+                            "OCR_AI_REQUEST_TIMEOUT_S_DEEPSEEK_OCR",
+                            siliconflow_default_timeout,
+                        ),
+                    ),
+                )
             return max(
                 8.0,
                 _env_float("OCR_AI_REQUEST_TIMEOUT_S_DEEPSEEK_OCR", default_timeout),
@@ -3730,11 +3743,17 @@ class AiOcrClient(OcrProvider):
 
         if self._uses_local_layout_block_ocr():
             bypass_reason = None
-            if _is_deepseek_ocr_model(self.model):
+            is_deepseek_layout_block = _is_deepseek_ocr_model(self.model)
+            if is_deepseek_layout_block:
                 bypass_reason = self._should_bypass_local_layout_block_ocr(
                     image_path=image_path,
                     image=image,
                 )
+                if not bypass_reason:
+                    # DeepSeek-OCR performs reliably on the full page in our
+                    # real pipeline tests, while local block crops frequently
+                    # return empty text and then time out on the fallback pass.
+                    bypass_reason = "deepseek_model_prefers_direct_page_ocr"
             if bypass_reason:
                 layout_debug = (
                     dict(self.last_layout_analysis_debug)
@@ -3760,7 +3779,7 @@ class AiOcrClient(OcrProvider):
                         image=image,
                     )
                 except Exception as exc:
-                    if not _is_deepseek_ocr_model(self.model):
+                    if not is_deepseek_layout_block:
                         raise
                     logger.warning(
                         "Local layout_block OCR failed; falling back to direct page OCR"
@@ -3774,7 +3793,7 @@ class AiOcrClient(OcrProvider):
                     if result:
                         self._refresh_route_kind()
                         return result
-                    if not _is_deepseek_ocr_model(self.model):
+                    if not is_deepseek_layout_block:
                         self._refresh_route_kind()
                         return result
                     logger.warning(

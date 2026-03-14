@@ -215,3 +215,52 @@ def test_local_layout_block_default_concurrency_reduced_for_siliconflow_qwen3(
         )
         == 2
     )
+
+
+def test_deepseek_request_timeout_uses_longer_default_for_siliconflow(
+    monkeypatch,
+) -> None:
+    _patch_openai_and_adapter(monkeypatch)
+    monkeypatch.delenv("OCR_AI_REQUEST_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("OCR_AI_REQUEST_TIMEOUT_S_DEEPSEEK_OCR", raising=False)
+    monkeypatch.delenv(
+        "OCR_AI_REQUEST_TIMEOUT_S_DEEPSEEK_OCR_SILICONFLOW",
+        raising=False,
+    )
+
+    client = ai_client_module.AiOcrClient(
+        api_key="test-key",
+        base_url="https://api.siliconflow.cn/v1",
+        model="deepseek-ai/DeepSeek-OCR",
+        provider="siliconflow",
+    )
+
+    assert (
+        client._resolve_model_request_timeout_s(
+            model_name="deepseek-ai/DeepSeek-OCR"
+        )
+        == 90.0
+    )
+
+
+def test_deepseek_request_timeout_prefers_siliconflow_override_over_generic(
+    monkeypatch,
+) -> None:
+    _patch_openai_and_adapter(monkeypatch)
+    monkeypatch.setenv("OCR_AI_REQUEST_TIMEOUT_S", "25")
+    monkeypatch.setenv("OCR_AI_REQUEST_TIMEOUT_S_DEEPSEEK_OCR", "60")
+    monkeypatch.setenv("OCR_AI_REQUEST_TIMEOUT_S_DEEPSEEK_OCR_SILICONFLOW", "75")
+
+    client = ai_client_module.AiOcrClient(
+        api_key="test-key",
+        base_url="https://api.siliconflow.cn/v1",
+        model="deepseek-ai/DeepSeek-OCR",
+        provider="siliconflow",
+    )
+
+    assert (
+        client._resolve_model_request_timeout_s(
+            model_name="deepseek-ai/DeepSeek-OCR"
+        )
+        == 75.0
+    )

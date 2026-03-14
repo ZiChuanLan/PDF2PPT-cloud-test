@@ -568,13 +568,13 @@ def generate_pptx_from_ir(
     if text_erase_mode_id not in {"smart", "fill"}:
         text_erase_mode_id = "fill"
 
-    scanned_page_mode_id = str(scanned_page_mode or "segmented").strip().lower()
+    scanned_page_mode_id = str(scanned_page_mode or "fullpage").strip().lower()
     if scanned_page_mode_id in {"chunk", "chunked", "split", "blocks"}:
         scanned_page_mode_id = "segmented"
     if scanned_page_mode_id in {"page", "full", "full_page"}:
         scanned_page_mode_id = "fullpage"
     if scanned_page_mode_id not in {"segmented", "fullpage"}:
-        scanned_page_mode_id = "segmented"
+        scanned_page_mode_id = "fullpage"
 
     ppt_generation_mode_id = str(ppt_generation_mode or "standard").strip().lower()
     if ppt_generation_mode_id in {"default", "normal", "balanced", "quality"}:

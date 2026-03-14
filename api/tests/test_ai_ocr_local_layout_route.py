@@ -719,7 +719,7 @@ def test_layout_block_route_upscales_tiny_qwen3_crops(
     )
 
 
-def test_layout_block_route_upscales_tiny_deepseek_crops(
+def test_deepseek_layout_block_route_prefers_direct_page_ocr_and_keeps_image_regions(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -741,46 +741,64 @@ def test_layout_block_route_upscales_tiny_deepseek_crops(
             [
                 {
                     "label": "text",
-                    "bbox": [10.0, 10.0, 146.0, 22.0],
+                    "bbox": [10.0, 10.0, 146.0, 44.0],
                     "score": 0.9,
                     "order": 0,
                     "text": "",
                 }
             ],
-            [],
+            [
+                {
+                    "bbox": [170.0, 36.0, 286.0, 156.0],
+                    "label": "image",
+                    "score": 0.83,
+                }
+            ],
         ),
     )
 
-    captured: dict[str, int] = {}
-
-    def _fake_ocr_local_layout_block_crop(**kwargs):
-        captured["crop_width"] = int(kwargs["crop_width"])
-        captured["crop_height"] = int(kwargs["crop_height"])
-        return "DeepSeek text"
-
     monkeypatch.setattr(
         client,
-        "_ocr_local_layout_block_crop",
-        _fake_ocr_local_layout_block_crop,
+        "_ocr_image_with_local_layout_blocks",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("DeepSeek route should not use local layout block OCR")
+        ),
+    )
+    monkeypatch.setattr(
+        client,
+        "_chat_completion",
+        lambda **kwargs: types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(
+                        content=(
+                            "<|ref|>DeepSeek direct page text<|/ref|>"
+                            "<|det|>[[12,12,180,42]]<|/det|>"
+                        )
+                    ),
+                    finish_reason="stop",
+                )
+            ]
+        ),
     )
 
-    image_path = tmp_path / "tiny-deepseek-strip.png"
+    image_path = tmp_path / "deepseek-direct-only.png"
     Image.new("RGB", (300, 180), "white").save(image_path)
 
     items = client.ocr_image(str(image_path))
 
-    assert captured["crop_height"] >= 32
-    assert captured["crop_width"] > 146
     assert len(items) == 1
-    _assert_layout_block_item(
-        items[0],
-        text="DeepSeek text",
-        bbox=[10.0, 10.0, 146.0, 22.0],
-        confidence=0.9,
-        provider="siliconflow",
-        model="deepseek-ai/DeepSeek-OCR",
-        label="text",
+    assert items[0]["text"] == "DeepSeek direct page text"
+    assert client.last_layout_analysis_debug["layout_block_bypass_reason"] == (
+        "deepseek_model_prefers_direct_page_ocr"
     )
+    assert client.last_image_regions_px == [
+        {
+            "bbox": [170.0, 36.0, 286.0, 156.0],
+            "label": "image",
+            "score": 0.83,
+        }
+    ]
 
 
 def test_layout_block_route_skips_footer_blocks(
@@ -791,9 +809,9 @@ def test_layout_block_route_skips_footer_blocks(
 
     client = ai_client_module.AiOcrClient(
         api_key="test-key",
-        base_url="https://api.siliconflow.cn/v1",
-        model="deepseek-ai/DeepSeek-OCR",
-        provider="siliconflow",
+        base_url="https://example.com/v1",
+        model="Qwen/Qwen2.5-VL-72B-Instruct",
+        provider="openai",
         layout_model="pp_doclayout_v3",
         route_kind=ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR,
     )
@@ -843,54 +861,6 @@ def test_layout_block_route_skips_footer_blocks(
     assert len(items) == 1
     assert client.last_layout_blocks[1]["ocr_skipped"] is True
     assert client.last_layout_blocks[1]["ocr_skip_reason"] == "low_value_layout_label"
-
-
-def test_deepseek_layout_block_falls_back_to_direct_page_ocr_when_empty(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    _patch_openai_and_adapter(monkeypatch)
-
-    client = ai_client_module.AiOcrClient(
-        api_key="test-key",
-        base_url="https://api.siliconflow.cn/v1",
-        model="deepseek-ai/DeepSeek-OCR",
-        provider="siliconflow",
-        layout_model="pp_doclayout_v3",
-        route_kind=ROUTE_KIND_LOCAL_LAYOUT_BLOCK_OCR,
-    )
-
-    monkeypatch.setattr(
-        client,
-        "_ocr_image_with_local_layout_blocks",
-        lambda image_path, image: [],
-    )
-    monkeypatch.setattr(
-        client,
-        "_chat_completion",
-        lambda **kwargs: types.SimpleNamespace(
-            choices=[
-                types.SimpleNamespace(
-                    message=types.SimpleNamespace(
-                        content=(
-                            "<|ref|>Layout block fallback<|/ref|>"
-                            "<|det|>[[10,10,140,40]]<|/det|>"
-                        )
-                    ),
-                    finish_reason="stop",
-                )
-            ]
-        ),
-    )
-
-    image_path = tmp_path / "fallback.png"
-    Image.new("RGB", (320, 180), "white").save(image_path)
-
-    items = client.ocr_image(str(image_path))
-
-    assert len(items) == 1
-    assert items[0]["text"] == "Layout block fallback"
-    assert items[0]["bbox"] == [10.0, 10.0, 140.0, 40.0]
 
 
 def test_deepseek_layout_block_crop_extracts_text_from_grounding_tags(

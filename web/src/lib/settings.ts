@@ -151,8 +151,8 @@ export const defaultSettings: Settings = {
   removeFooterNotebooklm: false,
   // smart: current adaptive erase; fill: fast rectangle background fill.
   textEraseMode: "fill",
-  // segmented: keep some images as editable blocks; fullpage: keep a single page background.
-  scannedPageMode: "segmented",
+  // fullpage: keep a single page background; segmented: keep some images as editable blocks.
+  scannedPageMode: "fullpage",
   // standard: current fidelity-first generator. fast: experiment for speed-first runs.
   pptGenerationMode: "fast",
   // Tunables for image-underlay cleanup and scanned image-region filtering.
@@ -412,7 +412,7 @@ export function loadStoredSettings(): Settings {
   }
   const validScannedPageModes: ScannedPageMode[] = ["segmented", "fullpage"]
   if (!validScannedPageModes.includes(merged.scannedPageMode)) {
-    merged.scannedPageMode = "segmented"
+    merged.scannedPageMode = "fullpage"
   }
   const validPptGenerationModes: PptGenerationMode[] = ["standard", "fast", "turbo"]
   if (!validPptGenerationModes.includes(merged.pptGenerationMode)) {

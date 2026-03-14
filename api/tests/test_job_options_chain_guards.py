@@ -10,7 +10,7 @@ API_ROOT = Path(__file__).resolve().parents[1]
 if str(API_ROOT) not in sys.path:
     sys.path.insert(0, str(API_ROOT))
 
-from app.job_options import validate_and_normalize_job_options
+from app.job_options import normalize_scanned_page_mode, validate_and_normalize_job_options
 from app.models.error import AppException
 
 
@@ -29,7 +29,7 @@ def _base_kwargs() -> dict:
         "ocr_baidu_secret_key": "baidu-secret",
         "ocr_geometry_mode": "auto",
         "text_erase_mode": "fill",
-        "scanned_page_mode": "segmented",
+        "scanned_page_mode": "fullpage",
         "ppt_generation_mode": "standard",
         "page_start": None,
         "page_end": None,
@@ -103,6 +103,11 @@ def test_ppt_generation_mode_normalizes_speed_alias() -> None:
     )
 
     assert normalized.ppt_generation_mode == "fast"
+
+
+def test_scanned_page_mode_defaults_to_fullpage() -> None:
+    assert normalize_scanned_page_mode(None) == "fullpage"
+    assert normalize_scanned_page_mode("") == "fullpage"
 
 
 def test_direct_chain_rejects_paddleocr_vl_model() -> None:

@@ -723,7 +723,7 @@ async def create_job(
         ),
     ),
     scanned_page_mode: str | None = Form(
-        "segmented",
+        "fullpage",
         description="Scanned page rendering mode (segmented, fullpage). Controls whether scanned pages are split into editable image blocks.",
     ),
     ppt_generation_mode: str | None = Form(

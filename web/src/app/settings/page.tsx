@@ -1447,8 +1447,8 @@ export default function SettingsPage() {
                     }))
                   }
                 >
-                  <option value="segmented">图片拆出来（可单独编辑）</option>
                   <option value="fullpage">图片留在整页背景里（更像原图）</option>
+                  <option value="segmented">图片拆出来（可单独编辑）</option>
                 </Select>
               </div>
 

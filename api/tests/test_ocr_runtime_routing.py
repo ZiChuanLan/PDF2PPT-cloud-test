@@ -176,6 +176,121 @@ def test_setup_runtime_keeps_text_refiner_off_for_explicit_aiocr(
     assert len(created_refiners) == 1
 
 
+def test_setup_runtime_disables_auto_linebreak_in_strict_mode(
+    monkeypatch,
+) -> None:
+    created_refiners: list[dict[str, str | None]] = []
+
+    class _DummyRefiner:
+        def __init__(
+            self,
+            *,
+            api_key: str,
+            provider: str | None = None,
+            base_url: str | None = None,
+            model: str | None = None,
+            request_rpm_limit: int | None = None,
+            request_tpm_limit: int | None = None,
+            request_max_retries: int | None = None,
+        ) -> None:
+            created_refiners.append(
+                {
+                    "api_key": api_key,
+                    "provider": provider,
+                    "base_url": base_url,
+                    "model": model,
+                    "request_rpm_limit": request_rpm_limit,
+                    "request_tpm_limit": request_tpm_limit,
+                    "request_max_retries": request_max_retries,
+                }
+            )
+
+    monkeypatch.setattr(ocr_runtime, "create_ocr_manager", lambda **_: object())
+    monkeypatch.setattr(ocr_runtime, "AiOcrTextRefiner", _DummyRefiner)
+
+    setup = ocr_runtime.setup_ocr_runtime(
+        provider=None,
+        api_key=None,
+        base_url=None,
+        model=None,
+        ocr_provider="aiocr",
+        ocr_baidu_app_id=None,
+        ocr_baidu_api_key=None,
+        ocr_baidu_secret_key=None,
+        ocr_tesseract_min_confidence=None,
+        ocr_tesseract_language=None,
+        ocr_ai_api_key="ocr-key",
+        ocr_ai_provider="siliconflow",
+        ocr_ai_base_url="https://api.siliconflow.cn/v1",
+        ocr_ai_model="deepseek-ai/DeepSeek-OCR",
+        ocr_ai_linebreak_assist=None,
+        ocr_strict_mode=True,
+    )
+
+    assert setup.linebreak_enabled is False
+    assert setup.auto_linebreak_enabled is False
+    assert setup.linebreak_refiner is None
+    assert "ocr_ai_linebreak_auto_disabled_in_strict_mode" in setup.setup_notes
+    assert len(created_refiners) == 0
+
+
+def test_setup_runtime_keeps_auto_linebreak_when_not_strict(
+    monkeypatch,
+) -> None:
+    created_refiners: list[dict[str, str | None]] = []
+
+    class _DummyRefiner:
+        def __init__(
+            self,
+            *,
+            api_key: str,
+            provider: str | None = None,
+            base_url: str | None = None,
+            model: str | None = None,
+            request_rpm_limit: int | None = None,
+            request_tpm_limit: int | None = None,
+            request_max_retries: int | None = None,
+        ) -> None:
+            created_refiners.append(
+                {
+                    "api_key": api_key,
+                    "provider": provider,
+                    "base_url": base_url,
+                    "model": model,
+                    "request_rpm_limit": request_rpm_limit,
+                    "request_tpm_limit": request_tpm_limit,
+                    "request_max_retries": request_max_retries,
+                }
+            )
+
+    monkeypatch.setattr(ocr_runtime, "create_ocr_manager", lambda **_: object())
+    monkeypatch.setattr(ocr_runtime, "AiOcrTextRefiner", _DummyRefiner)
+
+    setup = ocr_runtime.setup_ocr_runtime(
+        provider=None,
+        api_key=None,
+        base_url=None,
+        model=None,
+        ocr_provider="aiocr",
+        ocr_baidu_app_id=None,
+        ocr_baidu_api_key=None,
+        ocr_baidu_secret_key=None,
+        ocr_tesseract_min_confidence=None,
+        ocr_tesseract_language=None,
+        ocr_ai_api_key="ocr-key",
+        ocr_ai_provider="siliconflow",
+        ocr_ai_base_url="https://api.siliconflow.cn/v1",
+        ocr_ai_model="deepseek-ai/DeepSeek-OCR",
+        ocr_ai_linebreak_assist=None,
+        ocr_strict_mode=False,
+    )
+
+    assert setup.linebreak_enabled is True
+    assert setup.auto_linebreak_enabled is True
+    assert setup.linebreak_refiner is not None
+    assert len(created_refiners) == 1
+
+
 def test_setup_runtime_forwards_experimental_ai_ocr_controls(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

@@ -251,6 +251,8 @@ api/data/jobs/<job_id>/
 | `segmented` | 尽量把截图、图表、图标裁成独立图片对象 | 方便在 PPT 里单独编辑图片 |
 | `fullpage` | 整页保留为背景图，只把识别出来的文字覆盖为可编辑文本 | 最接近原图，风险更低 |
 
+当前默认值是 `fullpage`。
+
 ### 文本擦除模式
 
 设置项：`text_erase_mode`
