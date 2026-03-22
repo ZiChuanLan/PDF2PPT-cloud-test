@@ -7,8 +7,8 @@ import { UploadSessionProvider } from "@/components/upload-session-provider"
 import { WorkbenchNav } from "@/components/workbench-nav"
 
 export const metadata: Metadata = {
-  title: "PDF 转 PPT",
-  description: "上传 PDF，自动生成可编辑 PPT",
+  title: "PDF / 图片 转 PPT",
+  description: "上传 PDF 或图片，自动生成可编辑 PPT",
 }
 
 export default function RootLayout({

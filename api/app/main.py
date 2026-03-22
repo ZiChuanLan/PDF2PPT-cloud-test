@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PDF to PPT API",
-    description="Convert PDF documents to PowerPoint presentations",
+    description="Convert PDF documents and images to PowerPoint presentations",
     version="0.1.0",
     lifespan=lifespan,
 )

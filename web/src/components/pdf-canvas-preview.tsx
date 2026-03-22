@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils"
 
 type PdfCanvasPreviewProps = {
   fileUrl: string
+  mimeType?: string
   page: number
   onPageCountChange?: (count: number) => void
   className?: string
@@ -59,10 +60,13 @@ function clampPage(page: number, pageCount: number) {
 
 export function PdfCanvasPreview({
   fileUrl,
+  mimeType,
   page,
   onPageCountChange,
   className,
 }: PdfCanvasPreviewProps) {
+  const normalizedMimeType = String(mimeType || "").trim().toLowerCase()
+  const isImagePreview = normalizedMimeType.startsWith("image/")
   const containerRef = React.useRef<HTMLDivElement | null>(null)
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
   const pdfjsRuntimeRef = React.useRef<PdfJsRuntimeModule | null>(null)
@@ -75,6 +79,11 @@ export function PdfCanvasPreview({
   const [renderError, setRenderError] = React.useState<string | null>(null)
 
   React.useEffect(() => {
+    if (isImagePreview) {
+      setIsPdfRuntimeReady(false)
+      return
+    }
+
     let cancelled = false
 
     const loadRuntime = async () => {
@@ -102,7 +111,7 @@ export function PdfCanvasPreview({
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [isImagePreview])
 
   React.useEffect(() => {
     const element = containerRef.current
@@ -122,6 +131,15 @@ export function PdfCanvasPreview({
   }, [fileUrl])
 
   React.useEffect(() => {
+    if (isImagePreview) {
+      setDocumentProxy(null)
+      setIsLoading(false)
+      setLoadingError(null)
+      setRenderError(null)
+      setIsRendering(false)
+      onPageCountChange?.(1)
+      return
+    }
     if (!isPdfRuntimeReady || !pdfjsRuntimeRef.current) return
 
     let cancelled = false
@@ -166,9 +184,10 @@ export function PdfCanvasPreview({
         void nextDocument.destroy()
       }
     }
-  }, [fileUrl, isPdfRuntimeReady, onPageCountChange])
+  }, [fileUrl, isImagePreview, isPdfRuntimeReady, onPageCountChange])
 
   React.useEffect(() => {
+    if (isImagePreview) return
     if (!documentProxy) return
     const canvas = canvasRef.current
     const container = containerRef.current
@@ -240,7 +259,7 @@ export function PdfCanvasPreview({
         task.cancel()
       }
     }
-  }, [containerWidth, documentProxy, page])
+  }, [containerWidth, documentProxy, isImagePreview, page])
 
   return (
     <div
@@ -250,13 +269,23 @@ export function PdfCanvasPreview({
         className
       )}
     >
-      {!loadingError ? (
+      {!loadingError && !isImagePreview ? (
         <div className="flex min-h-[300px] items-start justify-center overflow-auto p-1.5 md:p-2">
           <canvas ref={canvasRef} className="block border border-[#c8c8c8] bg-white shadow-sm max-w-full" />
         </div>
       ) : null}
 
-      {isLoading ? (
+      {isImagePreview ? (
+        <div className="flex min-h-[300px] items-start justify-center overflow-auto p-1.5 md:p-2">
+          <img
+            src={fileUrl}
+            alt="上传预览"
+            className="block max-h-[72dvh] max-w-full border border-[#c8c8c8] bg-white shadow-sm"
+          />
+        </div>
+      ) : null}
+
+      {isLoading && !isImagePreview ? (
         <div className="absolute inset-0 flex items-center justify-center bg-background/80 text-sm">
           <Loader2Icon className="mr-2 size-4 animate-spin" />
           正在加载 PDF...

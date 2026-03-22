@@ -82,6 +82,13 @@ const ocrProviderLabels: Record<Settings["ocrProvider"], string> = {
 }
 
 const HOME_ACTIVE_JOB_STORAGE_KEY = "ppt-opencode:home:active-job-id"
+const SUPPORTED_UPLOAD_ACCEPT = {
+  "application/pdf": [".pdf"],
+  "image/png": [".png"],
+  "image/jpeg": [".jpg", ".jpeg"],
+  "image/webp": [".webp"],
+} as const
+const SUPPORTED_IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"] as const
 
 function formatDateTime(iso: string) {
   const date = new Date(iso)
@@ -118,6 +125,14 @@ function clampPositiveInt(value: number, max?: number) {
   const normalized = Number.isFinite(value) ? Math.max(1, Math.floor(value)) : 1
   if (!max || max <= 0) return normalized
   return Math.min(normalized, max)
+}
+
+function isImageUploadFile(file: File | null | undefined) {
+  if (!file) return false
+  const type = String(file.type || "").trim().toLowerCase()
+  if (type.startsWith("image/")) return true
+  const name = String(file.name || "").trim().toLowerCase()
+  return SUPPORTED_IMAGE_EXTENSIONS.some((suffix) => name.endsWith(suffix))
 }
 
 export default function Home() {
@@ -252,13 +267,14 @@ export default function Home() {
 
   const onDrop = React.useCallback((accepted: File[]) => {
     const next = accepted[0] ?? null
+    const nextIsImage = isImageUploadFile(next)
     setFile(next)
     setActionError(null)
     if (next) {
       setPageStartInput("")
       setPageEndInput("")
       setPreviewPageInput("1")
-      setPreviewPageCount(0)
+      setPreviewPageCount(nextIsImage ? 1 : 0)
       setUsePageRange(false)
     } else {
       clearUpload()
@@ -269,11 +285,13 @@ export default function Home() {
   }, [clearUpload, setFile, setPageEndInput, setPageStartInput])
 
   const { getRootProps, getInputProps, isDragActive, isDragReject } = useDropzone({
-    accept: { "application/pdf": [".pdf"] },
+    accept: SUPPORTED_UPLOAD_ACCEPT,
     multiple: false,
     disabled: isSubmitting,
     onDrop,
   })
+
+  const isImageInput = isImageUploadFile(file)
 
   const handleConvert = React.useCallback(async () => {
     if (!file) return
@@ -286,13 +304,14 @@ export default function Home() {
       return
     }
 
-    const pageStart = usePageRange ? toIntOrUndefined(pageStartInput) : undefined
-    const pageEnd = usePageRange ? toIntOrUndefined(pageEndInput) : undefined
-    if (usePageRange && ((pageStart && !pageEnd) || (!pageStart && pageEnd))) {
+    const effectiveUsePageRange = usePageRange && !isImageInput
+    const pageStart = effectiveUsePageRange ? toIntOrUndefined(pageStartInput) : undefined
+    const pageEnd = effectiveUsePageRange ? toIntOrUndefined(pageEndInput) : undefined
+    if (effectiveUsePageRange && ((pageStart && !pageEnd) || (!pageStart && pageEnd))) {
       setActionError("页码范围请同时填写起始页和结束页")
       return
     }
-    if (usePageRange && pageStart && pageEnd && pageStart > pageEnd) {
+    if (effectiveUsePageRange && pageStart && pageEnd && pageStart > pageEnd) {
       setActionError("页码范围错误：起始页不能大于结束页")
       return
     }
@@ -340,6 +359,7 @@ export default function Home() {
     fetchJobStatus,
     fetchJobs,
     file,
+    isImageInput,
     pageEndInput,
     pageStartInput,
     retainProcessArtifacts,
@@ -610,17 +630,17 @@ export default function Home() {
           <div className="px-5 py-5 md:px-6 md:py-6">
             <div className="flex flex-wrap items-center gap-2">
               <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
-                {editionDate} · PDF 工作台
+                {editionDate} · 文档工作台
               </div>
               <Badge variant="outline" className="font-sans text-[11px] uppercase tracking-[0.12em]">
                 轻量首页
               </Badge>
             </div>
             <h1 className="mt-3 max-w-4xl font-serif text-4xl leading-[0.92] tracking-tight md:text-6xl">
-              PDF 处理工作台
+              PDF / 图片 处理工作台
             </h1>
             <p className="mt-3 max-w-3xl text-sm leading-7 text-muted-foreground md:text-[15px] xl:max-w-none xl:whitespace-nowrap">
-              上传后即可预览、设定范围并开始处理；复杂参数在设置页，结果核对在跟踪页。
+              上传 PDF 或单张图片后即可预览并开始处理；复杂参数在设置页，结果核对在跟踪页。
             </p>
 
             <div className="mt-4 flex flex-wrap gap-2">
@@ -649,55 +669,59 @@ export default function Home() {
                   <div className="home-section-kicker">开始处理</div>
                   <CardTitle className="mt-2 text-[1.3rem]">上传与预览</CardTitle>
                   <CardDescription className="mt-1 max-w-xl text-sm leading-6">
-                    选择 PDF 后可直接预览当前页，并决定是整份处理还是先做单页验证。
+                    选择 PDF 或单张图片后可直接预览；PDF 可做整份处理，图片默认按单页处理。
                   </CardDescription>
                 </div>
-                <Badge variant="outline">支持整份与单页试跑</Badge>
+                <Badge variant="outline">支持 PDF 与单张图片</Badge>
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
-                <div
-                  {...getRootProps()}
-                  className={cn(
-                    "home-dropzone cursor-pointer text-center",
-                    isDragActive && !isDragReject && "bg-accent/50",
-                    isDragReject && "border-destructive bg-destructive/10",
-                    isSubmitting && "pointer-events-none opacity-60"
-                  )}
-                >
-                  <input {...getInputProps()} />
-                  <UploadCloudIcon className="mx-auto size-8 text-muted-foreground" />
-                  <p className="mt-3 text-sm font-medium">
-                    {isDragActive ? "松开以上传 PDF" : "拖拽 PDF 到这里，或点击选择文件"}
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">仅支持 .pdf</p>
-                </div>
+              <div
+                {...getRootProps()}
+                className={cn(
+                  "home-dropzone cursor-pointer text-center",
+                  isDragActive && !isDragReject && "bg-accent/50",
+                  isDragReject && "border-destructive bg-destructive/10",
+                  isSubmitting && "pointer-events-none opacity-60"
+                )}
+              >
+                <input {...getInputProps()} />
+                <UploadCloudIcon className="mx-auto size-8 text-muted-foreground" />
+                <p className="mt-3 text-sm font-medium">
+                  {isDragActive ? "松开以上传文件" : "拖拽 PDF 或图片到这里，或点击选择文件"}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  支持 .pdf .png .jpg .jpeg .webp
+                </p>
+              </div>
 
-                {file ? (
-                  <div className="home-inline-panel flex items-center justify-between gap-3 px-4 py-3">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{file.name}</div>
-                      <div className="text-xs text-muted-foreground">{formatBytes(file.size)}</div>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      onClick={() => {
-                        clearUpload()
-                        setPreviewPageInput("1")
-                        setPreviewPageCount(0)
-                        setUsePageRange(false)
-                      }}
-                    >
-                      清空
-                    </Button>
+              {file ? (
+                <div className="home-inline-panel flex items-center justify-between gap-3 px-4 py-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{file.name}</div>
+                    <div className="text-xs text-muted-foreground">{formatBytes(file.size)}</div>
                   </div>
-                ) : null}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => {
+                      clearUpload()
+                      setPreviewPageInput("1")
+                      setPreviewPageCount(0)
+                      setUsePageRange(false)
+                    }}
+                  >
+                    清空
+                  </Button>
+                </div>
+              ) : null}
 
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <div className="home-section-kicker">文档预览</div>
-                    <div className="mt-1 text-sm text-muted-foreground">预览页与单页试跑始终保持一致。</div>
+                    <div className="mt-1 text-sm text-muted-foreground">
+                      PDF 预览页与单页试跑保持一致；图片输入固定为单页。
+                    </div>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <Button
@@ -748,92 +772,103 @@ export default function Home() {
                   <div className="home-preview-stage">
                     <PdfCanvasPreview
                       fileUrl={filePreviewUrl}
+                      mimeType={file?.type}
                       page={previewPage}
                       className="w-full"
                       onPageCountChange={handlePreviewPageCountChange}
                     />
                   </div>
                 ) : (
-                  <div className="home-preview-stage home-preview-empty">上传 PDF 后会在这里显示预览</div>
+                  <div className="home-preview-stage home-preview-empty">
+                    上传 PDF 或图片后会在这里显示预览
+                  </div>
                 )}
 
                 <div className="home-inline-panel grid gap-3 px-4 py-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <label className="flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4 accent-[#111111]"
-                        checked={usePageRange}
-                        onChange={(e) => {
-                          const enabled = e.target.checked
-                          setUsePageRange(enabled)
-                          if (!enabled) {
-                            setPageStartInput("")
-                            setPageEndInput("")
-                          }
-                        }}
-                      />
-                      限定页码范围
-                    </label>
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="xs"
-                        disabled={!file}
-                        onClick={() => {
-                          setUsePageRange(true)
-                          const current = String(previewPage)
-                          setPageStartInput(current)
-                          setPageEndInput(current)
-                        }}
-                      >
-                        单页试跑（当前页）
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="xs"
-                        onClick={() => {
-                          setUsePageRange(false)
-                          setPageStartInput("")
-                          setPageEndInput("")
-                        }}
-                      >
-                        整份处理
-                      </Button>
-                    </div>
-                  </div>
-
-                  {usePageRange ? (
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <div className="grid gap-2">
-                        <label className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground">
-                          起始页
-                        </label>
-                        <Input
-                          inputMode="numeric"
-                          placeholder="例如 1"
-                          value={pageStartInput}
-                          onChange={(e) => setPageStartInput(e.target.value)}
-                        />
-                      </div>
-                      <div className="grid gap-2">
-                        <label className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground">
-                          结束页
-                        </label>
-                        <Input
-                          inputMode="numeric"
-                          placeholder="例如 5"
-                          value={pageEndInput}
-                          onChange={(e) => setPageEndInput(e.target.value)}
-                        />
-                      </div>
-                    </div>
-                  ) : (
+                  {isImageInput ? (
                     <p className="text-xs leading-6 text-muted-foreground">
-                      当前将处理整份文档。如果只是想快速确认效果，直接点击“单页试跑（当前页）”即可。
+                      图片输入会自动包装成单页 PDF 再进入现有流程，所以这里不需要再设置页码范围。
                     </p>
+                  ) : (
+                    <>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 accent-[#111111]"
+                            checked={usePageRange}
+                            onChange={(e) => {
+                              const enabled = e.target.checked
+                              setUsePageRange(enabled)
+                              if (!enabled) {
+                                setPageStartInput("")
+                                setPageEndInput("")
+                              }
+                            }}
+                          />
+                          限定页码范围
+                        </label>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="xs"
+                            disabled={!file}
+                            onClick={() => {
+                              setUsePageRange(true)
+                              const current = String(previewPage)
+                              setPageStartInput(current)
+                              setPageEndInput(current)
+                            }}
+                          >
+                            单页试跑（当前页）
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="xs"
+                            onClick={() => {
+                              setUsePageRange(false)
+                              setPageStartInput("")
+                              setPageEndInput("")
+                            }}
+                          >
+                            整份处理
+                          </Button>
+                        </div>
+                      </div>
+
+                      {usePageRange ? (
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <div className="grid gap-2">
+                            <label className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground">
+                              起始页
+                            </label>
+                            <Input
+                              inputMode="numeric"
+                              placeholder="例如 1"
+                              value={pageStartInput}
+                              onChange={(e) => setPageStartInput(e.target.value)}
+                            />
+                          </div>
+                          <div className="grid gap-2">
+                            <label className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground">
+                              结束页
+                            </label>
+                            <Input
+                              inputMode="numeric"
+                              placeholder="例如 5"
+                              value={pageEndInput}
+                              onChange={(e) => setPageEndInput(e.target.value)}
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-xs leading-6 text-muted-foreground">
+                          当前将处理整份文档。如果只是想快速确认效果，直接点击“单页试跑（当前页）”即可。
+                        </p>
+                      )}
+                    </>
                   )}
 
                   <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_260px]">
