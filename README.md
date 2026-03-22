@@ -1,5 +1,7 @@
 # PDF2PPT
 
+Convert scanned PDFs, slide screenshots, and image-heavy documents into editable PPTX with OCR, layout reconstruction, and Docker deployment.
+
 `PDF2PPT` 用来把 PDF，尤其是扫描版、图片版、课件截图类文档，转换成尽量高保真、尽量可编辑的 PPTX。
 
 它不是单纯把 PDF 截成一张背景图，而是尽量把页面拆成这些层再重组：
@@ -515,3 +517,7 @@ docker compose run --rm --no-deps -v "$PWD/api:/app" api sh -lc \
 ├── docker-compose.dev.yml      # 开发态编排
 └── README.md
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
