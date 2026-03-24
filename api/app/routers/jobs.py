@@ -1005,6 +1005,15 @@ async def create_job(
         job = redis_service.create_job(job_id)
         job_created = True
 
+        # Persist queued state before starting worker execution so debug events
+        # remain ordered even when a local in-process worker begins immediately.
+        redis_service.update_job(
+            job_id,
+            status=JobStatus.pending,
+            stage=JobStage.queued,
+            message="Job queued for processing",
+        )
+
         # Queue job for processing
         if redis_service.is_memory_backend():
             threading.Thread(
@@ -1144,14 +1153,6 @@ async def create_job(
                 # with kwargs.
                 description=f"process_pdf_job(job_id={job_id})",
             )
-
-        # Update job status to queued
-        redis_service.update_job(
-            job_id,
-            status=JobStatus.pending,
-            stage=JobStage.queued,
-            message="Job queued for processing",
-        )
 
         logger.info("Job %s created and queued from %s upload", job_id, upload_kind)
 

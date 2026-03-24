@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class JobStatus(str, Enum):
@@ -111,6 +111,8 @@ class LocalOcrCheckRequest(BaseModel):
 
 class LocalOcrCheckResult(BaseModel):
     """Detailed local OCR environment check result."""
+
+    model_config = ConfigDict(protected_namespaces=())
 
     provider: str
     requested_language: str

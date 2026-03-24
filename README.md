@@ -3,8 +3,13 @@
 Convert scanned PDFs, slide screenshots, and image-heavy documents into editable PPTX with OCR, layout reconstruction, and Docker deployment.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ZiChuanLan/PDF2PPT-cloud-test)
+[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/UKLIVV)
 
-Zeabur 模板页已经发布：<https://zeabur.com/templates/UKLIVV> 。模板源码见 [zeabur.template.yaml](/home/lan/workspace/ppt-cloud-test/zeabur.template.yaml)；如果你还想放官方 Deploy Button，可以继续在 Zeabur Dashboard 里复制按钮链接。
+云部署相关文件：
+
+- Render Blueprint: [render.yaml](/home/lan/workspace/ppt-cloud-test/render.yaml)
+- Zeabur 模板: [zeabur.template.yaml](/home/lan/workspace/ppt-cloud-test/zeabur.template.yaml)
+- Zeabur 模板页: <https://zeabur.com/templates/UKLIVV>
 
 `PDF2PPT` 用来把 PDF，尤其是扫描版、图片版、课件截图类文档，转换成尽量高保真、尽量可编辑的 PPTX。
 
@@ -169,6 +174,13 @@ sh /app/scripts/run_hosted.sh
 2. 再接入平台托管 Redis，并把 `EMBEDDED_WORKER_CONCURRENCY=1`
 3. 确认稳定后，再决定要不要拆回独立 `worker`
 
+这个单服务后端模式的关键点只有两个：
+
+- `REDIS_URL=memory://`
+  API 进程自己开线程直接跑任务，最适合最低成本验证
+- `REDIS_URL=真实 Redis` 且 `EMBEDDED_WORKER_CONCURRENCY=1`
+  API 和 worker 仍然在同一个容器里，但任务改回标准队列流转
+
 ### Render 一键部署
 
 仓库根目录现在带了 [render.yaml](/home/lan/workspace/ppt-cloud-test/render.yaml)，上面的 Render 按钮会直接按 Blueprint 创建：
@@ -191,7 +203,9 @@ sh /app/scripts/run_hosted.sh
 
 ### Zeabur 模板配置
 
-仓库根目录现在带了 [zeabur.template.yaml](/home/lan/workspace/ppt-cloud-test/zeabur.template.yaml)，可以直接用官方 CLI 导入项目：
+README 顶部的 Zeabur 按钮已经直接指向已发布模板页：<https://zeabur.com/templates/UKLIVV>
+
+仓库根目录现在带了 [zeabur.template.yaml](/home/lan/workspace/ppt-cloud-test/zeabur.template.yaml)，也可以直接用官方 CLI 导入项目：
 
 ```bash
 npx zeabur@latest template deploy -f zeabur.template.yaml
