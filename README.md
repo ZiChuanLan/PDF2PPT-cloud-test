@@ -2,6 +2,10 @@
 
 Convert scanned PDFs, slide screenshots, and image-heavy documents into editable PPTX with OCR, layout reconstruction, and Docker deployment.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ZiChuanLan/PDF2PPT-cloud-test)
+
+Zeabur 模板已经放在 [zeabur.template.yaml](/home/lan/workspace/ppt-cloud-test/zeabur.template.yaml)；发布到你自己的 Zeabur 模板后，可以在 Dashboard 复制官方 Deploy Button。
+
 `PDF2PPT` 用来把 PDF，尤其是扫描版、图片版、课件截图类文档，转换成尽量高保真、尽量可编辑的 PPTX。
 
 它不是单纯把 PDF 截成一张背景图，而是尽量把页面拆成这些层再重组：
@@ -164,6 +168,47 @@ sh /app/scripts/run_hosted.sh
 1. 先用 `REDIS_URL=memory://` 跑通健康检查和一份小 PDF
 2. 再接入平台托管 Redis，并把 `EMBEDDED_WORKER_CONCURRENCY=1`
 3. 确认稳定后，再决定要不要拆回独立 `worker`
+
+### Render 一键部署
+
+仓库根目录现在带了 [render.yaml](/home/lan/workspace/ppt-cloud-test/render.yaml)，上面的 Render 按钮会直接按 Blueprint 创建：
+
+- `pdf2ppt-api`
+  Docker 后端，运行 `sh /app/scripts/run_hosted.sh`
+- `pdf2ppt-web`
+  Next.js 前端
+- `pdf2ppt-redis`
+  Render Key Value
+
+这个 Blueprint 默认行为是：
+
+- API 走托管 Redis
+- `EMBEDDED_WORKER_CONCURRENCY=1`，worker 跟 API 在同一个服务里
+- `WEB_ACCESS_PASSWORD` 在 Render 创建时手动填写
+- `API_BEARER_TOKEN` 由 Render 自动生成，再透传给前端服务
+
+如果你想先在 Render 上压低复杂度，也可以部署后把 API 的 `REDIS_URL` 改成 `memory://`。
+
+### Zeabur 模板配置
+
+仓库根目录现在带了 [zeabur.template.yaml](/home/lan/workspace/ppt-cloud-test/zeabur.template.yaml)，可以直接用官方 CLI 导入项目：
+
+```bash
+npx zeabur@latest template deploy -f zeabur.template.yaml
+```
+
+如果你要把它发布到 Zeabur 模板市场，再执行：
+
+```bash
+npx zeabur@latest template create -f zeabur.template.yaml
+```
+
+Zeabur 官方文档现在明确要求：
+
+- 先创建或发布模板
+- 再由模板作者在 Dashboard 里复制官方 Deploy Button
+
+也就是说，仓库里我已经把模板配置准备好了，但真正的 Zeabur 官方按钮 URL 还需要你自己的 Zeabur 账号发布一次模板后才能拿到。
 
 ## 访问控制怎么理解
 

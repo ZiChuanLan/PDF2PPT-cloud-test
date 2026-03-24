@@ -1,0 +1,183 @@
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+  name: PDF2PPT
+spec:
+  description: Convert scanned PDFs and slide screenshots into editable PPTX with OCR and hosted single-service backend mode.
+  icon: https://raw.githubusercontent.com/feathericons/feather/master/icons/file-text.svg
+  variables:
+    - key: PUBLIC_DOMAIN
+      type: DOMAIN
+      name: Web Domain
+      description: The public domain for the PDF2PPT web app.
+    - key: WEB_ACCESS_PASSWORD
+      type: PASSWORD
+      name: Web Access Password
+      description: Password required before users can open the web UI and same-origin API routes.
+    - key: API_BEARER_TOKEN
+      type: PASSWORD
+      name: API Bearer Token
+      description: Shared bearer token used by the web proxy and direct API clients such as ppt-mcp.
+  tags:
+    - Productivity
+    - OCR
+    - AI
+    - Documents
+  readme: |-
+    # PDF2PPT
+
+    This template deploys three services in one Zeabur project:
+
+    - `api`: FastAPI backend using hosted single-service mode
+    - `web`: Next.js frontend
+    - `redis`: internal Redis queue
+
+    The backend keeps `api` and `worker` logic in one service by running `sh /app/scripts/run_hosted.sh`, which avoids cross-service shared volume issues on hosted platforms.
+
+    After deployment:
+
+    1. Open the generated public domain.
+    2. Unlock the site with `WEB_ACCESS_PASSWORD`.
+    3. Use direct API clients with `API_BEARER_TOKEN` if needed.
+  resourceUsage:
+    cpu: 0.6
+    memory: 2048
+  services:
+    - name: redis
+      icon: https://raw.githubusercontent.com/zeabur/service-icons/main/marketplace/redis.svg
+      template: PREBUILT
+      spec:
+        source:
+          image: redis:7-alpine
+          command:
+            - redis-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+        ports:
+          - id: redis
+            port: 6379
+            type: TCP
+
+    - name: api
+      icon: https://raw.githubusercontent.com/feathericons/feather/master/icons/server.svg
+      dependencies:
+        - redis
+      template: GIT
+      spec:
+        source:
+          source: GITHUB
+          repo: 1190419861
+          branch: main
+          rootDirectory: api
+          dockerfile: |-
+            FROM python:3.11-slim-bookworm
+
+            WORKDIR /app
+
+            RUN apt-get update \
+                && apt-get install -y --no-install-recommends \
+                    tesseract-ocr \
+                    tesseract-ocr-eng \
+                    tesseract-ocr-chi-sim \
+                    fonts-wqy-zenhei \
+                    libgl1 \
+                    libglib2.0-0 \
+                && rm -rf /var/lib/apt/lists/*
+
+            COPY requirements.txt .
+            RUN pip install --no-cache-dir -r requirements.txt
+
+            COPY . .
+
+            EXPOSE 8000
+
+            CMD ["sh", "/app/scripts/run_hosted.sh"]
+        ports:
+          - id: web
+            port: 8000
+            type: HTTP
+        volumes:
+          - id: api-data
+            dir: /app/data
+          - id: paddlex-cache
+            dir: /root/.paddlex
+          - id: paddle-cache
+            dir: /root/.cache/paddle
+        env:
+          API_BIND_HOST:
+            default: "0.0.0.0"
+          REDIS_URL:
+            default: redis://redis.zeabur.internal:6379/0
+          EMBEDDED_WORKER_CONCURRENCY:
+            default: "1"
+          JOB_ROOT_DIR:
+            default: /app/data/jobs
+          OCR_PADDLE_LAYOUT_PREWARM:
+            default: "1"
+          OCR_PADDLE_LAYOUT_PREWARM_TARGET:
+            default: worker
+          PYTHONUNBUFFERED:
+            default: "1"
+        healthCheck:
+          type: HTTP
+          port: web
+          http:
+            path: /health
+
+    - name: web
+      icon: https://raw.githubusercontent.com/feathericons/feather/master/icons/monitor.svg
+      dependencies:
+        - api
+      template: GIT
+      domainKey: PUBLIC_DOMAIN
+      spec:
+        source:
+          source: GITHUB
+          repo: 1190419861
+          branch: main
+          rootDirectory: web
+          dockerfile: |-
+            FROM node:20-alpine AS build
+
+            WORKDIR /app
+
+            ENV NEXT_TELEMETRY_DISABLED=1
+
+            COPY package*.json ./
+            RUN npm ci
+
+            COPY . .
+
+            ENV NEXT_PUBLIC_API_URL=
+            ENV INTERNAL_API_ORIGIN=http://api.zeabur.internal:8000
+
+            RUN npm run build
+
+            FROM node:20-alpine AS runner
+
+            WORKDIR /app
+
+            ENV NODE_ENV=production
+            ENV HOSTNAME=0.0.0.0
+            ENV NEXT_TELEMETRY_DISABLED=1
+            ENV NEXT_PUBLIC_API_URL=
+            ENV INTERNAL_API_ORIGIN=http://api.zeabur.internal:8000
+
+            COPY --from=build /app/.next/standalone /app
+            COPY --from=build /app/.next/static /app/.next/static
+            COPY --from=build /app/public /app/public
+
+            EXPOSE 3000
+
+            CMD ["sh", "-c", "PORT=${PORT:-3000} node server.js"]
+        ports:
+          - id: web
+            port: 3000
+            type: HTTP
+        healthCheck:
+          type: HTTP
+          port: web
+          http:
+            path: /unlock

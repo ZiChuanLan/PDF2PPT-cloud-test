@@ -1,0 +1,62 @@
+services:
+  - type: keyvalue
+    name: pdf2ppt-redis
+    plan: free
+    maxmemoryPolicy: noeviction
+    ipAllowList: []
+
+  - type: web
+    runtime: docker
+    name: pdf2ppt-api
+    plan: free
+    rootDir: api
+    dockerCommand: sh /app/scripts/run_hosted.sh
+    healthCheckPath: /health
+    autoDeployTrigger: "off"
+    envVars:
+      - key: API_BIND_HOST
+        value: 0.0.0.0
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: pdf2ppt-redis
+          property: connectionString
+      - key: EMBEDDED_WORKER_CONCURRENCY
+        value: "1"
+      - key: API_BEARER_TOKEN
+        generateValue: true
+      - key: JOB_ROOT_DIR
+        value: /app/data/jobs
+      - key: OCR_PADDLE_LAYOUT_PREWARM
+        value: "1"
+      - key: OCR_PADDLE_LAYOUT_PREWARM_TARGET
+        value: worker
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+  - type: web
+    runtime: node
+    name: pdf2ppt-web
+    plan: free
+    rootDir: web
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start -- --hostname 0.0.0.0 --port $PORT
+    healthCheckPath: /unlock
+    autoDeployTrigger: "off"
+    envVars:
+      - key: NEXT_TELEMETRY_DISABLED
+        value: "1"
+      - key: NEXT_PUBLIC_API_URL
+        value: ""
+      - key: INTERNAL_API_HOSTPORT
+        fromService:
+          type: web
+          name: pdf2ppt-api
+          property: hostport
+      - key: API_BEARER_TOKEN
+        fromService:
+          type: web
+          name: pdf2ppt-api
+          envVarKey: API_BEARER_TOKEN
+      - key: WEB_ACCESS_PASSWORD
+        sync: false
