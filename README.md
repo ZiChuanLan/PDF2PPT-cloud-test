@@ -4,7 +4,7 @@ Convert scanned PDFs, slide screenshots, and image-heavy documents into editable
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ZiChuanLan/PDF2PPT-cloud-test)
 
-Zeabur 模板已经放在 [zeabur.template.yaml](/home/lan/workspace/ppt-cloud-test/zeabur.template.yaml)；发布到你自己的 Zeabur 模板后，可以在 Dashboard 复制官方 Deploy Button。
+Zeabur 模板页已经发布：<https://zeabur.com/templates/UKLIVV> 。模板源码见 [zeabur.template.yaml](/home/lan/workspace/ppt-cloud-test/zeabur.template.yaml)；如果你还想放官方 Deploy Button，可以继续在 Zeabur Dashboard 里复制按钮链接。
 
 `PDF2PPT` 用来把 PDF，尤其是扫描版、图片版、课件截图类文档，转换成尽量高保真、尽量可编辑的 PPTX。
 
@@ -208,7 +208,13 @@ Zeabur 官方文档现在明确要求：
 - 先创建或发布模板
 - 再由模板作者在 Dashboard 里复制官方 Deploy Button
 
-也就是说，仓库里我已经把模板配置准备好了，但真正的 Zeabur 官方按钮 URL 还需要你自己的 Zeabur 账号发布一次模板后才能拿到。
+当前已发布的 Zeabur 模板代码是 `UKLIVV`，模板页地址是：
+
+```text
+https://zeabur.com/templates/UKLIVV
+```
+
+如果你还想把“官方 Deploy Button”图片也贴回 README，下一步去 Zeabur Dashboard 打开这个模板，复制官方按钮 URL 即可。
 
 ## 访问控制怎么理解
 
