@@ -105,25 +105,6 @@ Detailed architecture, OCR pipelines, MCP integration, deployment details, and F
 - [OCR and Parsing Pipelines](https://zichuanlan.github.io/PDF2PPT-cloud-test/en/guide/ocr-pipelines)
 - [FAQ and Troubleshooting](https://zichuanlan.github.io/PDF2PPT-cloud-test/en/guide/faq)
 
-To preview the docs site locally:
-
-```bash
-npm install
-npm run docs:dev
-```
-
-To run the docs site with Docker:
-
-```bash
-docker compose -f docker-compose.docs.yml up -d --build
-```
-
-Default URL:
-
-- Docs: `http://localhost:4173`
-
-The repository also includes a GitHub Pages workflow, so pushes to `main` can automatically publish the docs site.
-
 ## License
 
 MIT. See [LICENSE](LICENSE).

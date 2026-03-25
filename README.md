@@ -105,25 +105,6 @@ docker compose -f docker-compose.hosted.yml up -d --build
 - [OCR 与解析链路](https://zichuanlan.github.io/PDF2PPT-cloud-test/guide/ocr-pipelines)
 - [FAQ 与排障](https://zichuanlan.github.io/PDF2PPT-cloud-test/guide/faq)
 
-本地预览文档站：
-
-```bash
-npm install
-npm run docs:dev
-```
-
-使用 Docker 运行文档站：
-
-```bash
-docker compose -f docker-compose.docs.yml up -d --build
-```
-
-默认访问地址：
-
-- Docs: `http://localhost:4173`
-
-仓库也已经包含 GitHub Pages 自动部署工作流，推送到 `main` 后可自动发布文档站。
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
