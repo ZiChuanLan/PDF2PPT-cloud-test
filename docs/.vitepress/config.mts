@@ -1,7 +1,7 @@
 import { defineConfig } from "vitepress"
 
-const repo = "https://github.com/ZiChuanLan/PDF2PPT-cloud-test"
-const repoName = process.env.GITHUB_REPOSITORY?.split("/")[1] || "PDF2PPT-cloud-test"
+const repo = "https://github.com/ZiChuanLan/PDF2PPT"
+const repoName = process.env.GITHUB_REPOSITORY?.split("/")[1] || "PDF2PPT"
 const base =
   process.env.DOCS_BASE ||
   (process.env.GITHUB_ACTIONS ? `/${repoName}/` : "/")

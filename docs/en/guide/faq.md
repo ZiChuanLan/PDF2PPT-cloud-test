@@ -15,7 +15,7 @@ The final level of editability depends on scan quality, page complexity, OCR qua
 ### Do I have to configure a remote OCR API key?
 
 Not necessarily.  
-The project supports both local and remote OCR/parsing pipelines. But if you want remote OCR as the default path, you need to fill the corresponding variables from [`.env.example`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/.env.example).
+The project supports both local and remote OCR/parsing pipelines. But if you want remote OCR as the default path, you need to fill the corresponding variables from [`.env.example`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/.env.example).
 
 ### Is it better for local use or service deployment?
 

@@ -8,12 +8,12 @@
 ![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ZiChuanLan/PDF2PPT-cloud-test)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ZiChuanLan/PDF2PPT)
 [![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/UKLIVV)
 
 [中文](./README.md) | [English](./README_EN.md)
 
-[Docs Site](https://zichuanlan.github.io/PDF2PPT-cloud-test/) · [Quick Start](#quick-start) · [Deployment Modes](#deployment-modes) · [License](#license)
+[Docs Site](https://zichuanlan.github.io/PDF2PPT/) · [Quick Start](#quick-start) · [Deployment Modes](#deployment-modes) · [License](#license)
 
 `PDF2PPT` is an open-source service built for real usage and deployment.  
 Instead of flattening every PDF page into a single image, it tries to rebuild pages into editable text, separated image regions, and cleaned backgrounds before exporting to PowerPoint.
@@ -98,12 +98,12 @@ For a conservative first run, start with `remote_ocr + aiocr + fullpage`.
 
 Detailed architecture, OCR pipelines, MCP integration, deployment details, and FAQ are now available in the docs site:
 
-- [Docs Home](https://zichuanlan.github.io/PDF2PPT-cloud-test/en/)
-- [Deployment Guide](https://zichuanlan.github.io/PDF2PPT-cloud-test/en/guide/deployment)
-- [Architecture](https://zichuanlan.github.io/PDF2PPT-cloud-test/en/guide/architecture)
-- [MCP Integration](https://zichuanlan.github.io/PDF2PPT-cloud-test/en/guide/mcp-integration)
-- [OCR and Parsing Pipelines](https://zichuanlan.github.io/PDF2PPT-cloud-test/en/guide/ocr-pipelines)
-- [FAQ and Troubleshooting](https://zichuanlan.github.io/PDF2PPT-cloud-test/en/guide/faq)
+- [Docs Home](https://zichuanlan.github.io/PDF2PPT/en/)
+- [Deployment Guide](https://zichuanlan.github.io/PDF2PPT/en/guide/deployment)
+- [Architecture](https://zichuanlan.github.io/PDF2PPT/en/guide/architecture)
+- [MCP Integration](https://zichuanlan.github.io/PDF2PPT/en/guide/mcp-integration)
+- [OCR and Parsing Pipelines](https://zichuanlan.github.io/PDF2PPT/en/guide/ocr-pipelines)
+- [FAQ and Troubleshooting](https://zichuanlan.github.io/PDF2PPT/en/guide/faq)
 
 ## License
 

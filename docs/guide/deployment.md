@@ -5,11 +5,11 @@
 | 模式 | 适合场景 | 入口文件 |
 | --- | --- | --- |
 | 本地开发 | 本机联调、快速改动 | `make dev-local` |
-| 标准部署 | 长期运行或生产部署 | [`docker-compose.yml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/docker-compose.yml) |
-| Hosted 单服务后端 | 云平台快速验证后端 | [`docker-compose.hosted.yml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/docker-compose.hosted.yml) |
-| Docs 文档站 | 独立运行文档站 | [`docker-compose.docs.yml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/docker-compose.docs.yml) |
-| Render | 一键部署 | [`render.yaml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/render.yaml) |
-| Zeabur | 模板化部署 | [`zeabur.template.yaml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/zeabur.template.yaml) |
+| 标准部署 | 长期运行或生产部署 | [`docker-compose.yml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/docker-compose.yml) |
+| Hosted 单服务后端 | 云平台快速验证后端 | [`docker-compose.hosted.yml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/docker-compose.hosted.yml) |
+| Docs 文档站 | 独立运行文档站 | [`docker-compose.docs.yml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/docker-compose.docs.yml) |
+| Render | 一键部署 | [`render.yaml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/render.yaml) |
+| Zeabur | 模板化部署 | [`zeabur.template.yaml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/zeabur.template.yaml) |
 
 ## 本地开发
 
@@ -56,7 +56,7 @@ docker compose -f docker-compose.hosted.yml up -d --build
 - 最低成本验证：`REDIS_URL=memory://`
 - 接入托管 Redis：`REDIS_URL=<your-redis-url>` 且 `EMBEDDED_WORKER_CONCURRENCY=1`
 
-容器启动命令使用的是 [`api/scripts/run_hosted.sh`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/api/scripts/run_hosted.sh)。
+容器启动命令使用的是 [`api/scripts/run_hosted.sh`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/api/scripts/run_hosted.sh)。
 
 ## Docs 文档站 Docker 运行
 
@@ -78,7 +78,7 @@ DOCS_PORT=8080 docker compose -f docker-compose.docs.yml up -d --build
 
 仓库已经包含 GitHub Pages 工作流：
 
-- [`.github/workflows/deploy-docs.yml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/.github/workflows/deploy-docs.yml)
+- [`.github/workflows/deploy-docs.yml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/.github/workflows/deploy-docs.yml)
 
 启用方式：
 
@@ -90,7 +90,7 @@ DOCS_PORT=8080 docker compose -f docker-compose.docs.yml up -d --build
 默认发布地址通常是：
 
 ```text
-https://<your-github-username>.github.io/PDF2PPT-cloud-test/
+https://<your-github-username>.github.io/PDF2PPT/
 ```
 
 当前 VitePress 配置已经自动适配 GitHub Pages 的仓库子路径。
@@ -105,12 +105,12 @@ DOCS_BASE=/ npm run docs:build
 
 ### Render
 
-- Blueprint 文件：[`render.yaml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/render.yaml)
+- Blueprint 文件：[`render.yaml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/render.yaml)
 - 默认会创建 `pdf2ppt-api`、`pdf2ppt-web` 和 `pdf2ppt-redis`
 
 ### Zeabur
 
-- 模板文件：[`zeabur.template.yaml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/zeabur.template.yaml)
+- 模板文件：[`zeabur.template.yaml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/zeabur.template.yaml)
 - 模板页：<https://zeabur.com/templates/UKLIVV>
 
 ## 访问控制
@@ -129,7 +129,7 @@ DOCS_BASE=/ npm run docs:build
 
 ## 关键环境变量
 
-完整变量说明见 [`.env.example`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/.env.example)。
+完整变量说明见 [`.env.example`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/.env.example)。
 
 | 变量 | 用途 |
 | --- | --- |

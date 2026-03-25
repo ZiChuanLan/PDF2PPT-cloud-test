@@ -8,12 +8,12 @@
 ![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ZiChuanLan/PDF2PPT-cloud-test)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ZiChuanLan/PDF2PPT)
 [![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/UKLIVV)
 
 [中文](./README.md) | [English](./README_EN.md)
 
-[文档站](https://zichuanlan.github.io/PDF2PPT-cloud-test/) · [快速开始](#快速开始) · [部署方式](#部署方式) · [License](#license)
+[文档站](https://zichuanlan.github.io/PDF2PPT/) · [快速开始](#快速开始) · [部署方式](#部署方式) · [License](#license)
 
 `PDF2PPT` 是一个面向实际使用和部署的开源服务。  
 它不是简单地把 PDF 每页导成一张图，而是尽量把页面重建为可编辑文本、独立图片区域和清理后的页面底图，再导出为 PowerPoint。
@@ -98,12 +98,12 @@ docker compose -f docker-compose.hosted.yml up -d --build
 
 详细架构、OCR 链路、MCP 集成、部署细节和 FAQ 已迁移到文档站：
 
-- [文档站首页](https://zichuanlan.github.io/PDF2PPT-cloud-test/)
-- [部署指南](https://zichuanlan.github.io/PDF2PPT-cloud-test/guide/deployment)
-- [架构说明](https://zichuanlan.github.io/PDF2PPT-cloud-test/guide/architecture)
-- [MCP 集成](https://zichuanlan.github.io/PDF2PPT-cloud-test/guide/mcp-integration)
-- [OCR 与解析链路](https://zichuanlan.github.io/PDF2PPT-cloud-test/guide/ocr-pipelines)
-- [FAQ 与排障](https://zichuanlan.github.io/PDF2PPT-cloud-test/guide/faq)
+- [文档站首页](https://zichuanlan.github.io/PDF2PPT/)
+- [部署指南](https://zichuanlan.github.io/PDF2PPT/guide/deployment)
+- [架构说明](https://zichuanlan.github.io/PDF2PPT/guide/architecture)
+- [MCP 集成](https://zichuanlan.github.io/PDF2PPT/guide/mcp-integration)
+- [OCR 与解析链路](https://zichuanlan.github.io/PDF2PPT/guide/ocr-pipelines)
+- [FAQ 与排障](https://zichuanlan.github.io/PDF2PPT/guide/faq)
 
 ## License
 

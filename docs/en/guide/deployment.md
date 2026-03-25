@@ -5,11 +5,11 @@
 | Mode | Best for | Entry |
 | --- | --- | --- |
 | Local development | Fast local iteration | `make dev-local` |
-| Standard deployment | Long-running or production setups | [`docker-compose.yml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/docker-compose.yml) |
-| Hosted single-service backend | Fast backend validation on hosted platforms | [`docker-compose.hosted.yml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/docker-compose.hosted.yml) |
-| Docs site | Standalone documentation site | [`docker-compose.docs.yml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/docker-compose.docs.yml) |
-| Render | One-click deployment | [`render.yaml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/render.yaml) |
-| Zeabur | Template-based deployment | [`zeabur.template.yaml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/zeabur.template.yaml) |
+| Standard deployment | Long-running or production setups | [`docker-compose.yml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/docker-compose.yml) |
+| Hosted single-service backend | Fast backend validation on hosted platforms | [`docker-compose.hosted.yml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/docker-compose.hosted.yml) |
+| Docs site | Standalone documentation site | [`docker-compose.docs.yml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/docker-compose.docs.yml) |
+| Render | One-click deployment | [`render.yaml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/render.yaml) |
+| Zeabur | Template-based deployment | [`zeabur.template.yaml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/zeabur.template.yaml) |
 
 ## Local Development
 
@@ -56,7 +56,7 @@ Recommended variants:
 - Lowest-friction validation: `REDIS_URL=memory://`
 - Hosted Redis: `REDIS_URL=<your-redis-url>` and `EMBEDDED_WORKER_CONCURRENCY=1`
 
-The container entrypoint is [`api/scripts/run_hosted.sh`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/api/scripts/run_hosted.sh).
+The container entrypoint is [`api/scripts/run_hosted.sh`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/api/scripts/run_hosted.sh).
 
 ## Running the Docs Site with Docker
 
@@ -78,7 +78,7 @@ DOCS_PORT=8080 docker compose -f docker-compose.docs.yml up -d --build
 
 The repository already includes a GitHub Pages workflow:
 
-- [`.github/workflows/deploy-docs.yml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/.github/workflows/deploy-docs.yml)
+- [`.github/workflows/deploy-docs.yml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/.github/workflows/deploy-docs.yml)
 
 To enable it:
 
@@ -90,7 +90,7 @@ To enable it:
 The default URL is typically:
 
 ```text
-https://<your-github-username>.github.io/PDF2PPT-cloud-test/
+https://<your-github-username>.github.io/PDF2PPT/
 ```
 
 The current VitePress config already auto-adapts to the repository subpath used by GitHub Pages.
@@ -105,12 +105,12 @@ DOCS_BASE=/ npm run docs:build
 
 ### Render
 
-- Blueprint: [`render.yaml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/render.yaml)
+- Blueprint: [`render.yaml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/render.yaml)
 - Creates `pdf2ppt-api`, `pdf2ppt-web`, and `pdf2ppt-redis` by default
 
 ### Zeabur
 
-- Template file: [`zeabur.template.yaml`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/zeabur.template.yaml)
+- Template file: [`zeabur.template.yaml`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/zeabur.template.yaml)
 - Template page: <https://zeabur.com/templates/UKLIVV>
 
 ## Access Control
@@ -129,7 +129,7 @@ Before exposing it beyond local testing:
 
 ## Key Environment Variables
 
-See [`.env.example`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/.env.example) for the full list.
+See [`.env.example`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/.env.example) for the full list.
 
 | Variable | Purpose |
 | --- | --- |

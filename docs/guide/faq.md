@@ -15,7 +15,7 @@
 ### 一定要配置远程 OCR API Key 吗？
 
 不一定。  
-仓库支持本地和远程多种 OCR/解析链路，但如果你希望直接使用远程 OCR 作为默认能力，就需要在 [`.env.example`](https://github.com/ZiChuanLan/PDF2PPT-cloud-test/blob/main/.env.example) 对应的环境变量基础上补齐配置。
+仓库支持本地和远程多种 OCR/解析链路，但如果你希望直接使用远程 OCR 作为默认能力，就需要在 [`.env.example`](https://github.com/ZiChuanLan/PDF2PPT/blob/main/.env.example) 对应的环境变量基础上补齐配置。
 
 ### 它更适合本地用，还是部署成服务？
 

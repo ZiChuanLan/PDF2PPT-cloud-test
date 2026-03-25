@@ -14,7 +14,7 @@ hero:
       link: /guide/architecture
     - theme: alt
       text: GitHub
-      link: https://github.com/ZiChuanLan/PDF2PPT-cloud-test
+      link: https://github.com/ZiChuanLan/PDF2PPT
 
 features:
   - title: 快速部署
