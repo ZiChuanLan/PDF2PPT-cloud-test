@@ -1,0 +1,85 @@
+<svg width="1200" height="420" viewBox="0 0 1200 420" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="82" y1="40" x2="1120" y2="378" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F7FEFC"/>
+      <stop offset="0.46" stop-color="#EFF6FF"/>
+      <stop offset="1" stop-color="#F8FAFC"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#0F766E"/>
+      <stop offset="1" stop-color="#2563EB"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E0F2FE"/>
+    </linearGradient>
+    <filter id="shadow" x="-30" y="-30" width="200" height="220" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="18" stdDeviation="16" flood-color="#0F172A" flood-opacity="0.12"/>
+    </filter>
+    <filter id="soft" x="-40" y="-40" width="400" height="320" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#0F172A" flood-opacity="0.10"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="420" rx="28" fill="url(#bg)"/>
+  <circle cx="1048" cy="70" r="88" fill="#93C5FD" fill-opacity="0.20"/>
+  <circle cx="930" cy="320" r="96" fill="#5EEAD4" fill-opacity="0.16"/>
+  <circle cx="148" cy="96" r="78" fill="#BFDBFE" fill-opacity="0.22"/>
+
+  <g transform="translate(66 68)">
+    <text x="0" y="0" fill="#0F172A" font-family="Segoe UI, Trebuchet MS, sans-serif" font-size="54" font-weight="700">PDF2PPT</text>
+    <text x="0" y="40" fill="#475569" font-family="Segoe UI, Trebuchet MS, sans-serif" font-size="23" font-weight="500">
+      Scanned PDF to editable slide workflow
+    </text>
+    <text x="0" y="94" fill="#0F766E" font-family="Segoe UI, Trebuchet MS, sans-serif" font-size="18" font-weight="700">
+      OCR • Layout Reconstruction • Web/API/Worker • Deployment Ready
+    </text>
+
+    <g transform="translate(0 126)">
+      <rect x="0" y="0" width="178" height="40" rx="20" fill="#0F766E"/>
+      <text x="89" y="25" text-anchor="middle" fill="#F8FAFC" font-family="Segoe UI, Trebuchet MS, sans-serif" font-size="16" font-weight="700">
+        High fidelity
+      </text>
+
+      <rect x="194" y="0" width="188" height="40" rx="20" fill="#E0F2FE"/>
+      <text x="288" y="25" text-anchor="middle" fill="#1D4ED8" font-family="Segoe UI, Trebuchet MS, sans-serif" font-size="16" font-weight="700">
+        Editable output
+      </text>
+    </g>
+  </g>
+
+  <g transform="translate(682 60)">
+    <g filter="url(#soft)">
+      <g transform="translate(0 58) rotate(-6 112 130)">
+        <rect x="0" y="0" width="168" height="224" rx="18" fill="#0B1220" fill-opacity="0.06"/>
+        <path d="M32 18H108L136 46V194C136 207.255 125.255 218 112 218H32C18.7452 218 8 207.255 8 194V42C8 28.7452 18.7452 18 32 18Z" fill="url(#paper)"/>
+        <path d="M108 18V42C108 48.6274 113.373 54 120 54H136" fill="#BFDBFE"/>
+        <rect x="28" y="70" width="52" height="10" rx="5" fill="#0F766E"/>
+        <rect x="28" y="90" width="88" height="10" rx="5" fill="#14B8A6" fill-opacity="0.95"/>
+        <rect x="28" y="110" width="76" height="10" rx="5" fill="#2563EB" fill-opacity="0.88"/>
+        <rect x="24" y="64" width="74" height="24" rx="8" stroke="#2DD4BF" stroke-width="2.5" stroke-dasharray="6 4"/>
+        <rect x="74" y="140" width="42" height="34" rx="8" fill="#DBEAFE"/>
+        <rect x="28" y="140" width="36" height="34" rx="8" fill="#ECFEFF"/>
+      </g>
+    </g>
+
+    <path d="M232 174C274 174 308 152 332 112" stroke="url(#ink)" stroke-width="7" stroke-linecap="round"/>
+    <path d="M318 110L336 108L330 125" stroke="url(#ink)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <g filter="url(#shadow)" transform="translate(344 42)">
+      <rect x="16" y="22" width="210" height="148" rx="20" fill="#0B1220" fill-opacity="0.08"/>
+      <rect x="0" y="0" width="226" height="162" rx="24" fill="#FFFFFF"/>
+      <rect x="0" y="0" width="226" height="22" rx="24" fill="url(#ink)"/>
+      <circle cx="18" cy="11" r="4" fill="#CCFBF1"/>
+      <circle cx="32" cy="11" r="4" fill="#BFDBFE"/>
+      <circle cx="46" cy="11" r="4" fill="#E0F2FE"/>
+      <rect x="26" y="40" width="76" height="10" rx="5" fill="#0F766E"/>
+      <rect x="26" y="60" width="132" height="10" rx="5" fill="#2563EB" fill-opacity="0.92"/>
+      <rect x="26" y="82" width="60" height="54" rx="12" fill="#ECFEFF"/>
+      <rect x="98" y="82" width="94" height="12" rx="6" fill="#CBD5E1"/>
+      <rect x="98" y="102" width="80" height="12" rx="6" fill="#CBD5E1"/>
+      <rect x="98" y="122" width="66" height="12" rx="6" fill="#CBD5E1"/>
+      <rect x="26" y="82" width="60" height="54" rx="12" stroke="#14B8A6" stroke-width="2"/>
+    </g>
+  </g>
+</svg>

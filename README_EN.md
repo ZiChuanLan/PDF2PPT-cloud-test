@@ -1,5 +1,13 @@
 # PDF2PPT
 
+<p align="center">
+  <img src="./assets/branding/logo.svg" alt="PDF2PPT logo" width="104" />
+</p>
+
+<p align="center">
+  <img src="./assets/branding/banner.svg" alt="PDF2PPT banner" width="100%" />
+</p>
+
 > Convert scanned PDFs, slide screenshots, and image-heavy documents into high-fidelity, as-editable-as-possible PPTX files.
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)

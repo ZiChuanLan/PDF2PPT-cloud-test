@@ -1,5 +1,13 @@
 # PDF2PPT
 
+<p align="center">
+  <img src="./assets/branding/logo.svg" alt="PDF2PPT logo" width="104" />
+</p>
+
+<p align="center">
+  <img src="./assets/branding/banner.svg" alt="PDF2PPT banner" width="100%" />
+</p>
+
 > 将扫描版 PDF、课件截图和图片型文档转换为尽量高保真、尽量可编辑的 PPTX。
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
