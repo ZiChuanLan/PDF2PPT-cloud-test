@@ -11,6 +11,8 @@ const zhGuideSidebar = [
         text: "开始使用",
         items: [
           { text: "部署指南", link: "/guide/deployment" },
+          { text: "功能详解", link: "/guide/feature-tour" },
+          { text: "设置与高级设置", link: "/guide/settings-reference" },
           { text: "架构说明", link: "/guide/architecture" },
           { text: "MCP 集成", link: "/guide/mcp-integration" },
           { text: "OCR 与解析链路", link: "/guide/ocr-pipelines" },
@@ -28,6 +30,8 @@ const enGuideSidebar = [
         text: "Getting Started",
         items: [
           { text: "Deployment Guide", link: "/en/guide/deployment" },
+          { text: "Feature Tour", link: "/en/guide/feature-tour" },
+          { text: "Settings Reference", link: "/en/guide/settings-reference" },
           { text: "Architecture", link: "/en/guide/architecture" },
           { text: "MCP Integration", link: "/en/guide/mcp-integration" },
           { text: "OCR and Parsing Pipelines", link: "/en/guide/ocr-pipelines" },
@@ -45,6 +49,8 @@ function zhThemeConfig() {
     nav: [
       { text: "首页", link: "/" },
       { text: "部署", link: "/guide/deployment" },
+      { text: "功能", link: "/guide/feature-tour" },
+      { text: "设置", link: "/guide/settings-reference" },
       { text: "架构", link: "/guide/architecture" },
       { text: "MCP", link: "/guide/mcp-integration" },
       { text: "OCR", link: "/guide/ocr-pipelines" },
@@ -98,6 +104,8 @@ function enThemeConfig() {
     nav: [
       { text: "Home", link: "/en/" },
       { text: "Deployment", link: "/en/guide/deployment" },
+      { text: "Features", link: "/en/guide/feature-tour" },
+      { text: "Settings", link: "/en/guide/settings-reference" },
       { text: "Architecture", link: "/en/guide/architecture" },
       { text: "MCP", link: "/en/guide/mcp-integration" },
       { text: "OCR", link: "/en/guide/ocr-pipelines" },

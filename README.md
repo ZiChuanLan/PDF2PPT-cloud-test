@@ -1,3 +1,4 @@
+# PDF2PPT
 
 <p align="center">
   <img src="./assets/branding/banner.svg" alt="PDF2PPT banner" width="100%" />
@@ -28,17 +29,6 @@
 | 演示站点 | <https://ppt.015201314.xyz/> |
 | 访问密码 | `lanPDF2PPT2026!` |
 
-
-
-## 界面预览
-
-| 跟踪页面 | 任务记录 |
-| --- | --- |
-| ![PDF2PPT 跟踪页面](https://i.postimg.cc/pVshZ5t5/gen-zong-ye-mian.png) | ![PDF2PPT 任务记录](https://i.postimg.cc/3rt4B0Hy/ren-wu-ji-lu.png) |
-
-| AIOCR 设置 | 云端 MinerU 设置 |
-| --- | --- |
-| ![PDF2PPT AIOCR 设置](https://i.postimg.cc/CMcBNnVq/she-zhi-aiocr.png) | ![PDF2PPT 云端 MinerU 设置](https://i.postimg.cc/gcgXDLPR/she-zhi-yun-duanmineru.png) |
 ## 介绍
 
 处理扫描版 PDF、课件截图和图片型文档时，常见做法往往只是整页截图导出，后续几乎无法编辑。  
@@ -69,6 +59,17 @@
 - 支持本地 OCR、远程 OCR、百度文档解析、MinerU 等多种链路
 - 提供 Web 上传、任务跟踪、结果下载和 API 接入
 - 支持标准 Docker 部署、Hosted 单服务模式、Render 和 Zeabur
+
+## 界面预览
+
+| 跟踪页面 | 任务记录 |
+| --- | --- |
+| ![PDF2PPT 跟踪页面](https://i.postimg.cc/pVshZ5t5/gen-zong-ye-mian.png) | ![PDF2PPT 任务记录](https://i.postimg.cc/3rt4B0Hy/ren-wu-ji-lu.png) |
+
+| AIOCR 设置 | 云端 MinerU 设置 |
+| --- | --- |
+| ![PDF2PPT AIOCR 设置](https://i.postimg.cc/CMcBNnVq/she-zhi-aiocr.png) | ![PDF2PPT 云端 MinerU 设置](https://i.postimg.cc/gcgXDLPR/she-zhi-yun-duanmineru.png) |
+
 ## 快速开始
 
 ### 本地体验
@@ -136,6 +137,8 @@ docker compose -f docker-compose.hosted.yml up -d --build
 更详细的架构、OCR 链路、MCP 集成、部署细节和 FAQ 已迁移到文档站：
 
 - [文档站首页](https://zichuanlan.github.io/PDF2PPT/)
+- [功能详解](https://zichuanlan.github.io/PDF2PPT/guide/feature-tour)
+- [设置与高级设置](https://zichuanlan.github.io/PDF2PPT/guide/settings-reference)
 - [部署指南](https://zichuanlan.github.io/PDF2PPT/guide/deployment)
 - [MCP 集成](https://zichuanlan.github.io/PDF2PPT/guide/mcp-integration)
 - [FAQ 与排障](https://zichuanlan.github.io/PDF2PPT/guide/faq)

@@ -19,10 +19,12 @@ hero:
 features:
   - title: 快速部署
     details: 支持本地开发、标准 Docker 部署、Hosted 单服务后端、Render 和 Zeabur。
+  - title: 功能详解
+    details: 补充介绍首页、跟踪页、设置页分别做什么，以及用户在每个页面里能完成哪些操作。
   - title: MCP 集成
     details: "`ppt-mcp` 作为体系中的 MCP 接入层，可以把现有 PDF2PPT 服务暴露给 Claude Desktop、Cursor、Codex CLI 等客户端。"
-  - title: 聚焦应用
-    details: 文档优先说明怎么使用、怎么部署、怎么排障，而不是一开始就堆内部实现细节。
+  - title: 设置说明
+    details: 单独解释常用设置与高级设置，帮助理解哪些参数该先动，哪些参数只在调优时使用。
   - title: 可继续扩展
     details: 当前 docs 结构已经适合作为正式文档站内容源，后续可继续接入更多页面和示例。
 ---
