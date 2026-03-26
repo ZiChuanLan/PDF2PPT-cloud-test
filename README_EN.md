@@ -1,7 +1,7 @@
 # PDF2PPT
 
 <p align="center">
-  <img src="./pictures/首页.png" alt="PDF2PPT home screen" width="100%" />
+  <img src="https://i.postimg.cc/44W75HTp/shou-ye.png" alt="PDF2PPT home screen" width="100%" />
 </p>
 
 > Convert scanned PDFs, slide screenshots, and image-heavy documents into high-fidelity, as-editable-as-possible PPTX files.
@@ -44,8 +44,8 @@ Instead of flattening every PDF page into a single image, it tries to rebuild pa
 ## Interface Preview
 
 <p align="center">
-  <img src="./pictures/设置-aiocr.png" alt="PDF2PPT AI OCR settings" width="49%" />
-  <img src="./pictures/跟踪页面.png" alt="PDF2PPT tracking page" width="49%" />
+  <img src="https://i.postimg.cc/CMcBNnVq/she-zhi-aiocr.png" alt="PDF2PPT AI OCR settings" width="49%" />
+  <img src="https://i.postimg.cc/pVshZ5t5/gen-zong-ye-mian.png" alt="PDF2PPT tracking page" width="49%" />
 </p>
 
 ## Quick Start
