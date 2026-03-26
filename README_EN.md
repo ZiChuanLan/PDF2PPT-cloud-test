@@ -1,4 +1,3 @@
-# PDF2PPT
 
 <p align="center">
   <img src="./assets/branding/banner.svg" alt="PDF2PPT banner" width="100%" />
@@ -29,6 +28,17 @@ Instead of flattening every PDF page into a single image, it tries to rebuild pa
 | Demo site | <https://ppt.015201314.xyz/> |
 | Access password | `lanPDF2PPT2026!` |
 
+
+
+## Interface Preview
+
+| Tracking Page | Job History |
+| --- | --- |
+| ![PDF2PPT tracking page](https://i.postimg.cc/pVshZ5t5/gen-zong-ye-mian.png) | ![PDF2PPT job history](https://i.postimg.cc/3rt4B0Hy/ren-wu-ji-lu.png) |
+
+| AIOCR Settings | MinerU Settings |
+| --- | --- |
+| ![PDF2PPT AIOCR settings](https://i.postimg.cc/CMcBNnVq/she-zhi-aiocr.png) | ![PDF2PPT MinerU settings](https://i.postimg.cc/gcgXDLPR/she-zhi-yun-duanmineru.png) |
 ## Overview
 
 When handling scanned PDFs, slide screenshots, and image-heavy reports, the common outcome is often just a full-page image with almost no editability.  
@@ -59,17 +69,6 @@ When handling scanned PDFs, slide screenshots, and image-heavy reports, the comm
 - Support for local OCR, remote OCR, Baidu document parsing, MinerU, and related routes
 - Web upload, job tracking, result download, and API-based integration
 - Standard Docker deployment, hosted single-service mode, Render, and Zeabur support
-
-## Interface Preview
-
-| Tracking Page | Job History |
-| --- | --- |
-| ![PDF2PPT tracking page](https://i.postimg.cc/pVshZ5t5/gen-zong-ye-mian.png) | ![PDF2PPT job history](https://i.postimg.cc/3rt4B0Hy/ren-wu-ji-lu.png) |
-
-| AIOCR Settings | MinerU Settings |
-| --- | --- |
-| ![PDF2PPT AIOCR settings](https://i.postimg.cc/CMcBNnVq/she-zhi-aiocr.png) | ![PDF2PPT MinerU settings](https://i.postimg.cc/gcgXDLPR/she-zhi-yun-duanmineru.png) |
-
 ## Quick Start
 
 ### Local Tryout
