@@ -19,6 +19,9 @@
 
 [Docs Site](https://zichuanlan.github.io/PDF2PPT/) · [Quick Start](#quick-start) · [Deployment Options](#deployment-options) · [License](#license)
 
+Live demo: <https://ppt.015201314.xyz/>  
+Access password: `lanPDF2PPT2026!`
+
 `PDF2PPT` is an open-source service built for real usage and deployment.  
 Instead of flattening every PDF page into a single image, it tries to rebuild pages into editable text, separated image regions, and cleaned backgrounds before exporting to PowerPoint.
 

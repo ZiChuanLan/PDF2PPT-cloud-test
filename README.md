@@ -19,6 +19,9 @@
 
 [文档站](https://zichuanlan.github.io/PDF2PPT/) · [快速开始](#快速开始) · [部署选项](#部署选项) · [License](#license)
 
+演示站点：<https://ppt.015201314.xyz/>  
+访问密码：`lanPDF2PPT2026!`
+
 `PDF2PPT` 是一个面向实际使用和部署的开源服务。  
 它不是简单地把 PDF 每页导成一张图，而是尽量把页面重建为可编辑文本、独立图片区域和清理后的页面底图，再导出为 PowerPoint。
 
