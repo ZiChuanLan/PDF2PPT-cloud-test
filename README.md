@@ -1,4 +1,4 @@
-# PDF2PPT
+
 
 <p align="center">
   <img src="./assets/branding/banner.svg" alt="PDF2PPT banner" width="100%" />
