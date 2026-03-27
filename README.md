@@ -137,6 +137,10 @@ docker compose -f docker-compose.hosted.yml up -d --build
 | Render | 一键部署 | [`render.yaml`](render.yaml) |
 | Zeabur | 模板化部署 | [`zeabur.template.yaml`](zeabur.template.yaml) |
 
+## MCP支持
+
+- [MCP 仓库](https://github.com/ZiChuanLan/ppt-mcp)
+
 ## 文档
 
 更详细的架构、OCR 链路、MCP 集成、部署细节和 FAQ 已迁移到文档站：
