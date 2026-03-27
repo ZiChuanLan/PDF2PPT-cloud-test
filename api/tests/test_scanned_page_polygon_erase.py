@@ -173,6 +173,72 @@ def test_build_scanned_image_region_infos_preserves_polygon_masked_crop(
     assert crop.getpixel((40, 40))[3] == 255
 
 
+def test_apply_text_cutouts_to_scanned_ai_hint_polygon_crop(tmp_path) -> None:
+    render_path = tmp_path / "render.text-cutout.png"
+    image = Image.new("RGB", (120, 120), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([50, 10, 110, 110], fill=(180, 180, 180))
+    draw.polygon(
+        [(70, 10), (110, 10), (110, 110), (50, 110), (60, 60)],
+        fill=(0, 0, 0),
+    )
+    image.save(render_path)
+
+    info = scanned_page._ScannedImageRegionInfo(
+        bbox_pt=[50.0, 10.0, 110.0, 110.0],
+        suppress_bbox_pt=[48.0, 8.0, 112.0, 112.0],
+        crop_path=tmp_path / "artifacts" / "crop.png",
+        shape_confirmed=True,
+        ai_hint=True,
+        geometry_kind="polygon",
+        geometry_points_pt=[
+            [70.0, 10.0],
+            [110.0, 10.0],
+            [110.0, 110.0],
+            [50.0, 110.0],
+            [60.0, 60.0],
+        ],
+    )
+    scanned_page._save_scanned_image_region_crop(
+        img=image,
+        bbox_pt=info.bbox_pt,
+        crop_out_path=info.crop_path,
+        page_h_pt=120.0,
+        scanned_render_dpi=72,
+        geometry_points_pt=info.geometry_points_pt,
+    )
+
+    kept = scanned_page._filter_scanned_ocr_text_elements(
+        ocr_text_elements=[
+            {
+                "text": "Planning",
+                "bbox_pt": [20.0, 40.0, 80.0, 70.0],
+                "ocr_layout_geometry_kind": "polygon",
+                "ocr_layout_geometry_points_pt": [
+                    [20.0, 40.0],
+                    [80.0, 40.0],
+                    [80.0, 70.0],
+                    [20.0, 70.0],
+                ],
+            }
+        ],
+        image_region_infos=[info],
+        baseline_ocr_h_pt=12.0,
+    )
+
+    scanned_page._apply_text_cutouts_to_scanned_image_region_crops(
+        infos=[info],
+        render_path=render_path,
+        page_h_pt=120.0,
+        scanned_render_dpi=72,
+        ocr_text_elements=kept,
+    )
+
+    crop = Image.open(info.crop_path).convert("RGBA")
+    assert crop.getpixel((22, 40))[3] == 0
+    assert crop.getpixel((50, 40))[3] == 255
+
+
 def test_build_scanned_image_region_infos_trusts_explicit_image_regions(
     tmp_path,
 ) -> None:

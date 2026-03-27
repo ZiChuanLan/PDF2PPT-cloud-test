@@ -37,6 +37,7 @@ from .font_utils import (
 )
 from .preview import _export_final_preview_page_image
 from .scanned_page import (
+    _apply_text_cutouts_to_scanned_image_region_crops,
     _build_scanned_image_region_infos,
     _clear_regions_for_transparent_crops,
     _dedupe_scanned_ocr_text_elements,
@@ -1122,6 +1123,13 @@ def generate_pptx_from_ir(
                 ocr_text_elements=ocr_text_elements,
                 baseline_ocr_h_pt=float(baseline_ocr_h_pt),
             )
+            overlay_image_region_infos = _apply_text_cutouts_to_scanned_image_region_crops(
+                infos=overlay_image_region_infos,
+                render_path=render_path,
+                page_h_pt=page_h_pt,
+                scanned_render_dpi=int(scanned_render_dpi),
+                ocr_text_elements=ocr_text_elements,
+            )
 
             # Build editable text items for scanned-page overlay. We first erase
             # OCR text in the rendered background image, then place cropped images
@@ -1129,6 +1137,8 @@ def generate_pptx_from_ir(
 
             text_erase_bboxes_pt: list[list[float]] = []
             text_erase_polygons_pt: list[list[list[float]] | None] = []
+            kept_text_erase_bboxes_pt: list[list[float]] = []
+            kept_text_erase_polygons_pt: list[list[list[float]] | None] = []
             text_items: list[
                 tuple[dict[str, Any], list[float], str, tuple[int, int, int]]
             ] = []
@@ -1209,12 +1219,17 @@ def generate_pptx_from_ir(
                 text_erase_bboxes_pt.append(
                     [x0 - pad_x_pt, y0 - pad_y_pt, x1 + pad_x_pt, y1 + pad_y_pt]
                 )
-                text_erase_polygons_pt.append(
+                text_polygon = (
                     el.get("ocr_layout_geometry_points_pt")
                     if str(el.get("ocr_layout_geometry_kind") or "").strip().lower()
                     == "polygon"
                     else None
                 )
+                text_erase_polygons_pt.append(text_polygon)
+                kept_text_erase_bboxes_pt.append(
+                    [x0 - pad_x_pt, y0 - pad_y_pt, x1 + pad_x_pt, y1 + pad_y_pt]
+                )
+                kept_text_erase_polygons_pt.append(text_polygon)
 
                 text_items.append((el, [x0, y0, x1, y1], text, bg_rgb))
 
@@ -1337,6 +1352,23 @@ def generate_pptx_from_ir(
                         clear_expand_max_pt=image_bg_clear_expand_max_pt_id,
                         clear_expand_ratio=image_bg_clear_expand_ratio_id,
                     )
+
+            if kept_text_erase_bboxes_pt:
+                # After image-region cleanup, run one more local text wipe for the
+                # OCR lines that will remain editable in PPT. This removes any
+                # residual background glyphs revealed by polygon crop cutouts.
+                cleaned_render_path = _erase_regions_in_render_image(
+                    cleaned_render_path,
+                    out_path=artifacts
+                    / "page_renders"
+                    / f"page-{page_index:04d}.clean.text-overlay.png",
+                    erase_bboxes_pt=list(kept_text_erase_bboxes_pt),
+                    erase_polygons_pt=list(kept_text_erase_polygons_pt),
+                    protect_bboxes_pt=None,
+                    page_height_pt=page_h_pt,
+                    dpi=int(scanned_render_dpi),
+                    text_erase_mode=text_erase_mode_id,
+                )
 
             slide.shapes.add_picture(
                 str(cleaned_render_path),

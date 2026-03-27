@@ -1759,6 +1759,85 @@ def _geometry_points_signature(
     return tuple(signature)
 
 
+def _project_polygon_points_pt_to_local_crop(
+    points_pt: list[list[float]] | None,
+    *,
+    crop_x0_px: int,
+    crop_y0_px: int,
+    crop_width_px: int,
+    crop_height_px: int,
+    page_h_pt: float,
+    scanned_render_dpi: int,
+    image_width_px: int,
+    image_height_px: int,
+) -> list[tuple[int, int]] | None:
+    if not points_pt or crop_width_px <= 0 or crop_height_px <= 0:
+        return None
+
+    polygon_px = _polygon_points_pt_to_px(
+        points_pt,
+        page_height_pt=page_h_pt,
+        dpi=int(scanned_render_dpi),
+        width_px=int(image_width_px),
+        height_px=int(image_height_px),
+    )
+    if polygon_px is None:
+        return None
+
+    local_points: list[tuple[int, int]] = []
+    for px, py in polygon_px:
+        coord = (
+            max(0, min(int(crop_width_px - 1), int(px - crop_x0_px))),
+            max(0, min(int(crop_height_px - 1), int(py - crop_y0_px))),
+        )
+        if local_points and coord == local_points[-1]:
+            continue
+        local_points.append(coord)
+
+    if len({point for point in local_points}) < 3:
+        return None
+    return local_points
+
+
+def _project_bbox_pt_to_local_crop_rect(
+    bbox_pt: list[float],
+    *,
+    crop_x0_px: int,
+    crop_y0_px: int,
+    crop_width_px: int,
+    crop_height_px: int,
+    page_h_pt: float,
+    scanned_render_dpi: int,
+    pad_x_pt: float = 0.0,
+    pad_y_pt: float = 0.0,
+) -> tuple[int, int, int, int] | None:
+    try:
+        x0, y0, x1, y1 = _coerce_bbox_pt(bbox_pt)
+    except Exception:
+        return None
+
+    x0p, y0p = _pdf_pt_to_pix_px(
+        x0 - float(pad_x_pt),
+        y0 - float(pad_y_pt),
+        page_height_pt=page_h_pt,
+        dpi=int(scanned_render_dpi),
+    )
+    x1p, y1p = _pdf_pt_to_pix_px(
+        x1 + float(pad_x_pt),
+        y1 + float(pad_y_pt),
+        page_height_pt=page_h_pt,
+        dpi=int(scanned_render_dpi),
+    )
+
+    lx0 = max(0, min(int(crop_width_px - 1), int(math.floor(x0p - crop_x0_px))))
+    ly0 = max(0, min(int(crop_height_px - 1), int(math.floor(y0p - crop_y0_px))))
+    lx1 = max(0, min(int(crop_width_px), int(math.ceil(x1p - crop_x0_px))))
+    ly1 = max(0, min(int(crop_height_px), int(math.ceil(y1p - crop_y0_px))))
+    if lx1 <= lx0 or ly1 <= ly0:
+        return None
+    return (lx0, ly0, lx1, ly1)
+
+
 def _save_scanned_image_region_crop(
     *,
     img: Any,
@@ -1767,9 +1846,11 @@ def _save_scanned_image_region_crop(
     page_h_pt: float,
     scanned_render_dpi: int,
     geometry_points_pt: list[list[float]] | None = None,
+    exclude_bboxes_pt: list[list[float]] | None = None,
+    exclude_polygons_pt: list[list[list[float]]] | None = None,
 ) -> bool:
     try:
-        from PIL import ImageDraw, ImageFilter
+        from PIL import Image, ImageChops, ImageDraw
     except Exception:
         return False
 
@@ -1798,34 +1879,81 @@ def _save_scanned_image_region_crop(
         return False
 
     crop = img.crop((x0p, y0p, x1p, y1p))
-    if geometry_points_pt:
-        polygon_px = _polygon_points_pt_to_px(
-            geometry_points_pt,
-            page_height_pt=page_h_pt,
-            dpi=int(scanned_render_dpi),
-            width_px=int(img.width),
-            height_px=int(img.height),
-        )
-        if polygon_px is not None:
-            local_points: list[tuple[int, int]] = []
-            for px, py in polygon_px:
-                coord = (
-                    max(0, min(int(crop.width - 1), int(px - x0p))),
-                    max(0, min(int(crop.height - 1), int(py - y0p))),
+    local_polygon_points = _project_polygon_points_pt_to_local_crop(
+        geometry_points_pt,
+        crop_x0_px=x0p,
+        crop_y0_px=y0p,
+        crop_width_px=int(crop.width),
+        crop_height_px=int(crop.height),
+        page_h_pt=page_h_pt,
+        scanned_render_dpi=int(scanned_render_dpi),
+        image_width_px=int(img.width),
+        image_height_px=int(img.height),
+    )
+    has_text_cutouts = bool(exclude_bboxes_pt) or bool(exclude_polygons_pt)
+    if local_polygon_points is not None or has_text_cutouts:
+        crop = crop.convert("RGBA")
+        mask = crop.getchannel("A")
+        if local_polygon_points is not None:
+            mask.paste(0, (0, 0, crop.width, crop.height))
+            ImageDraw.Draw(mask).polygon(local_polygon_points, fill=255)
+            mask = _apply_max_filter_l(mask, size=3)
+        else:
+            mask.paste(255, (0, 0, crop.width, crop.height))
+
+        if has_text_cutouts:
+            cutout_mask = Image.new("L", (crop.width, crop.height), 0)
+            draw_cutout = ImageDraw.Draw(cutout_mask)
+
+            for points_pt in exclude_polygons_pt or []:
+                local_points = _project_polygon_points_pt_to_local_crop(
+                    points_pt,
+                    crop_x0_px=x0p,
+                    crop_y0_px=y0p,
+                    crop_width_px=int(crop.width),
+                    crop_height_px=int(crop.height),
+                    page_h_pt=page_h_pt,
+                    scanned_render_dpi=int(scanned_render_dpi),
+                    image_width_px=int(img.width),
+                    image_height_px=int(img.height),
                 )
-                if local_points and coord == local_points[-1]:
+                if local_points is None:
                     continue
-                local_points.append(coord)
-            if len({point for point in local_points}) >= 3:
-                crop = crop.convert("RGBA")
-                mask = crop.getchannel("A")
-                mask.paste(0, (0, 0, crop.width, crop.height))
-                ImageDraw.Draw(mask).polygon(local_points, fill=255)
+                draw_cutout.polygon(local_points, fill=255)
+
+            for text_bbox_pt in exclude_bboxes_pt or []:
                 try:
-                    mask = mask.filter(ImageFilter.MaxFilter(3))
+                    tx0, ty0, tx1, ty1 = _coerce_bbox_pt(text_bbox_pt)
                 except Exception:
-                    pass
-                crop.putalpha(mask)
+                    continue
+                bbox_h_pt = max(1.0, float(ty1 - ty0))
+                pad_x_pt, pad_y_pt = _compute_text_erase_padding_pt(
+                    bbox_h_pt=bbox_h_pt,
+                    text_erase_mode="fill",
+                )
+                local_rect = _project_bbox_pt_to_local_crop_rect(
+                    [tx0, ty0, tx1, ty1],
+                    crop_x0_px=x0p,
+                    crop_y0_px=y0p,
+                    crop_width_px=int(crop.width),
+                    crop_height_px=int(crop.height),
+                    page_h_pt=page_h_pt,
+                    scanned_render_dpi=int(scanned_render_dpi),
+                    pad_x_pt=pad_x_pt,
+                    pad_y_pt=pad_y_pt,
+                )
+                if local_rect is None:
+                    continue
+                lx0, ly0, lx1, ly1 = local_rect
+                draw_cutout.rectangle(
+                    [lx0, ly0, max(lx0, lx1 - 1), max(ly0, ly1 - 1)],
+                    fill=255,
+                )
+
+            cutout_mask = _apply_max_filter_l(cutout_mask, size=3)
+            mask = ImageChops.subtract(mask, cutout_mask)
+
+        crop.putalpha(mask)
 
     try:
         _ensure_parent_dir(crop_out_path)
@@ -3766,3 +3894,78 @@ def _filter_scanned_ocr_text_elements(
             filtered.append(el)
 
     return filtered
+
+
+def _apply_text_cutouts_to_scanned_image_region_crops(
+    *,
+    infos: list[_ScannedImageRegionInfo],
+    render_path: Path,
+    page_h_pt: float,
+    scanned_render_dpi: int,
+    ocr_text_elements: list[dict[str, Any]],
+) -> list[_ScannedImageRegionInfo]:
+    if not infos or not ocr_text_elements:
+        return infos
+
+    try:
+        from PIL import Image
+    except Exception:
+        return infos
+
+    try:
+        img = Image.open(render_path).convert("RGB")
+    except Exception:
+        return infos
+
+    for info in infos:
+        if not (bool(info.ai_hint) or bool(info.geometry_points_pt)):
+            continue
+
+        cutout_bboxes_pt: list[list[float]] = []
+        cutout_polygons_pt: list[list[list[float]]] = []
+        for el in ocr_text_elements:
+            bbox_pt = el.get("bbox_pt") if isinstance(el, dict) else None
+            if not isinstance(bbox_pt, list) or len(bbox_pt) != 4:
+                continue
+            try:
+                tx0, ty0, tx1, ty1 = _coerce_bbox_pt(bbox_pt)
+            except Exception:
+                continue
+            if _bbox_intersection_area_pt([tx0, ty0, tx1, ty1], info.bbox_pt) <= 0.0:
+                continue
+
+            text_polygon = (
+                el.get("ocr_layout_geometry_points_pt")
+                if str(el.get("ocr_layout_geometry_kind") or "").strip().lower()
+                == "polygon"
+                else None
+            )
+            if isinstance(text_polygon, list) and text_polygon:
+                normalized_polygon = [
+                    [float(point[0]), float(point[1])]
+                    for point in text_polygon
+                    if isinstance(point, list) and len(point) >= 2
+                ]
+                if len(normalized_polygon) >= 3:
+                    cutout_polygons_pt.append(normalized_polygon)
+                    continue
+            cutout_bboxes_pt.append([float(tx0), float(ty0), float(tx1), float(ty1)])
+
+        if not cutout_bboxes_pt and not cutout_polygons_pt:
+            continue
+
+        try:
+            _save_scanned_image_region_crop(
+                img=img,
+                bbox_pt=info.bbox_pt,
+                crop_out_path=info.crop_path,
+                page_h_pt=page_h_pt,
+                scanned_render_dpi=int(scanned_render_dpi),
+                geometry_points_pt=info.geometry_points_pt,
+                exclude_bboxes_pt=cutout_bboxes_pt,
+                exclude_polygons_pt=cutout_polygons_pt,
+            )
+        except Exception:
+            continue
+
+    return infos
