@@ -27,7 +27,21 @@
 | 项目 | 地址 / 信息 |
 | --- | --- |
 | 演示站点 | <https://ppt.015201314.xyz/> |
-| 访问密码 | `lanPDF2PPT2026!` |
+| 访问密码 | `123456` |
+
+> [!WARNING]
+> 请 **不要** 上传 工作文档，避免隐私泄露。
+
+
+## 界面预览
+
+| 跟踪页面 | 任务记录 |
+| --- | --- |
+| ![PDF2PPT 跟踪页面](https://i.postimg.cc/pVshZ5t5/gen-zong-ye-mian.png) | ![PDF2PPT 任务记录](https://i.postimg.cc/3rt4B0Hy/ren-wu-ji-lu.png) |
+
+| AIOCR 设置 | 云端 MinerU 设置 |
+| --- | --- |
+| ![PDF2PPT AIOCR 设置](https://i.postimg.cc/CMcBNnVq/she-zhi-aiocr.png) | ![PDF2PPT 云端 MinerU 设置](https://i.postimg.cc/gcgXDLPR/she-zhi-yun-duanmineru.png) |
 
 ## 介绍
 
@@ -60,15 +74,6 @@
 - 提供 Web 上传、任务跟踪、结果下载和 API 接入
 - 支持标准 Docker 部署、Hosted 单服务模式、Render 和 Zeabur
 
-## 界面预览
-
-| 跟踪页面 | 任务记录 |
-| --- | --- |
-| ![PDF2PPT 跟踪页面](https://i.postimg.cc/pVshZ5t5/gen-zong-ye-mian.png) | ![PDF2PPT 任务记录](https://i.postimg.cc/3rt4B0Hy/ren-wu-ji-lu.png) |
-
-| AIOCR 设置 | 云端 MinerU 设置 |
-| --- | --- |
-| ![PDF2PPT AIOCR 设置](https://i.postimg.cc/CMcBNnVq/she-zhi-aiocr.png) | ![PDF2PPT 云端 MinerU 设置](https://i.postimg.cc/gcgXDLPR/she-zhi-yun-duanmineru.png) |
 
 ## 快速开始
 
